@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import {
   AGENTS, INITIAL_FEED, SUPPLIERS, TICKER, decide, shortHash,
   type AgentId, type FeedItem,
@@ -17,6 +17,7 @@ const ago = (t: number) => {
   return mnt < 60 ? `${mnt}m ago` : `${Math.round(mnt / 60)}h ago`;
 };
 const agentOf = (id: AgentId) => AGENTS.find((a) => a.id === id)!;
+const st = (i: number) => ({ ["--i"]: i }) as CSSProperties;
 
 export default function App() {
   const [view, setView] = useState<View>("overview");
@@ -116,10 +117,10 @@ function Overview({ feed, pending, frozen, onGo }: {
   return (
     <div className="stack">
       <div className="tiles">
-        <div className="tile"><div className="k">Pending</div><div className={`v ${pending.length ? "warn" : ""}`}>{pending.length}</div></div>
-        <div className="tile"><div className="k">Decisions today</div><div className="v">{today.length}</div></div>
-        <div className="tile"><div className="k">Blocked today</div><div className={`v ${denied ? "bad" : ""}`}>{denied}</div></div>
-        <div className="tile"><div className="k">Spent today</div><div className="v">{fmt(spent)}</div></div>
+        <div className="tile rise" style={st(0)}><div className="k">Pending</div><div className={`v ${pending.length ? "warn" : ""}`}>{pending.length}</div></div>
+        <div className="tile rise" style={st(1)}><div className="k">Decisions today</div><div className="v">{today.length}</div></div>
+        <div className="tile rise" style={st(2)}><div className="k">Blocked today</div><div className={`v ${denied ? "bad" : ""}`}>{denied}</div></div>
+        <div className="tile rise" style={st(3)}><div className="k">Spent today</div><div className="v">{fmt(spent)}</div></div>
       </div>
 
       <div className="grid2">
@@ -148,9 +149,10 @@ function Overview({ feed, pending, frozen, onGo }: {
         </div>
       </div>
 
-      <div className="card">
-        <div className="hd"><h2>Recent activity</h2><span className="sub" onClick={() => onGo("activity")} style={{ cursor: "pointer" }}>full log →</span></div>
+      <div className="card rise" style={st(2)}>
+        <div className="hd"><h2>Decision log</h2><span className="sub" onClick={() => onGo("activity")} style={{ cursor: "pointer" }}>full log →</span></div>
         <LogRows feed={feed.slice(0, 6)} />
+        <div className="log-foot"><span><span className="sigdot" /> signed · ed25519</span><span>head {feed[0]?.hash}</span></div>
       </div>
     </div>
   );
@@ -170,7 +172,7 @@ function Approvals({ pending, member, onAct, resolvedCount }: {
   return (
     <div>
       <p className="section-title">Facts first — the agent's reason is shown separately and labeled untrusted.</p>
-      {pending.map((f) => <ApprovalCard key={f.id} f={f} member={member} onAct={onAct} />)}
+      {pending.map((f, i) => <div className="rise" style={st(i)} key={f.id}><ApprovalCard f={f} member={member} onAct={onAct} /></div>)}
     </div>
   );
 }
@@ -219,10 +221,10 @@ function ApprovalCard({ f, member, onAct }: { f: FeedItem; member: string; onAct
 function Agents({ frozen, feed }: { frozen: boolean; feed: FeedItem[] }) {
   return (
     <div className="grid2">
-      {AGENTS.map((a) => {
+      {AGENTS.map((a, i) => {
         const count = feed.filter((f) => f.agent === a.id).length;
         return (
-          <div className={`agent ${frozen ? "frozen" : ""}`} key={a.id}>
+          <div className={`agent rise ${frozen ? "frozen" : ""}`} style={st(i)} key={a.id}>
             <div className="top">
               <span className="emoji">{a.emoji}</span>
               <div><div className="name">{a.name}</div><div className="job">{a.job}</div></div>
@@ -300,17 +302,28 @@ function Activity({ feed }: { feed: FeedItem[] }) {
   );
 }
 
+const GLYPH = { allow: "✓", deny: "✕", approval: "◷" } as const;
+const toolTag = (f: FeedItem) =>
+  f.request.tool === "file" ? (f.request.fileOp === "write" ? "file_write" : "file_read") : f.request.tool;
+
 function LogRows({ feed, full }: { feed: FeedItem[]; full?: boolean }) {
   return (
-    <div className="log">
-      {feed.map((f) => (
-        <div className="item" key={f.id}>
-          <span className="t">{ago(f.at)}</span>
-          <span className={`chip ${f.decision.outcome}`}>{f.decision.outcome === "approval" ? "approve" : f.decision.outcome}</span>
-          <span className="act"><span className="ag">{agentOf(f.agent).emoji} {f.agent}:</span> {f.label}</span>
-          {full ? <span className="rule">{f.decision.ruleId}</span> : <span className="hash">{f.hash}</span>}
-        </div>
-      ))}
+    <div className="gk">
+      {feed.map((f) => {
+        const o = f.decision.outcome;
+        return (
+          <div className={`item ${Date.now() - f.at < 1500 ? "fresh" : ""}`} key={f.id}>
+            <span className="caret">›</span>
+            <span className="tool">{toolTag(f)}</span>
+            <span className={`act ${o === "deny" ? "denied" : ""}`}>
+              <span className="ag">{agentOf(f.agent).emoji} {f.agent} ·</span> {f.label}
+            </span>
+            <span className={`chip ${o}`}><span className="g">{GLYPH[o]}</span>{o === "approval" ? "require approval" : o}</span>
+            <span className="pol">{f.decision.ruleId}</span>
+            {full ? <span className="t">{ago(f.at)}</span> : <span className="log">{f.hash}</span>}
+          </div>
+        );
+      })}
     </div>
   );
 }

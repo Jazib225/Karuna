@@ -163,3 +163,52 @@ button { font-family: inherit; }
 
 .empty { padding: 2.5rem; text-align: center; color: var(--n500); font-size: .9rem; }
 .stack > * + * { margin-top: 1.2rem; }
+
+/* ============ gatekeeper look + motion (from the screencast) ============ */
+/* entrance: cards rise+fade, staggered via --i */
+@keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+.rise { animation: fadeUp .5s var(--ease) both; animation-delay: calc(var(--i, 0) * 60ms); }
+
+/* streaming decision rows */
+@keyframes streamIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
+
+/* verdict chips — match the video: ALLOW filled black, DENY/APPROVE outline */
+.chip { border: 1px solid var(--line-strong); background: #fff; color: var(--n700);
+  display: inline-flex; align-items: center; gap: .3rem; font-family: var(--font-mono);
+  font-size: .68rem; font-weight: 500; padding: .14rem .5rem; border-radius: var(--radius-md); white-space: nowrap; }
+.chip .g { font-size: .7rem; line-height: 1; }
+.chip.allow { background: var(--black); color: #fff; border-color: var(--black); }
+.chip.deny { color: var(--deny); border-color: #d1453b55; }
+.chip.approval { color: var(--approve); border-color: #c07f1a55; }
+
+/* gatekeeper decision stream */
+.gk { font-family: var(--font-mono); font-size: .82rem; }
+.gk .item {
+  display: grid; grid-template-columns: 14px 64px 1fr auto auto auto; gap: .7rem; align-items: center;
+  padding: .55rem 1.1rem; border-top: 1px solid var(--n100);
+}
+.gk .item:first-child { border-top: none; }
+.gk .item.fresh { animation: streamIn .45s var(--ease); }
+.gk .caret { color: var(--n300); }
+.gk .tool { color: var(--n400); font-size: .74rem; }
+.gk .act { color: var(--n700); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gk .act .ag { color: var(--n400); }
+.gk .act.denied { text-decoration: line-through; color: var(--n400); text-decoration-color: var(--n300); }
+.gk .pol { color: var(--n400); font-size: .74rem; }
+.gk .log { color: var(--n300); font-size: .72rem; }
+.gk .t { color: var(--n400); font-size: .72rem; text-align: right; }
+@media (max-width: 760px) {
+  .gk .item { grid-template-columns: 56px 1fr auto; }
+  .gk .caret, .gk .pol, .gk .t { display: none; }
+}
+
+/* floating signed decision-log card (overview) */
+.declog { position: relative; }
+.declog .sig { position: absolute; top: .7rem; right: 1.1rem; font-family: var(--font-mono); font-size: .7rem; color: var(--n400); display: flex; align-items: center; gap: .35rem; }
+.declog .sig .d { width: 7px; height: 7px; border-radius: 50%; background: var(--allow); box-shadow: 0 0 0 3px var(--allow-bg); }
+
+/* smooth value motion */
+.tile .v, .amt { transition: color .2s var(--ease); }
+.nav a, .btn, .panic, .switch { will-change: transform; }
+
+.sigdot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--allow); box-shadow: 0 0 0 3px var(--allow-bg); margin-right: .4rem; vertical-align: middle; }
