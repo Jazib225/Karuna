@@ -141,6 +141,8 @@ export class Gatekeeper extends EventEmitter {
   readonly log: SignedLog;
   policy: OnchainPolicy | null = null;
   deploying = false;
+  /** When the relay last reported a Dharma event (QuickNode Stream or its RPC fallback). */
+  lastChainEventAt = 0;
   private executing = new Set<string>();
   private writes: Promise<unknown> = Promise.resolve();
   private executeTried = new Map<number, number>();
@@ -770,6 +772,7 @@ export class Gatekeeper extends EventEmitter {
     return {
       setUp: isSetUp(this.org),
       deploying: this.deploying,
+      lastChainEventAt: this.lastChainEventAt || null,
       org: {
         name: this.org.name,
         wallet: this.org.wallet,

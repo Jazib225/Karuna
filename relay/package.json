@@ -1,0 +1,24 @@
+{
+  "name": "@prekaruna/relay",
+  "private": true,
+  "type": "module",
+  "description": "QuickNode Streams -> verified Dharma events -> every member's console (WebSocket) + Gatekeeper refresh. Direct-RPC fallback.",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "test": "vitest run",
+    "stream:create": "tsx scripts/create-stream.ts"
+  },
+  "dependencies": {
+    "@prekaruna/dharma": "workspace:*",
+    "dotenv": "^18.0.10",
+    "viem": "2.57.17",
+    "ws": "^8.22.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/ws": "^8.18.2",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  }
+}

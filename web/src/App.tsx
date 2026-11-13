@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import type { Address } from "viem";
 import type { PrivateKeyAccount } from "viem/accounts";
 import { isTightening, isAddr, type Change } from "@prekaruna/dharma";
 import { api, useGatekeeper, type AgentView, type Governance, type LogEntry, type Proposal, type Rule, type Snapshot, type WalletInfo } from "./api.ts";
 import { Kind, SignerUnavailable, decidePayment, loadSigner, submitChange } from "./signer.ts";
+import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
+import { keccak256, stringToHex } from "viem";
 
 type View = "overview" | "approvals" | "dharma" | "agents" | "payees" | "policy" | "activity" | "team";
 const TITLES: Record<View, string> = {
@@ -80,7 +82,7 @@ export default function App() {
   else if (!s.setUp) body = <Setup s={s} me={signer.me} run={run} busy={busy} />;
   else if (!s.policy) body = <div className="center muted">Reading Dharma from Arc…</div>;
   else if (!s.policy.members.some((m) => m.address === signer.me!.address.toLowerCase())) body = <Join s={s} me={signer.me} run={run} />;
-  else body = <Console s={s} log={gk.log} wallet={gk.wallet} run={run} busy={busy} me={signer.me} offline={gk.offline} />;
+  else body = <Console s={s} log={gk.log} wallet={gk.wallet} run={run} busy={busy} me={signer.me} offline={gk.offline} refresh={gk.refresh} />;
 
   return (
     <>
@@ -222,7 +224,7 @@ interface Ctx {
   name: (address?: string | null) => string;
 }
 
-function Console({ s, log, wallet, run, busy, me, offline }: { s: Snapshot; log: LogEntry[]; wallet: WalletInfo | null; run: Run; busy: boolean; me: PrivateKeyAccount; offline: string | null }) {
+function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snapshot; log: LogEntry[]; wallet: WalletInfo | null; run: Run; busy: boolean; me: PrivateKeyAccount; offline: string | null; refresh: () => Promise<void> }) {
   const [view, setView] = useState<View>(() => {
     try {
       return (localStorage.getItem("karuna.view") as View) || "overview";
@@ -260,6 +262,21 @@ function Console({ s, log, wallet, run, busy, me, offline }: { s: Snapshot; log:
     vote: (g, support) => run(() => submitChange(me, dharma, { kind: Kind.Vote, change: g.change as Change, proposalId: g.id, support }), support ? "Vote recorded" : "Voted against"),
   };
 
+  // ---- live chain alerts (QuickNode Stream -> relay -> every member's screen)
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const sRef = useRef(s);
+  sRef.current = s;
+  const live = useRelay((events) => {
+    void refresh();
+    const now = Date.now();
+    setAlerts((prev) => [...events.map((e) => toAlert(e, sRef.current, name)).filter((a): a is Omit<Alert, "at"> => !!a).map((a) => ({ ...a, at: now })), ...prev].slice(0, 6));
+  });
+  useEffect(() => {
+    const t = setInterval(() => setAlerts((prev) => prev.filter((a) => a.sticky || Date.now() - a.at < 8000)), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const dismiss = (id: string) => setAlerts((prev) => prev.filter((a) => a.id !== id));
+
   const pending = s.proposals.filter((p) => p.status === "pending");
   const ballots = pol.proposals.filter((g) => g.status === "open" && !g.voters.includes(myAddr));
   const frozen = s.frozen || null;
@@ -293,6 +310,7 @@ function Console({ s, log, wallet, run, busy, me, offline }: { s: Snapshot; log:
         <header className="topbar">
           <h1>{TITLES[view]}</h1>
           <div className="right">
+            <LiveBadge mode={live.mode} />
             <span className={`status ${frozen || offline ? "frozen" : ""}`}>
               <span className="d" /> {offline ? "gatekeeper offline" : frozen ? "all agents frozen" : (() => {
                 const n = pol.agents.filter((a) => a.active).length;
@@ -313,6 +331,20 @@ function Console({ s, log, wallet, run, busy, me, offline }: { s: Snapshot; log:
             )}
           </div>
         </header>
+
+        <div className="alerts">
+          {alerts.map((a) => (
+            <div key={a.id} className={`alert ${a.tone}`}>
+              <div className="alert-top">
+                <b>{a.title}</b>
+                <span className="via">{a.source === "quicknode" ? "via QuickNode" : "via Arc RPC"}</span>
+                <button className="alert-x" aria-label="Dismiss" onClick={() => dismiss(a.id)}>×</button>
+              </div>
+              <div className="alert-body">{a.body}</div>
+              {a.go && <button className="alert-cta" onClick={() => { setView(a.go!); dismiss(a.id); }}>{a.cta ?? "Open"} →</button>}
+            </div>
+          ))}
+        </div>
 
         <div className="content">
           {frozen && (
@@ -931,4 +963,59 @@ function Team({ ctx }: { ctx: Ctx }) {
       </div>
     </div>
   );
+}
+
+// ============================================================== live alerts
+
+interface Alert {
+  id: string;
+  title: string;
+  body: string;
+  tone: "warn" | "bad" | "ok" | "info";
+  sticky: boolean;
+  go?: View;
+  cta?: string;
+  source: ChainEvent["source"];
+  at: number;
+}
+
+function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string): Omit<Alert, "at"> | null {
+  const a = e.args;
+  const pol = s.policy;
+  const agentName = (id: unknown) => pol?.agents.find((x) => x.id === id)?.name ?? String(id ?? "an agent");
+  const gov = (id: unknown) => pol?.proposals.find((g) => String(g.id) === String(id));
+  const base = { id: e.id, source: e.source };
+  switch (e.event) {
+    case "ApprovalRequested": {
+      const p = s.proposals.find((x) => keccak256(stringToHex(x.id)) === String(a.requestId));
+      const who = p?.facts.find((f) => f.label === "Recipient" || f.label === "Seller")?.value;
+      return { ...base, tone: "warn", sticky: true, go: "approvals", cta: "Review", title: "Approval needed",
+        body: `${agentName(a.agent)} wants to pay $${Number(a.amountUsd).toFixed(2)}${who ? ` to ${who}` : ""}` };
+    }
+    case "AgentFrozen":
+      return { ...base, tone: "bad", sticky: true, title: "All agents frozen", body: `${name(String(a.by))} hit the panic button. Recorded on Dharma.` };
+    case "AgentsUnfrozen":
+      return { ...base, tone: "ok", sticky: false, title: "Agents unfrozen", body: "The vote passed and the timelock ended." };
+    case "ProposalCreated":
+      return { ...base, tone: "info", sticky: true, go: "dharma", cta: "Vote", title: `New Dharma proposal #${a.id}`, body: `${name(String(a.proposer))}: ${gov(a.id)?.description ?? "a policy change"}` };
+    case "VoteCast":
+      return { ...base, tone: "info", sticky: false, title: `Vote on #${a.id}`, body: `${name(String(a.voter))} voted ${a.support ? "yes" : "no"} (${a.yes} yes · ${a.no} no)` };
+    case "ProposalQueued":
+      return { ...base, tone: "ok", sticky: false, go: "dharma", title: `Proposal #${a.id} passed`, body: "Takes effect after the timelock." };
+    case "ProposalExecuted":
+      return { ...base, tone: "ok", sticky: false, title: `Proposal #${a.id} is in effect`, body: gov(a.id)?.description ?? "Policy updated." };
+    case "ProposalDefeated":
+      return { ...base, tone: "info", sticky: false, title: `Proposal #${a.id} defeated`, body: gov(a.id)?.description ?? "" };
+    case "RuleAdded":
+      return { ...base, tone: "info", sticky: false, title: "Rule added", body: `${String(a.id)} — in effect now` };
+    case "TestFailed":
+      return { ...base, tone: "bad", sticky: true, title: "Agent failed a scam test", body: `${agentName(a.agent)} · ${String(a.category)} payments are now blocked for it.` };
+    default:
+      return null; // anchors, payee/domain changes etc. update the screen without a pop-up
+  }
+}
+
+function LiveBadge({ mode }: { mode: LiveMode }) {
+  const label = mode === "quicknode" ? "QuickNode live" : mode === "rpc" ? "Arc RPC (fallback)" : mode === "connecting" ? "connecting…" : "relay offline";
+  return <span className={`live ${mode}`} title="Where live chain events come from"><span className="d" /> {label}</span>;
 }

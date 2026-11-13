@@ -22,6 +22,12 @@ export default defineConfig({
     port: Number(process.env.KARUNA_WEB_PORT ?? 5173),
     strictPort: true,
     proxy: {
+      // Live chain events (QuickNode Stream -> relay). Read-only, public chain data.
+      "/relay": {
+        target: `http://127.0.0.1:${process.env.RELAY_PORT ?? 8790}`,
+        ws: true,
+        changeOrigin: true,
+      },
       "/api": {
         target: `http://127.0.0.1:${process.env.KARUNA_CONSOLE_PORT ?? 8788}`,
         changeOrigin: true,

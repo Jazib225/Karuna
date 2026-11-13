@@ -130,6 +130,12 @@ export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: 
       let m: RegExpMatchArray | null;
 
       if (method === "GET" && (m = path.match(/^\/dharma\/nonce\/(0x[0-9a-fA-F]{40})$/))) return send(res, 200, { nonce: String(await gk.nonceOf(m[1])) });
+      if (method === "POST" && path === "/chain-event") {
+        // The relay saw a Dharma event (QuickNode Stream or direct RPC): re-read policy now.
+        gk.lastChainEventAt = Date.now();
+        await gk.sync(true).catch(() => undefined);
+        return send(res, 200, { ok: true });
+      }
       if (method === "POST" && path === "/setup") return send(res, 200, await gk.setup(body as never));
       if (method === "PATCH" && path === "/settings") return send(res, 200, (gk.renameOrg(body.orgName), { ok: true }));
       if (method === "POST" && path === "/dharma/action") return send(res, 200, await gk.submitAction(body as unknown as SignedAction));

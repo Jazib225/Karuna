@@ -93,6 +93,37 @@ importers:
         specifier: 3.2.4
         version: 3.2.4(@types/node@26.6.6)(tsx@4.23.15)
 
+  relay:
+    dependencies:
+      '@prekaruna/dharma':
+        specifier: workspace:*
+        version: link:../contracts
+      dotenv:
+        specifier: ^18.0.10
+        version: 18.0.10
+      viem:
+        specifier: 2.57.17
+        version: 2.57.17(typescript@5.9.3)(zod@4.6.7)
+      ws:
+        specifier: ^8.22.2
+        version: 8.22.2
+    devDependencies:
+      '@types/node':
+        specifier: ^26.6.6
+        version: 26.6.6
+      '@types/ws':
+        specifier: ^8.18.2
+        version: 8.18.2
+      tsx:
+        specifier: 4.23.15
+        version: 4.23.15
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 3.2.4
+        version: 3.2.4(@types/node@26.6.6)(tsx@4.23.15)
+
   services/test-seller:
     dependencies:
       '@circle-fin/x402-batching':
@@ -802,6 +833,9 @@ packages:
 
   '@types/serve-static@2.2.0':
     resolution: {integrity: sha512-8mam4H1NHLtu7nmtalF7eyBH14QyOASmcxHhSfEoRyr0nP/YdoesEtU+uSRvMe96TW/HPTtkoKqQLl53N7UXMQ==}
+
+  '@types/ws@8.18.2':
+    resolution: {integrity: sha512-67MQl+fpWKVTT1NYdnmo3U4sc/xPo/zQBncVnI74qmQa0z/b+1g6iYqNmGCPbxO+zz2aklb08a0oHfegiVd0/w==}
 
   '@typescript/typescript-aix-ppc64@7.0.2':
     resolution: {integrity: sha512-MTKKkWB7p/0E9xi1d1tHtZ5PiLkGEMIq88pK2CubZjOsLtYTLqhgIgi6zepFa+9GHZ6h05NMCkQxGKiPXMxXtQ==}
@@ -1581,6 +1615,18 @@ packages:
       utf-8-validate:
         optional: true
 
+  ws@8.22.2:
+    resolution: {integrity: sha512-/rEZ2ejown2N5gxVTHUu9bVVC7ttu0/Tgzf5hbTOixR3Fs7mbbXgn2DbdbcKgJOmpQMtrIUWivtYuVMnp/W/yA==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
+
   yallist@3.1.1:
     resolution: {integrity: sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g==}
 
@@ -2064,6 +2110,10 @@ snapshots:
   '@types/serve-static@2.2.0':
     dependencies:
       '@types/http-errors': 2.0.5
+      '@types/node': 26.6.6
+
+  '@types/ws@8.18.2':
+    dependencies:
       '@types/node': 26.6.6
 
   '@typescript/typescript-aix-ppc64@7.0.2':
@@ -2923,6 +2973,8 @@ snapshots:
   wrappy@1.0.2: {}
 
   ws@8.21.0: {}
+
+  ws@8.22.2: {}
 
   yallist@3.1.1: {}
 

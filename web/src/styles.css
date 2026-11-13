@@ -317,3 +317,24 @@ button { font-family: inherit; }
 .policy .p.off .nm { text-decoration: line-through; color: var(--n400); }
 .field select { font: inherit; font-size: .9rem; border: 1px solid var(--line-strong); border-radius: var(--radius-lg); padding: .5rem .6rem; background: #fff; }
 .who > div { line-height: 1.2; }
+
+/* ============ live chain alerts (Phase 4) ============ */
+.alerts { position: fixed; bottom: 4.6rem; right: 1.2rem; z-index: 90; display: flex; flex-direction: column-reverse; gap: .6rem; width: min(340px, calc(100vw - 2.4rem)); pointer-events: none; }
+.alert { pointer-events: auto; background: #fff; border: 1px solid var(--line); border-left: 4px solid var(--n400); border-radius: var(--radius-lg); padding: .7rem .9rem; box-shadow: var(--shadow-lift); animation: alertIn .35s var(--ease); }
+@keyframes alertIn { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: none; } }
+.alert.warn { border-left-color: var(--approve); }
+.alert.bad { border-left-color: var(--deny); background: #fff8f7; }
+.alert.ok { border-left-color: var(--allow); }
+.alert-top { display: flex; justify-content: space-between; gap: .6rem; align-items: baseline; }
+.alert-top b { font-size: .9rem; }
+.alert .via { font-family: var(--font-mono); font-size: .64rem; color: var(--n400); white-space: nowrap; }
+.alert-body { font-size: .84rem; color: var(--n600); margin-top: .2rem; }
+.alert-cta { font: inherit; font-size: .78rem; font-weight: 600; margin-top: .4rem; background: none; border: none; padding: 0; cursor: pointer; color: var(--black); }
+.alert-x { background: none; border: none; cursor: pointer; color: var(--n400); font-size: 1rem; line-height: 1; padding: 0 0 0 .2rem; }
+.alert-x:hover { color: var(--black); }
+.alert .via { margin-left: auto; }
+.live { display: inline-flex; align-items: center; gap: .4rem; font-family: var(--font-mono); font-size: .72rem; color: var(--n500); border: 1px solid var(--line); border-radius: 999px; padding: .15rem .55rem; background: #fff; }
+.live .d { width: 7px; height: 7px; border-radius: 50%; background: var(--n300); }
+.live.quicknode .d { background: var(--allow); box-shadow: 0 0 0 3px var(--allow-bg); }
+.live.rpc .d { background: var(--approve); }
+.live.offline .d, .live.none .d { background: var(--deny); }
