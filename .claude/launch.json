@@ -1,6 +1,7 @@
 {
   "version": "0.0.1",
   "configurations": [
-    { "name": "web", "runtimeExecutable": "pnpm", "runtimeArgs": ["--dir", "web", "dev"], "port": 5173 }
+    { "name": "gatekeeper", "runtimeExecutable": "pnpm", "runtimeArgs": ["--dir", "gatekeeper", "start"], "port": 8788 },
+    { "name": "web", "runtimeExecutable": "pnpm", "runtimeArgs": ["--dir", "web", "dev"], "port": 5173, "url": "http://127.0.0.1:5173" }
   ]
 }

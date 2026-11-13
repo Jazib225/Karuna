@@ -43,7 +43,7 @@ For the submission (QuickNode bounty requires "Streams as a core data source"):
 5. Destination: **Webhook** → our relay's public URL (e.g. an ngrok/Cloudflare tunnel in dev,
    `POST /quicknode/webhook`). Enable the **signing/security token** so the relay can verify it.
 6. Start the Stream. The relay verifies the signature → pushes to browsers over WebSocket →
-   Maya's and Sam's screens light up.
+   every member's console lights up.
 
 We'll record the exact config (network, dataset, filter logic, destination, and *why*) in the
 main README for the submission checklist.

@@ -1,10 +1,19 @@
-// Phase 0 "It works if": print the bakery wallet's USDC balance on Arc testnet.
+// Print a wallet's USDC balance on Arc testnet.
+//   pnpm balance <0xAddress>     any address
+//   pnpm balance                 the org's Gatekeeper wallet (from gatekeeper/data/org.json)
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { formatUnits, isAddress, type Address } from "viem";
 import { publicClient, usdcBalance, EXPLORER } from "../src/arc.ts";
 
-const addr = process.argv[2] || process.env.BAKERY_WALLET_ADDRESS;
+const here = dirname(fileURLToPath(import.meta.url));
+const orgFile = resolve(process.env.KARUNA_DATA_DIR ?? resolve(here, "../data"), "org.json");
+const fromOrg = existsSync(orgFile) ? (JSON.parse(readFileSync(orgFile, "utf8")).wallet?.address as string | undefined) : undefined;
+
+const addr = process.argv[2] || fromOrg;
 if (!addr || !isAddress(addr)) {
-  console.error("Usage: pnpm balance <0xAddress>  (or set BAKERY_WALLET_ADDRESS in .env)");
+  console.error("Usage: pnpm balance <0xAddress>   (or finish setup in the console so the org has a wallet)");
   process.exit(1);
 }
 const { raw, decimals } = await usdcBalance(addr as Address);

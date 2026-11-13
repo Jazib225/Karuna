@@ -1,0 +1,18 @@
+{
+  "name": "@prekaruna/agents",
+  "private": true,
+  "type": "module",
+  "description": "Agent-side Karuna client. Agents can only propose to the Gatekeeper — no wallet, no keys.",
+  "main": "src/client.ts",
+  "exports": {
+    ".": "./src/client.ts"
+  },
+  "scripts": {
+    "check:no-keys": "tsx scripts/check-no-keys.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}

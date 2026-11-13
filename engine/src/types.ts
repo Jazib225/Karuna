@@ -6,10 +6,11 @@ export type Outcome = "allow" | "deny" | "approval";
 
 export type Tool = "shell" | "file" | "http" | "payment" | "message";
 
-export type AgentId = "bills" | "supplies" | "research";
+/** Agent ids are chosen by each organization (e.g. "ap-agent"). */
+export type AgentId = string;
 
-/** Payment categories map to Auto-Shield block scopes, e.g. `payment:supplies`. */
-export type Category = "supplies" | "utilities" | "data" | "rent" | "misc";
+/** Payment categories are org-defined and map to Auto-Shield block scopes, e.g. `payment:<category>`. */
+export type Category = string;
 
 /** A proposed action. The only thing an agent is allowed to emit. */
 export interface Request {
@@ -32,6 +33,8 @@ export interface Request {
   to?: string; // recipient address (lowercased for lookup)
   amountUsd?: number;
   category?: Category;
+  /** transfer = direct USDC send; x402 = paying a metered service. Set by the Gatekeeper. */
+  paymentKind?: "transfer" | "x402";
 
   // message (agent-to-agent; checked like any other action — no hidden channel)
   body?: string;
@@ -48,12 +51,12 @@ export interface Request {
 export interface PolicyContext {
   /** Bare registrable domains the org trusts, e.g. ["github.com","stripe.com"]. */
   allowlistedDomains: string[];
-  /** Known payout recipients: lowercased address -> supplier info. */
-  knownRecipients: Record<string, { name: string }>;
+  /** Known payout recipients: lowercased address -> recipient info. */
+  knownRecipients: Record<string, { name: string; category?: string }>;
   /** Per-agent daily spend cap in USD. */
   allowances: Record<AgentId, number>;
   /** How much each agent has already spent today, in USD. */
-  spentTodayUsd: Partial<Record<AgentId, number>>;
+  spentTodayUsd: Record<AgentId, number>;
 }
 
 /** The engine's verdict for one request. */

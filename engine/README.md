@@ -7,7 +7,7 @@ No keys, no network, no wallet — that is the Gatekeeper's job (Phase 2).
 ## Run
 ```bash
 pnpm install
-pnpm test     # 28 tests — every ROADMAP Phase 1 check
+pnpm test     # every ROADMAP Phase 1 check + log restore/events
 pnpm demo     # prints a gatekeeper-terminal run + a verified signed log
 ```
 
@@ -15,7 +15,7 @@ pnpm demo     # prints a gatekeeper-terminal run + a verified signed log
 | File | What |
 |---|---|
 | `src/types.ts` | `Request`, `Decision`, `Rule`, `PolicyContext` |
-| `src/rules.ts` | The 12 website rules + Maya's Bakery rules, in order |
+| `src/rules.ts` | The 12 website rules + the allowance rule, in order; `buildContext()` |
 | `src/engine.ts` | `evaluate()` — first-match; `agentFacingResult()` — blank denial to the agent |
 | `src/log.ts` | `SignedLog` — ed25519-signed, hash-chained, tamper-evident |
 | `src/demo.ts` | Phase 1 showcase |
@@ -24,7 +24,7 @@ pnpm demo     # prints a gatekeeper-terminal run + a verified signed log
 1. `core-boundary` → **deny** — `rm -rf /`, `mkfs`, fork bombs *(a Dharma core boundary; never removable)*
 2. `secrets-read` → **deny** — `.env`, `*.pem`, `id_rsa`
 3. `unknown-recipient` → **deny** — payment to an unlisted address
-4. `payment-within-allowance` → **allow** — known recipient, inside the agent's daily cap *(bakery rule)*
+4. `payment-within-allowance` → **allow** — known recipient, inside the agent's daily cap *(allowance rule)*
 5. `payment-approval` → **approval** — any other payment
 6. `destructive-shell` → **approval** — `rm -rf <path>`
 7. `package-install` → **approval** — npm/pnpm/yarn/pip install
@@ -41,4 +41,6 @@ pnpm demo     # prints a gatekeeper-terminal run + a verified signed log
   past entry breaks the chain and signature; `log.head()` is the hash Phase 3 anchors on Arc (rule 6).
 - **Deterministic.** Same input → same output. A throwing predicate fails closed, never allows.
 
-Allowances come from `bakeryContext()`: Bills $50/day, Supplies $10/day, Research $2/day.
+There is no built-in organization. `buildContext(orgConfig, spentToday)` turns each org's own
+agents, allowances, payees, and allowlisted domains into the engine context. Tests use a neutral
+fixture in `test/fixture.ts`.

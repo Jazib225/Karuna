@@ -1,0 +1,22 @@
+{
+  "name": "@prekaruna/gatekeeper",
+  "private": true,
+  "type": "module",
+  "description": "Karuna Gatekeeper: the only process that holds wallet access. Agents propose; it decides, pays, and logs.",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "test": "vitest run",
+    "verify:phase2": "tsx scripts/verify-phase2.ts"
+  },
+  "dependencies": {
+    "@prekaruna/engine": "workspace:*",
+    "dotenv": "^18.0.10",
+    "viem": "2.57.17"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  }
+}

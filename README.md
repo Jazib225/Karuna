@@ -6,12 +6,13 @@ Read [`CLAUDE.md`](CLAUDE.md) for the product and [`ROADMAP.md`](ROADMAP.md) for
 ## Layout
 | Folder | What |
 |---|---|
-| `engine/` | Deterministic first-match policy engine (Phase 1) |
-| `gatekeeper/` | Holds the Circle wallet; the only process with keys (Phase 2) |
+| `engine/` | Deterministic first-match policy engine + signed log (Phase 1) ✅ |
+| `gatekeeper/` | The only process that holds the wallet: proposals, approvals, payments, Exact Match (Phase 2) ✅ |
 | `contracts/` | Dharma Solidity contract on Arc (Phase 3) |
 | `relay/` | QuickNode Streams webhook → WebSocket (Phase 4) |
-| `web/` | React approval UI (Phase 4) |
-| `agents/` | Bills / Supplies / Research agents, sandboxed (Phase 6) |
+| `web/` | Karuna Console — the product frontend (setup, approvals, agents, payees, policy, signed log) |
+| `agents/` | Agent-side client: can only propose to the Gatekeeper; no keys (Phase 2 ✅, sandbox in Phase 6) |
+| `services/test-seller/` | **Test fixture only** — a local x402 seller used to verify payments |
 
 ## Arc testnet facts (verified Nov 9, 2026)
 | | |
@@ -26,12 +27,29 @@ Read [`CLAUDE.md`](CLAUDE.md) for the product and [`ROADMAP.md`](ROADMAP.md) for
 
 **Circle wallet spending limits are mainnet only**, so on testnet Dharma and the Gatekeeper enforce limits.
 
-## Phase 0 setup
+## Run it locally
 ```bash
 pnpm install
-cp .env.example .env          # fill in ARC_RPC_URL (QuickNode) and BAKERY_WALLET_ADDRESS
-pnpm check:arc                # chain id, block, USDC token
-pnpm balance                  # ✅ Phase 0 passes when this prints the bakery wallet's USDC
+cp .env.example .env                  # optional: put your QuickNode Arc URL in ARC_RPC_URL
+circle wallet login <email> --testnet # the Gatekeeper pays with this Circle session
+pnpm --dir gatekeeper start           # agent API :8787 · console API :8788
+pnpm --dir web dev                    # console at http://127.0.0.1:5173
+```
+A new install opens on **setup**: name your organization, add yourself, pick the wallet. Then add
+agents (each gets a token), the payees and services they may pay, and teammates who approve.
+Nothing about any organization is built in.
+
+For x402 services the wallet also needs a Gateway balance:
+`circle gateway deposit --amount 1 --address 0x… --chain ARC-TESTNET --method direct`.
+
+## Tests
+```bash
+pnpm --dir engine test       # policy engine + signed log
+pnpm --dir gatekeeper test   # gatekeeper logic with a fake wallet
+pnpm --dir agents check:no-keys
+# live, on Arc testnet (needs the test seller running):
+TEST_SELLER_ADDRESS=0x… pnpm --dir services/test-seller start
+VERIFY_WALLET=0x… pnpm --dir gatekeeper verify:phase2
 ```
 
-Tools: Node ≥ 20.18, pnpm, [Circle CLI](https://developers.circle.com/agent-stack/circle-cli/command-reference) (`npm i -g @circle-fin/cli`), [Foundry](https://getfoundry.sh).
+Tools: Node ≥ 22, pnpm, [Circle CLI](https://developers.circle.com/agent-stack/circle-cli/command-reference) (`npm i -g @circle-fin/cli`), [Foundry](https://getfoundry.sh).

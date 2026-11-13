@@ -7,16 +7,22 @@ import {
   generateKeyPairSync,
   sign as edSign,
   verify as edVerify,
-  createPublicKey,
   type KeyObject,
 } from "node:crypto";
 import type { Decision, Request } from "./types.ts";
 
+/** A non-decision event: approvals, executions, freezes, config changes. Nothing is erasable. */
+export interface LogEvent {
+  type: string;
+  [key: string]: unknown;
+}
+
 export interface LogEntry {
   seq: number;
   timestamp: string; // ISO; injectable for deterministic tests
-  request: Request;
-  decision: Decision;
+  request?: Request; // set on decision entries
+  decision?: Decision; // set on decision entries
+  event?: LogEvent; // set on event entries
   prevHash: string; // hash of the previous entry (genesis = 64 zeros)
   hash: string; // sha256 over the canonical entry body
   signature: string; // ed25519(hash), hex
@@ -60,13 +66,33 @@ export class SignedLog {
     return this.entries.at(-1)?.hash ?? GENESIS;
   }
 
+  /**
+   * Rebuild a log from stored entries and verify it. Throws if the stored chain was edited,
+   * so a tampered log can never be silently continued.
+   */
+  static restore(entries: LogEntry[], keys: { privateKey: KeyObject; publicKey: KeyObject }): SignedLog {
+    const log = new SignedLog(keys);
+    log.entries = entries.map((e) => ({ ...e }));
+    const v = log.verify();
+    if (!v.ok) throw new Error(`Stored log failed verification at entry ${v.brokenAt}: ${v.reason}`);
+    return log;
+  }
+
   /** Append a decision. `now` is injectable so tests are deterministic. */
   append(request: Request, decision: Decision, now: Date = new Date()): LogEntry {
+    return this.push({ request, decision }, now);
+  }
+
+  /** Append an event (approval, execution, freeze, config change, ...). */
+  appendEvent(event: LogEvent, now: Date = new Date()): LogEntry {
+    return this.push({ event }, now);
+  }
+
+  private push(record: Pick<LogEntry, "request" | "decision" | "event">, now: Date): LogEntry {
     const body = {
       seq: this.entries.length,
       timestamp: now.toISOString(),
-      request,
-      decision,
+      ...record,
       prevHash: this.head(),
     };
     const hash = hashBody(body);
@@ -91,6 +117,7 @@ export class SignedLog {
         timestamp: e.timestamp,
         request: e.request,
         decision: e.decision,
+        event: e.event,
         prevHash: e.prevHash,
       });
       if (recomputed !== e.hash) return { ok: false, brokenAt: i, reason: "hash mismatch (entry edited)" };
@@ -103,6 +130,6 @@ export class SignedLog {
 
   /** Export the public key so anyone can verify the log independently. */
   publicKeyPem(): string {
-    return createPublicKey(this.publicKey).export({ type: "spki", format: "pem" }).toString();
+    return this.publicKey.export({ type: "spki", format: "pem" }).toString();
   }
 }

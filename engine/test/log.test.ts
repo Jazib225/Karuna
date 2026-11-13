@@ -1,16 +1,17 @@
 import { describe, it, expect } from "vitest";
+import { createPublicKey } from "node:crypto";
 import { SignedLog } from "../src/log.ts";
 import { evaluate } from "../src/engine.ts";
-import { bakeryContext } from "../src/rules.ts";
+import { fixtureContext, VENDOR } from "./fixture.ts";
 
-const ctx = bakeryContext();
+const ctx = fixtureContext();
 const at = (s: number) => new Date(Date.UTC(2026, 10, 9, 0, 0, s)); // fixed clock
 
 function seededLog() {
   const log = new SignedLog();
   const reqs = [
     { tool: "shell", command: "ls ./workspace" } as const,
-    { tool: "payment", agent: "supplies", to: "0xGoldenMills", amountUsd: 0.05 } as const,
+    { tool: "payment", agent: "buyer", to: VENDOR, amountUsd: 0.05 } as const,
     { tool: "shell", command: "cat .env" } as const,
   ];
   reqs.forEach((r, i) => log.append(r, evaluate(r, ctx), at(i)));
@@ -55,6 +56,32 @@ describe("signed tamper-evident log (ROADMAP.md: edit an old entry -> chain chec
     const res = log.verify();
     expect(res.ok).toBe(false);
     expect(res.brokenAt).toBe(1);
+  });
+
+  it("event entries (approvals, freezes) are chained and signed too", () => {
+    const log = seededLog();
+    log.appendEvent({ type: "approved", proposalId: "p1", memberId: "m1" }, at(9));
+    expect(log.verify().ok).toBe(true);
+    (log.all()[3].event as unknown as { memberId: string }).memberId = "someone-else";
+    expect(log.verify()).toMatchObject({ ok: false, brokenAt: 3 });
+  });
+
+  it("restore() reloads a stored chain and refuses an edited one", () => {
+    const log = seededLog();
+    const keys = { privateKey: (log as unknown as { privateKey: import("node:crypto").KeyObject }).privateKey, publicKey: log.publicKey };
+    const stored = JSON.parse(JSON.stringify(log.all()));
+    const again = SignedLog.restore(stored, keys);
+    again.appendEvent({ type: "resumed" });
+    expect(again.verify().ok).toBe(true);
+    stored[1].decision.outcome = "deny";
+    expect(() => SignedLog.restore(stored, keys)).toThrow(/failed verification at entry 1/);
+  });
+
+  it("publicKeyPem() exports a key anyone can verify the log with", () => {
+    const log = seededLog();
+    const pem = log.publicKeyPem();
+    expect(pem).toMatch(/^-----BEGIN PUBLIC KEY-----/);
+    expect(log.verify(createPublicKey(pem)).ok).toBe(true);
   });
 
   it("head() returns the latest hash for onchain anchoring", () => {

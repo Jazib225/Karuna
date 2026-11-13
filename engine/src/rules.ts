@@ -1,4 +1,5 @@
-// The default policy: the 12 website rules (CLAUDE.md §1) + Maya's Bakery rules.
+// The default policy: the 12 website rules (CLAUDE.md §1) + the per-agent allowance rule.
+// Organization-specific values (agents, allowances, payees, domains) come from buildContext().
 // Rules are evaluated in order; the FIRST matching rule decides (CLAUDE.md §1).
 import type { Rule, Request, PolicyContext } from "./types.ts";
 
@@ -66,7 +67,7 @@ export const defaultRules: Rule[] = [
       !ctx.knownRecipients[r.to.toLowerCase()],
   },
 
-  // (bakery) payment-within-allowance — known recipient, still inside the agent's daily cap.
+  // payment-within-allowance — known recipient, still inside the agent's daily cap.
   // Must come before the generic payment-approval so routine spend flows without asking.
   {
     id: "payment-within-allowance",
@@ -79,7 +80,7 @@ export const defaultRules: Rule[] = [
       const cap = ctx.allowances[r.agent];
       if (cap == null) return false;
       const spent = ctx.spentTodayUsd[r.agent] ?? 0;
-      return spent + r.amountUsd <= cap;
+      return Math.round((spent + r.amountUsd) * 1e6) <= Math.round(cap * 1e6);
     },
   },
 
@@ -170,16 +171,24 @@ export const defaultRules: Rule[] = [
   },
 ];
 
-// Maya's Bakery defaults (CLAUDE.md §3). The Gatekeeper supplies real values at runtime.
-export const bakeryContext = (
-  overrides: Partial<PolicyContext> = {},
-): PolicyContext => ({
-  allowlistedDomains: ["github.com", "stripe.com", "pypi.org", "npmjs.com"],
-  knownRecipients: {
-    "0xgoldenmills": { name: "Golden Mills (flour)" },
-    "0xcityutilities": { name: "City Utilities" },
-  },
-  allowances: { bills: 50, supplies: 10, research: 2 },
-  spentTodayUsd: {},
-  ...overrides,
-});
+// Karuna's default allowlist (website rule 8). Organizations can add or remove domains.
+export const DEFAULT_ALLOWLISTED_DOMAINS = ["github.com", "stripe.com", "pypi.org", "npmjs.com"];
+
+/** The policy-relevant slice of an organization's configuration. */
+export interface OrgPolicyConfig {
+  agents: { id: string; dailyAllowanceUsd: number }[];
+  recipients: { address: string; name: string; category?: string }[];
+  allowlistedDomains: string[];
+}
+
+/** Build the engine context from an org's config plus today's spend. No built-in data. */
+export function buildContext(cfg: OrgPolicyConfig, spentTodayUsd: Record<string, number> = {}): PolicyContext {
+  return {
+    allowlistedDomains: cfg.allowlistedDomains.map((d) => d.toLowerCase()),
+    knownRecipients: Object.fromEntries(
+      cfg.recipients.map((r) => [r.address.toLowerCase(), { name: r.name, category: r.category }]),
+    ),
+    allowances: Object.fromEntries(cfg.agents.map((a) => [a.id, a.dailyAllowanceUsd])),
+    spentTodayUsd: { ...spentTodayUsd },
+  };
+}
