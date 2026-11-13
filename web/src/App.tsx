@@ -1,428 +1,316 @@
-import { useEffect, useRef, useState } from "react";
-import { evaluate } from "./engine/engine.ts";
-import { bakeryContext } from "./engine/rules.ts";
-import type { Outcome, Request } from "./engine/types.ts";
+import { useEffect, useMemo, useState } from "react";
+import {
+  AGENTS, INITIAL_FEED, SUPPLIERS, TICKER, decide, shortHash,
+  type AgentId, type FeedItem,
+} from "./data.ts";
+import { defaultRulesMeta } from "./policy.ts";
 
-const GITHUB = "https://github.com/karuna-protocol";
-const ctx = bakeryContext();
+type View = "overview" | "approvals" | "agents" | "policy" | "activity";
+const MEMBERS = ["Maya", "Sam"] as const;
+const TWO_PERSON = 500;
 
-/* -------- scroll reveal -------- */
-function Reveal({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  const ref = useRef<HTMLDivElement>(null);
+const fmt = (n: number) => `$${n.toFixed(2)}`;
+const ago = (t: number) => {
+  const s = Math.round((Date.now() - t) / 1000);
+  if (s < 60) return `${s}s ago`;
+  const mnt = Math.round(s / 60);
+  return mnt < 60 ? `${mnt}m ago` : `${Math.round(mnt / 60)}h ago`;
+};
+const agentOf = (id: AgentId) => AGENTS.find((a) => a.id === id)!;
+
+export default function App() {
+  const [view, setView] = useState<View>("overview");
+  const [member, setMember] = useState<(typeof MEMBERS)[number]>("Maya");
+  const [frozen, setFrozen] = useState(false);
+  const [feed, setFeed] = useState<FeedItem[]>(INITIAL_FEED.slice().reverse());
+  const [resolved, setResolved] = useState<Record<string, "approved" | "denied">>({});
+
+  // pending = engine said "approval" and a human hasn't acted yet
+  const pending = useMemo(
+    () => feed.filter((f) => f.decision.outcome === "approval" && !resolved[f.id]),
+    [feed, resolved],
+  );
+
+  // live ticker: a routine proposal lands every few seconds (unless frozen)
   useEffect(() => {
-    const el = ref.current!;
-    const io = new IntersectionObserver(
-      ([e]) => e.isIntersecting && (el.classList.add("in"), io.disconnect()),
-      { threshold: 0.12 },
-    );
-    io.observe(el);
-    return () => io.disconnect();
-  }, []);
+    if (frozen) return;
+    const t = setInterval(() => {
+      const pick = TICKER[Math.floor(Math.random() * TICKER.length)];
+      setFeed((f) => [decide(pick.agent, pick.request, pick.label, pick.why), ...f].slice(0, 60));
+    }, 5000);
+    return () => clearInterval(t);
+  }, [frozen]);
+
+  const act = (id: string, outcome: "approved" | "denied") =>
+    setResolved((r) => ({ ...r, [id]: outcome }));
+
+  const titles: Record<View, string> = {
+    overview: "Overview", approvals: "Approvals", agents: "Agents", policy: "Policy", activity: "Activity log",
+  };
+
   return (
-    <div ref={ref} className={`reveal ${className}`}>
-      {children}
-    </div>
-  );
-}
-
-const RULE_NAMES = [
-  ["core-boundary", "deny"], ["secrets-read", "deny"], ["unknown-recipient", "deny"],
-  ["payment-within-allowance", "allow"], ["payment-approval", "approval"], ["destructive-shell", "approval"],
-  ["package-install", "approval"], ["human-approval-writes", "approval"], ["allowlisted-domain", "allow"],
-  ["http-mutations", "approval"], ["unlisted-domain", "deny"], ["workspace-read", "allow"], ["default-deny", "deny"],
-] as const;
-
-/* -------- gatekeeper mock panel (hero) -------- */
-const HERO_ROWS: { act: string; pol: string; out: Outcome; hash: string }[] = [
-  { act: "GET api.stripe.com/v1/balance", pol: "allowlisted-domain", out: "allow", hash: "a41f…0c2e" },
-  { act: "send 900 USDC → Golden Mills", pol: "payment-approval", out: "approval", hash: "9c0e…71ab" },
-  { act: "cat .env", pol: "secrets-read", out: "deny", hash: "3f9a…c21e" },
-  { act: "ls ./workspace", pol: "workspace-read", out: "allow", hash: "5b17…2d4e" },
-  { act: "send 50 USDC → 0xabc…", pol: "unknown-recipient", out: "deny", hash: "8672…66a2" },
-];
-
-function Panel() {
-  return (
-    <div className="panel">
-      <div className="panel-bar">
-        <span className="tl"><i /><i /><i /></span>
-        <span className="title">gatekeeper · maya's bakery</span>
-      </div>
-      <div className="panel-body">
-        {HERO_ROWS.map((r) => (
-          <div className="row" key={r.act}>
-            <span className={`chip ${r.out}`}>{r.out === "approval" ? "require approval" : r.out}</span>
-            <span className="act">{r.act}</span>
-            <span className="pol">{r.hash}</span>
+    <div className="app">
+      <aside className="sidebar">
+        <div className="brand"><span className="mark">⬡</span> Karuna</div>
+        <div className="biz">maya's bakery · 3 locations</div>
+        <nav className="nav">
+          {(Object.keys(titles) as View[]).map((v) => (
+            <a key={v} className={view === v ? "sel" : ""} onClick={() => setView(v)}>
+              <span className="ic">{icon[v]}</span> {titles[v]}
+              {v === "approvals" && pending.length > 0 && <span className="count warn">{pending.length}</span>}
+            </a>
+          ))}
+        </nav>
+        <div className="member">
+          <div className="who">
+            <span className="av">{member[0]}</span>
+            <span>{member}</span>
+            <span className="switch" onClick={() => setMember((m) => (m === "Maya" ? "Sam" : "Maya"))}>switch</span>
           </div>
-        ))}
-      </div>
-      <div className="panel-foot">
-        <span>12 rules · first match decides</span>
-        <span>● decision log signed</span>
-      </div>
+        </div>
+      </aside>
+
+      <main className="main">
+        <header className="topbar">
+          <h1>{titles[view]}</h1>
+          <div className="right">
+            <span className={`status ${frozen ? "frozen" : ""}`}>
+              <span className="d" /> {frozen ? "all agents frozen" : "3 agents active"}
+            </span>
+            <button className={`panic ${frozen ? "armed" : ""}`} onClick={() => setFrozen((f) => !f)}>
+              {frozen ? "Unfreeze (needs vote)" : "⬛ Panic — freeze all"}
+            </button>
+          </div>
+        </header>
+
+        <div className="content">
+          {frozen && (
+            <div className="freeze-banner">
+              <b>Frozen.</b> {member} hit the panic button — every agent is stopped. Unfreezing requires a team vote.
+              <button className="btn btn-ghost btn-sm" onClick={() => setFrozen(false)}>Record vote to unfreeze</button>
+            </div>
+          )}
+
+          {view === "overview" && <Overview feed={feed} pending={pending} frozen={frozen} onGo={setView} />}
+          {view === "approvals" && (
+            <Approvals pending={pending} member={member} onAct={act} resolvedCount={Object.keys(resolved).length} />
+          )}
+          {view === "agents" && <Agents frozen={frozen} feed={feed} />}
+          {view === "policy" && <Policy />}
+          {view === "activity" && <Activity feed={feed} />}
+        </div>
+      </main>
     </div>
   );
 }
 
-/* -------- playground (wired to the real engine) -------- */
-const SAMPLES: { label: string; req: Request }[] = [
-  { label: "ls ./workspace", req: { tool: "shell", command: "ls ./workspace" } },
-  { label: "GET api.stripe.com/v1/balance", req: { tool: "http", method: "GET", url: "https://api.stripe.com/v1/balance" } },
-  { label: "rm -rf ./data", req: { tool: "shell", command: "rm -rf ./data" } },
-  { label: "send 50 USDC to 0xabc…", req: { tool: "payment", agent: "research", to: "0xabc", amountUsd: 50 } },
-  { label: "cat .env", req: { tool: "shell", command: "cat .env" } },
-];
+const icon: Record<View, string> = { overview: "▦", approvals: "◷", agents: "◉", policy: "☰", activity: "≋" };
 
-function Playground() {
-  const [sel, setSel] = useState(0);
-  const [shown, setShown] = useState<{ out: Outcome; rule: string } | null>(null);
-  const run = () => {
-    const d = evaluate(SAMPLES[sel].req, ctx);
-    setShown({ out: d.outcome, rule: d.ruleId });
-  };
-  useEffect(() => setShown(null), [sel]);
-  const tag = shown?.out === "approval" ? "require approval" : shown?.out;
+/* ---------------- Overview ---------------- */
+function Overview({ feed, pending, frozen, onGo }: {
+  feed: FeedItem[]; pending: FeedItem[]; frozen: boolean; onGo: (v: View) => void;
+}) {
+  const today = feed.filter((f) => Date.now() - f.at < 86_400_000);
+  const denied = today.filter((f) => f.decision.outcome === "deny").length;
+  const spent = AGENTS.reduce((s, a) => s + a.spentToday, 0);
   return (
-    <div className="play">
-      <div className="play-head">
-        <strong>Proposed action</strong>
-        <span className="muted mono" style={{ fontSize: "0.75rem" }}>runs in your browser</span>
+    <div className="stack">
+      <div className="tiles">
+        <div className="tile"><div className="k">Pending</div><div className={`v ${pending.length ? "warn" : ""}`}>{pending.length}</div></div>
+        <div className="tile"><div className="k">Decisions today</div><div className="v">{today.length}</div></div>
+        <div className="tile"><div className="k">Blocked today</div><div className={`v ${denied ? "bad" : ""}`}>{denied}</div></div>
+        <div className="tile"><div className="k">Spent today</div><div className="v">{fmt(spent)}</div></div>
       </div>
-      <div className="play-opts">
-        {SAMPLES.map((s, i) => (
-          <button key={s.label} className={`opt ${i === sel ? "sel" : ""}`} onClick={() => setSel(i)}>
-            <span className="radio" />
-            {s.label}
-          </button>
-        ))}
+
+      <div className="grid2">
+        <div className="card">
+          <div className="hd"><h2>Waiting for you</h2><span className="sub" onClick={() => onGo("approvals")} style={{ cursor: "pointer" }}>view all →</span></div>
+          {pending.length === 0 ? (
+            <div className="empty">Nothing needs approval right now.</div>
+          ) : (
+            <div className="log">
+              {pending.slice(0, 3).map((f) => (
+                <div className="item" key={f.id} style={{ gridTemplateColumns: "auto 1fr auto" }}>
+                  <span className="chip approval">approve</span>
+                  <span className="act"><span className="ag">{agentOf(f.agent).emoji} </span>{f.label}</span>
+                  <span className="t">{ago(f.at)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="card">
+          <div className="hd"><h2>Agents</h2><span className="sub" onClick={() => onGo("agents")} style={{ cursor: "pointer" }}>manage →</span></div>
+          <div style={{ padding: "1rem" }} className="stack">
+            {AGENTS.map((a) => <Meter key={a.id} agent={a} frozen={frozen} compact />)}
+          </div>
+        </div>
       </div>
-      <div className="play-foot">
-        {shown ? (
-          <span className={`verdict ${shown.out}`}>
-            <span className="tag">{tag}</span>
-            <span className="rule">matched <b>{shown.rule}</b></span>
-          </span>
-        ) : (
-          <span className="muted mono" style={{ fontSize: "0.82rem" }}>first matching rule decides</span>
-        )}
-        <button className="btn btn-primary btn-sm" onClick={run}>Evaluate →</button>
+
+      <div className="card">
+        <div className="hd"><h2>Recent activity</h2><span className="sub" onClick={() => onGo("activity")} style={{ cursor: "pointer" }}>full log →</span></div>
+        <LogRows feed={feed.slice(0, 6)} />
       </div>
     </div>
   );
 }
 
-/* -------- quickstart code -------- */
-const PY = `from karuna import Karuna, Policy
-
-karuna = Karuna(policy=Policy.small_business())
-
-@karuna.guard(tool="shell")
-def run(cmd: str) -> str:
-    return shell(cmd)
-
-# the agent proposes; Karuna decides
-run("rm -rf ./data")   # -> requires approval`;
-
-const TS = `import { Karuna, Policy } from "@karunaprotocol/karuna";
-
-const karuna = new Karuna({ policy: Policy.smallBusiness() });
-
-const run = karuna.guard("shell", (cmd: string) => shell(cmd));
-
-// the agent proposes; Karuna decides
-await run("rm -rf ./data"); // -> requires approval`;
-
-function Quickstart() {
-  const [tab, setTab] = useState<"py" | "ts">("py");
-  const [copied, setCopied] = useState(false);
-  const install = tab === "py" ? "pip install karuna" : "npm i @karunaprotocol/karuna";
-  const copy = () => {
-    navigator.clipboard?.writeText(install);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1200);
-  };
+/* ---------------- Approvals ---------------- */
+function Approvals({ pending, member, onAct, resolvedCount }: {
+  pending: FeedItem[]; member: string; onAct: (id: string, o: "approved" | "denied") => void; resolvedCount: number;
+}) {
+  if (pending.length === 0)
+    return (
+      <div className="card"><div className="empty">
+        All clear — no actions are waiting for a human.<br />
+        <span className="muted" style={{ fontSize: ".8rem" }}>{resolvedCount} resolved so far this session.</span>
+      </div></div>
+    );
   return (
     <div>
-      <div className="code">
-        <div className="code-bar">
-          <span className={`code-tab ${tab === "py" ? "sel" : ""}`} onClick={() => setTab("py")}>Python</span>
-          <span className={`code-tab ${tab === "ts" ? "sel" : ""}`} onClick={() => setTab("ts")}>TypeScript</span>
-        </div>
-        <pre>{tab === "py" ? PY : TS}</pre>
+      <p className="section-title">Facts first — the agent's reason is shown separately and labeled untrusted.</p>
+      {pending.map((f) => <ApprovalCard key={f.id} f={f} member={member} onAct={onAct} />)}
+    </div>
+  );
+}
+
+function ApprovalCard({ f, member, onAct }: { f: FeedItem; member: string; onAct: (id: string, o: "approved" | "denied") => void }) {
+  const a = agentOf(f.agent);
+  const supplier = f.to ? SUPPLIERS[f.to] : undefined;
+  const big = (f.amountUsd ?? 0) >= TWO_PERSON;
+  const payloadHash = shortHash(`${f.to}${f.amountUsd}${f.category}${f.id}`);
+  return (
+    <div className="approval">
+      <div className="appr-top">
+        <span className="who">{a.emoji} {a.name}</span>
+        {f.amountUsd != null && <span className="amt">{fmt(f.amountUsd)}</span>}
       </div>
-      <div className="install">
-        <span>$ {install}</span>
-        <button className="copy" onClick={copy}>{copied ? "copied" : "copy"}</button>
+      <div className="facts">
+        <div className="lbl">Karuna — verified facts</div>
+        <dl>
+          <dt>Action</dt><dd>{f.label.replace(/ —.*/, "")}</dd>
+          {supplier && (<><dt>Recipient</dt><dd>{supplier.name}</dd><dt>Account</dt><dd>{supplier.account}</dd></>)}
+          {!supplier && f.to && (<><dt>Recipient</dt><dd className="warn">unlisted ({f.to})</dd></>)}
+          {f.category && (<><dt>Category</dt><dd>{f.category}</dd></>)}
+          <dt>Reversible</dt><dd className="warn">no — USDC transfer</dd>
+          <dt>Why asking</dt><dd>{f.decision.reason}</dd>
+          <dt>Payload hash</dt><dd>{payloadHash}</dd>
+        </dl>
+      </div>
+      {f.justification && (
+        <div className="justify">
+          <div className="lbl">⚠ written by the agent — may not be true</div>
+          <p>{f.justification}</p>
+        </div>
+      )}
+      <div className="appr-actions">
+        {big && <span className="two-person">⚑ over {fmt(TWO_PERSON)} — needs {member === "Maya" ? "Sam" : "Maya"} too</span>}
+        <button className="btn btn-deny" onClick={() => onAct(f.id, "denied")}>Deny</button>
+        <button className="btn btn-approve" onClick={() => onAct(f.id, "approved")}>
+          Approve{big ? " (1 of 2)" : ""} — exact match
+        </button>
       </div>
     </div>
   );
 }
 
-/* ======================================================================= */
-export default function App() {
+/* ---------------- Agents ---------------- */
+function Agents({ frozen, feed }: { frozen: boolean; feed: FeedItem[] }) {
   return (
-    <>
-      <nav className="nav">
-        <div className="wrap nav-inner">
-          <a href="#top" className="nav-logo"><span className="mark">⬡</span> Karuna</a>
-          <div className="nav-links">
-            <a href="#product" className="hide-sm">Product</a>
-            <a href="#governance" className="hide-sm">Governance</a>
-            <a href={GITHUB} className="hide-sm">Docs</a>
-            <a href="#waitlist" className="btn btn-primary btn-sm">Join the waitlist</a>
-          </div>
-        </div>
-      </nav>
-
-      {/* hero */}
-      <header className="hero" id="top">
-        <div className="hero-bg" />
-        <div className="wrap hero-grid">
-          <div>
-            <span className="badge"><span className="dot" /> Now onboarding design partners →</span>
-            <h1>An agent's competence should never be its permission.</h1>
-            <p className="hero-sub">
-              Karuna is a permission layer for autonomous AI agents. The agent proposes an action.
-              Karuna decides whether it happens. Your team decides what Karuna allows.
-            </p>
-            <div className="hero-cta">
-              <a href="#waitlist" className="btn btn-primary">Join the waitlist</a>
-              <a href={GITHUB} className="btn btn-ghost">Read the docs →</a>
+    <div className="grid2">
+      {AGENTS.map((a) => {
+        const count = feed.filter((f) => f.agent === a.id).length;
+        return (
+          <div className={`agent ${frozen ? "frozen" : ""}`} key={a.id}>
+            <div className="top">
+              <span className="emoji">{a.emoji}</span>
+              <div><div className="name">{a.name}</div><div className="job">{a.job}</div></div>
+              <span className={`state ${frozen ? "frozen" : "active"}`}>{frozen ? "frozen" : "active"}</span>
+            </div>
+            <Meter agent={a} frozen={frozen} />
+            <div className="meta">
+              <span className="tag">cap {fmt(a.cap)}/day</span>
+              <span className="tag">{count} actions today</span>
+              <span className="tag">0 auto-rules</span>
             </div>
           </div>
-          <Reveal><Panel /></Reveal>
-        </div>
-      </header>
-
-      {/* problem */}
-      <section className="section-line" id="problem">
-        <div className="wrap two">
-          <Reveal>
-            <span className="eyebrow">The problem</span>
-            <h2 style={{ margin: "0.8rem 0 1rem" }}>Agents that police themselves.</h2>
-            <p className="lead">
-              AI agents are starting to run code, move money, and act on the internet with little
-              supervision. Most of them hold their own credentials and police themselves.
-            </p>
-            <p className="mono" style={{ marginTop: "1.4rem", color: "var(--n600)", fontSize: "0.85rem" }}>
-              The agent proposes. Karuna decides. People set the rules.
-            </p>
-          </Reveal>
-          <Reveal>
-            <div className="panel">
-              <div className="panel-bar"><span className="tl"><i /><i /><i /></span><span className="title">unguarded agent</span></div>
-              <div className="panel-body" style={{ padding: "0.9rem" }}>
-                <div className="mono" style={{ color: "var(--ink-dim)", fontSize: "0.78rem", lineHeight: 1.9 }}>
-                  <div>$ load credentials from .env  ✓</div>
-                  <div>$ transfer 2,400 USDC  <span style={{ color: "#ff8a80" }}>ran · no check</span></div>
-                  <div>$ POST unknown-api.sh/exfil  <span style={{ color: "#ff8a80" }}>ran · no check</span></div>
-                  <div>$ rm -rf ./backups  <span style={{ color: "#ff8a80" }}>ran · no check</span></div>
-                </div>
-              </div>
-              <div className="panel-foot"><span>policy: none · approvals: none · log: none</span></div>
-            </div>
-          </Reveal>
-        </div>
-      </section>
-
-      {/* the boundary */}
-      <section className="section-line" style={{ textAlign: "center" }}>
-        <div className="wrap">
-          <Reveal>
-            <span className="eyebrow">The boundary</span>
-            <h2 style={{ margin: "0.8rem 0 0" }}>Every action meets the boundary.</h2>
-            <div className="boundary">
-              <div className="gate deny"><div className="glyph">✕</div><div className="label">deny</div></div>
-              <span className="gate-arrow">→</span>
-              <div className="gate approve"><div className="glyph">◷</div><div className="label">require approval</div></div>
-              <span className="gate-arrow">→</span>
-              <div className="gate allow"><div className="glyph">✓</div><div className="label">allow</div></div>
-            </div>
-          </Reveal>
-        </div>
-      </section>
-
-      {/* product: isolate decide record */}
-      <section className="section-line" id="product">
-        <div className="wrap">
-          <Reveal>
-            <span className="eyebrow">Product</span>
-            <h2 style={{ margin: "0.8rem 0 0" }}>Isolate. Decide. Record.</h2>
-          </Reveal>
-          <div className="steps">
-            {[
-              ["01", "Isolate", "Agents run in a sandbox with no network access, no keys, and no memory between tasks."],
-              ["02", "Decide", "Every action goes through a small, deterministic policy engine and a gatekeeper that holds all credentials."],
-              ["03", "Record", "Every decision is signed and written to a tamper-evident log."],
-            ].map(([n, t, d]) => (
-              <Reveal key={n}><div className="step"><div className="num">{n}</div><h3>{t}</h3><p>{d}</p></div></Reveal>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* playground */}
-      <section className="section-line" id="playground">
-        <div className="wrap two">
-          <Reveal>
-            <span className="eyebrow">Playground</span>
-            <h2 style={{ margin: "0.8rem 0 1rem" }}>Try it.</h2>
-            <p className="lead">
-              Pick a proposed action and evaluate it against the default policy. The first matching
-              rule decides — and this runs the real engine, right in your browser.
-            </p>
-            <div className="rules" style={{ marginTop: "1.6rem" }}>
-              {RULE_NAMES.map(([n, o], i) => (
-                <div className="r" key={n}><span className="i">{i + 1}</span><span>{n}</span><span className={`o ${o}`}>{o}</span></div>
-              ))}
-            </div>
-          </Reveal>
-          <Reveal><Playground /></Reveal>
-        </div>
-      </section>
-
-      {/* quickstart */}
-      <section className="section-line" id="quickstart">
-        <div className="wrap two">
-          <Reveal>
-            <span className="eyebrow">Quickstart</span>
-            <h2 style={{ margin: "0.8rem 0 1rem" }}>Guard a tool call in ten lines.</h2>
-            <p className="lead">Wrap any tool with <code>@karuna.guard</code>. The agent proposes; Karuna decides. Model-agnostic, framework-agnostic.</p>
-            <div style={{ marginTop: "1.4rem", display: "flex", gap: "1rem", fontSize: "0.85rem" }}>
-              <a href="https://pypi.org/project/karuna" className="muted">PyPI</a>
-              <a href="https://www.npmjs.com/package/@karunaprotocol/karuna" className="muted">npm</a>
-              <a href={GITHUB} className="muted">Follow on GitHub →</a>
-            </div>
-          </Reveal>
-          <Reveal><Quickstart /></Reveal>
-        </div>
-      </section>
-
-      {/* compatibility */}
-      <section className="section-line">
-        <div className="wrap">
-          <Reveal>
-            <span className="eyebrow">Compatibility</span>
-            <h2 style={{ margin: "0.8rem 0 0.6rem" }}>Model-agnostic.</h2>
-            <p className="lead">Works with Claude, GPT, Gemini, and open-weight models, and plugs into LangChain, CrewAI, and any MCP server.</p>
-            <div className="compat">
-              {["Claude", "OpenAI", "Google Gemini", "LangChain", "CrewAI", "MCP", "Open-weight models"].map((x) => (
-                <span className="pill" key={x}>{x}</span>
-              ))}
-            </div>
-          </Reveal>
-        </div>
-      </section>
-
-      {/* governance / dharma */}
-      <section className="section-line" id="governance">
-        <div className="wrap two">
-          <Reveal>
-            <span className="eyebrow">Governance</span>
-            <h2 style={{ margin: "0.8rem 0 1rem" }}>Policies live onchain, in a public ledger called Dharma.</h2>
-            <p className="lead">
-              A core set of boundaries can never be removed. Everything else is governed by people.
-              Tightening a rule is fast. Loosening one is slow and public.
-            </p>
-            <p className="muted" style={{ marginTop: "1rem", fontSize: "0.95rem" }}>
-              No company, including us, can quietly loosen the rules. Every change is proposed, voted
-              on, and recorded onchain where anyone can verify it.
-            </p>
-            <div className="gov-flow">
-              {["proposed", "public review", "vote", "timelock", "in effect"].map((n, i, a) => (
-                <span key={n} style={{ display: "contents" }}>
-                  <span className="node">{n}</span>{i < a.length - 1 && <span className="arr">→</span>}
-                </span>
-              ))}
-            </div>
-          </Reveal>
-          <Reveal>
-            <div>
-              <div className="gov-cards">
-                <div className="gov-card"><div className="k">Core boundaries</div><div className="v">Can never be removed</div></div>
-                <div className="gov-card fast"><div className="k">Tighten a rule</div><div className="v">Fast</div></div>
-                <div className="gov-card slow"><div className="k">Loosen a rule</div><div className="v">Slow &amp; public</div></div>
-                <div className="gov-card"><div className="k">Anchored on</div><div className="v">Arc (Circle)</div></div>
-              </div>
-              <div className="blocks">
-                <div className="b"><span className="h">block 1</span> a41f…0c2e</div>
-                <div className="b"><span className="h">block 2</span> 9c0e…71ab</div>
-                <div className="b"><span className="h">block 3</span> 3f9a…c21e</div>
-              </div>
-              <p className="muted mono" style={{ fontSize: "0.72rem", marginTop: "0.8rem" }}>Chain and contract address published here at launch.</p>
-            </div>
-          </Reveal>
-        </div>
-      </section>
-
-      {/* pricing */}
-      <section className="section-line" id="pricing">
-        <div className="wrap" style={{ textAlign: "center" }}>
-          <Reveal>
-            <span className="eyebrow">Pricing</span>
-            <h2 style={{ margin: "0.8rem 0 0" }}>Open core.</h2>
-          </Reveal>
-          <div className="price-grid" style={{ textAlign: "left" }}>
-            <Reveal>
-              <div className="price">
-                <span className="eyebrow">Developers</span>
-                <div className="amt">Free</div>
-                <ul><li>SDK with local policy engine</li><li>Signed decision log</li><li>Model &amp; framework agnostic</li></ul>
-                <a href={GITHUB} className="btn btn-ghost btn-sm" style={{ alignSelf: "start" }}>View on GitHub →</a>
-              </div>
-            </Reveal>
-            <Reveal>
-              <div className="price dark">
-                <span className="eyebrow" style={{ color: "var(--ink-dim)" }}>Organizations</span>
-                <div className="amt">Coming soon</div>
-                <ul><li>Hosted Gatekeeper &amp; human approvals</li><li>Shared policies &amp; Dharma governance</li><li>Central, tamper-evident audit trail</li></ul>
-                <a href="#waitlist" className="btn btn-primary btn-sm" style={{ alignSelf: "start" }}>Join the waitlist</a>
-              </div>
-            </Reveal>
-          </div>
-        </div>
-      </section>
-
-      {/* waitlist */}
-      <section className="section-line" id="waitlist">
-        <div className="wrap" style={{ maxWidth: 560, textAlign: "center" }}>
-          <Reveal>
-            <h2>Put your agents inside boundaries you control.</h2>
-            <form className="wl" onSubmit={(e) => { e.preventDefault(); alert("Thanks — this is a demo build. Join the real waitlist at karunaprotocol.dev"); }}
-              style={{ display: "grid", gap: "0.7rem", marginTop: "1.6rem", textAlign: "left" }}>
-              <input required type="email" placeholder="Work email" style={inp} />
-              <input placeholder="Company (optional)" style={inp} />
-              <input placeholder="Website" style={inp} />
-              <label className="muted" style={{ display: "flex", gap: "0.5rem", alignItems: "center", fontSize: "0.9rem" }}>
-                <input type="checkbox" /> Interested in being a design partner
-              </label>
-              <button className="btn btn-primary" type="submit">Join the waitlist</button>
-            </form>
-          </Reveal>
-        </div>
-      </section>
-
-      {/* footer */}
-      <footer className="footer">
-        <div className="wrap footer-inner">
-          <div>
-            <div className="nav-logo" style={{ marginBottom: "0.6rem" }}><span className="mark">⬡</span> Karuna</div>
-            <div>Founded by Adi Chaudhary and Jazib Qureshi</div>
-            <div style={{ marginTop: "0.4rem" }}>© 2026 Karuna.</div>
-          </div>
-          <div style={{ display: "flex", gap: "1.4rem" }}>
-            <a href="#top">Careers</a>
-            <a href={GITHUB}>GitHub</a>
-            <a href="mailto:hello@karunaprotocol.dev">Contact</a>
-          </div>
-        </div>
-      </footer>
-    </>
+        );
+      })}
+    </div>
   );
 }
 
-const inp: React.CSSProperties = {
-  width: "100%", padding: "0.7rem 0.9rem", borderRadius: "0.5rem",
-  border: "1px solid var(--line-strong)", fontFamily: "var(--font-sans)", fontSize: "0.95rem", background: "#fff",
-};
+function Meter({ agent, frozen, compact }: { agent: (typeof AGENTS)[number]; frozen?: boolean; compact?: boolean }) {
+  const pct = Math.min(100, (agent.spentToday / agent.cap) * 100);
+  const cls = pct >= 90 ? "high" : pct >= 60 ? "mid" : "";
+  return (
+    <div className="meter">
+      <div className="row">
+        <span>{compact ? `${agent.emoji} ${agent.name}` : "spent today"}</span>
+        <span>{fmt(agent.spentToday)} / {fmt(agent.cap)}</span>
+      </div>
+      <div className="track"><div className={`fill ${cls}`} style={{ width: `${frozen ? 0 : pct}%` }} /></div>
+    </div>
+  );
+}
+
+/* ---------------- Policy ---------------- */
+function Policy() {
+  return (
+    <div className="card">
+      <div className="hd"><h2>Active policy</h2><span className="sub">first match decides · {defaultRulesMeta.length} rules</span></div>
+      <div className="policy">
+        {defaultRulesMeta.map((r, i) => (
+          <div className="p" key={r.id}>
+            <span className="i">{i + 1}</span>
+            <span className="nm">{r.id}<span className="desc"> — {r.description}</span></span>
+            <span className={`o ${r.outcome}`}>{r.outcome}</span>
+          </div>
+        ))}
+      </div>
+      <div className="log-foot">
+        <span>core boundaries can never be removed · tighten fast · loosen slow &amp; public</span>
+        <span>anchored on Arc at launch</span>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Activity ---------------- */
+function Activity({ feed }: { feed: FeedItem[] }) {
+  const [filter, setFilter] = useState<"all" | "allow" | "deny" | "approval">("all");
+  const shown = feed.filter((f) => filter === "all" || f.decision.outcome === filter);
+  return (
+    <div className="card">
+      <div className="hd">
+        <h2>Signed decision log</h2>
+        <span className="sub" style={{ display: "flex", gap: ".5rem" }}>
+          {(["all", "allow", "approval", "deny"] as const).map((k) => (
+            <span key={k} onClick={() => setFilter(k)} style={{ cursor: "pointer", color: filter === k ? "var(--black)" : undefined }}>{k}</span>
+          ))}
+        </span>
+      </div>
+      <LogRows feed={shown} full />
+      <div className="log-foot">
+        <span>● every decision ed25519-signed &amp; hash-chained</span>
+        <span>head {feed[0]?.hash}</span>
+      </div>
+    </div>
+  );
+}
+
+function LogRows({ feed, full }: { feed: FeedItem[]; full?: boolean }) {
+  return (
+    <div className="log">
+      {feed.map((f) => (
+        <div className="item" key={f.id}>
+          <span className="t">{ago(f.at)}</span>
+          <span className={`chip ${f.decision.outcome}`}>{f.decision.outcome === "approval" ? "approve" : f.decision.outcome}</span>
+          <span className="act"><span className="ag">{agentOf(f.agent).emoji} {f.agent}:</span> {f.label}</span>
+          {full ? <span className="rule">{f.decision.ruleId}</span> : <span className="hash">{f.hash}</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
