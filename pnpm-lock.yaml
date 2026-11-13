@@ -37,6 +37,19 @@ importers:
         specifier: 5.9.3
         version: 5.9.3
 
+  contracts:
+    dependencies:
+      viem:
+        specifier: 2.57.17
+        version: 2.57.17(typescript@5.9.3)(zod@4.6.7)
+    devDependencies:
+      '@types/node':
+        specifier: ^26.6.6
+        version: 26.6.6
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+
   engine:
     devDependencies:
       '@types/node':
@@ -54,6 +67,9 @@ importers:
 
   gatekeeper:
     dependencies:
+      '@prekaruna/dharma':
+        specifier: workspace:*
+        version: link:../contracts
       '@prekaruna/engine':
         specifier: workspace:*
         version: link:../engine
@@ -107,12 +123,18 @@ importers:
 
   web:
     dependencies:
+      '@prekaruna/dharma':
+        specifier: workspace:*
+        version: link:../contracts
       react:
         specifier: 18.3.1
         version: 18.3.1
       react-dom:
         specifier: 18.3.1
         version: 18.3.1(react@18.3.1)
+      viem:
+        specifier: 2.57.17
+        version: 2.57.17(typescript@5.9.3)(zod@4.6.7)
     devDependencies:
       '@types/react':
         specifier: 18.3.12

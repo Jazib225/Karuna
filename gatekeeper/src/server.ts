@@ -1,11 +1,15 @@
 // Two HTTP surfaces, deliberately separate:
 //  - Agent API   (:8787)  propose + read own proposal status. Bearer agent token. Nothing else.
-//  - Console API (:8788)  approvals, panic, config, log. Localhost only + console secret.
-// An agent can never reach approve/freeze/config, so it can't approve its own request.
+//  - Console API (:8788)  localhost only + console secret. Policy changes and payment approvals
+//                         must ALSO carry a member's signature (their browser key), so even
+//                         console access can't approve, loosen, or vote without a member.
+// An agent can never reach the console API, so it can't approve its own request.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
+import { defaultRules } from "@prekaruna/engine";
 import { ConfigError } from "./config.ts";
-import { GatekeeperError, type AgentAction, type Gatekeeper } from "./gatekeeper.ts";
+import { isTransient } from "./chain.ts";
+import { GatekeeperError, type AgentAction, type Gatekeeper, type SignedAction, type SignedDecision } from "./gatekeeper.ts";
 import type { WalletBackend } from "./wallet.ts";
 
 const MAX_BODY = 1024 * 1024;
@@ -35,6 +39,7 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
 function fail(res: ServerResponse, e: unknown) {
   if (e instanceof GatekeeperError) return send(res, e.status, { error: e.message });
   if (e instanceof ConfigError) return send(res, 400, { error: e.message });
+  if (isTransient(e)) return send(res, 503, { error: "The Arc RPC is busy (rate limited). Try again in a moment — or set ARC_RPC_URL to your QuickNode endpoint." });
   console.error(e);
   send(res, 500, { error: "Internal error" });
 }
@@ -53,18 +58,18 @@ export function agentApi(gk: Gatekeeper): Server {
       const url = new URL(req.url ?? "/", "http://x");
       if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true });
       const token = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
-      const agent = gk.authenticateAgent(token);
-      if (!agent) return send(res, 401, { error: "Unknown agent token" });
+      const agentId = gk.authenticateAgent(token);
+      if (!agentId) return send(res, 401, { error: "Unknown agent token" });
 
       if (req.method === "POST" && url.pathname === "/v1/proposals") {
         const body = await readBody(req);
         const action = body.action as AgentAction | undefined;
         if (!action || typeof action !== "object") return send(res, 400, { error: "action is required" });
-        return send(res, 200, await gk.propose(agent.id, action, body.reason as string | undefined));
+        return send(res, 200, await gk.propose(agentId, action, body.reason as string | undefined));
       }
       const m = url.pathname.match(/^\/v1\/proposals\/([\w-]+)$/);
       if (req.method === "GET" && m) {
-        const v = gk.agentView(agent.id, m[1]);
+        const v = gk.agentView(agentId, m[1]);
         return v ? send(res, 200, v) : send(res, 404, { error: "Not found" });
       }
       send(res, 404, { error: "Not found" });
@@ -100,7 +105,7 @@ export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: 
         return;
       }
       if (method === "GET" && path === "/state") return send(res, 200, gk.snapshot());
-      if (method === "GET" && path === "/policy") return send(res, 200, gk.policy());
+      if (method === "GET" && path === "/policy") return send(res, 200, defaultRules.map((r) => ({ id: r.id, description: r.description, outcome: r.outcome })));
       if (method === "GET" && path === "/log") {
         const limit = Math.min(1000, Number(url.searchParams.get("limit") ?? 200) || 200);
         return send(res, 200, gk.logTail(limit));
@@ -122,25 +127,16 @@ export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: 
       }
 
       const body = method === "GET" || method === "DELETE" ? {} : await readBody(req);
-      const by = typeof body.memberId === "string" ? body.memberId : undefined;
       let m: RegExpMatchArray | null;
 
-      if (method === "POST" && path === "/setup") return send(res, 200, { member: gk.setup(body as never) });
-      if (method === "PATCH" && path === "/settings") return send(res, 200, (gk.updateSettings(body, by), { ok: true }));
-      if (method === "POST" && path === "/members") return send(res, 200, gk.addMember(body.name, by));
-      if (method === "DELETE" && (m = path.match(/^\/members\/([\w-]+)$/))) return send(res, 200, (gk.removeMember(m[1], url.searchParams.get("by") ?? undefined), { ok: true }));
-      if (method === "POST" && path === "/agents") return send(res, 200, gk.addAgent(body as never, by));
-      if (method === "PATCH" && (m = path.match(/^\/agents\/([\w-]+)$/))) return send(res, 200, gk.updateAgent(m[1], body, by));
-      if (method === "POST" && (m = path.match(/^\/agents\/([\w-]+)\/rotate-token$/))) return send(res, 200, gk.rotateAgentToken(m[1], by));
-      if (method === "DELETE" && (m = path.match(/^\/agents\/([\w-]+)$/))) return send(res, 200, (gk.removeAgent(m[1], url.searchParams.get("by") ?? undefined), { ok: true }));
-      if (method === "POST" && path === "/recipients") return send(res, 200, gk.addRecipient(body as never, by));
-      if (method === "DELETE" && (m = path.match(/^\/recipients\/(0x[0-9a-fA-F]{40})$/))) return send(res, 200, (gk.removeRecipient(m[1], url.searchParams.get("by") ?? undefined), { ok: true }));
-      if (method === "POST" && path === "/domains") return send(res, 200, (gk.addDomain(body.domain, by), { ok: true }));
-      if (method === "DELETE" && (m = path.match(/^\/domains\/([\w.-]+)$/))) return send(res, 200, (gk.removeDomain(m[1], url.searchParams.get("by") ?? undefined), { ok: true }));
-      if (method === "POST" && (m = path.match(/^\/proposals\/([\w-]+)\/approve$/))) return send(res, 200, await gk.approve(m[1], body.memberId, body.payloadHash));
-      if (method === "POST" && (m = path.match(/^\/proposals\/([\w-]+)\/deny$/))) return send(res, 200, (gk.deny(m[1], body.memberId), { ok: true }));
-      if (method === "POST" && path === "/freeze") return send(res, 200, (gk.freeze(body.memberId), { ok: true }));
-      if (method === "POST" && path === "/unfreeze-vote") return send(res, 200, (gk.voteUnfreeze(body.memberId), { ok: true }));
+      if (method === "GET" && (m = path.match(/^\/dharma\/nonce\/(0x[0-9a-fA-F]{40})$/))) return send(res, 200, { nonce: String(await gk.nonceOf(m[1])) });
+      if (method === "POST" && path === "/setup") return send(res, 200, await gk.setup(body as never));
+      if (method === "PATCH" && path === "/settings") return send(res, 200, (gk.renameOrg(body.orgName), { ok: true }));
+      if (method === "POST" && path === "/dharma/action") return send(res, 200, await gk.submitAction(body as unknown as SignedAction));
+      if (method === "POST" && path === "/agents/prepare") return send(res, 200, gk.prepareAgent(body.name));
+      if (method === "POST" && (m = path.match(/^\/agents\/([\w-]+)\/rotate-token$/))) return send(res, 200, gk.rotateAgentToken(m[1]));
+      if (method === "POST" && path === "/access-request") return send(res, 200, (gk.requestAccess(body.address, body.name), { ok: true }));
+      if (method === "POST" && (m = path.match(/^\/proposals\/([\w-]+)\/decide$/))) return send(res, 200, await gk.decide(m[1], body as unknown as SignedDecision));
 
       send(res, 404, { error: "Not found" });
     } catch (e) {

@@ -1,6 +1,10 @@
-// Organization configuration. Every organization starts EMPTY and configures itself in the
-// console: its name, the humans who approve, its wallet, its agents and their allowances,
-// the recipients it pays, and the domains it trusts. Nothing here is built in.
+// What the Gatekeeper keeps locally. POLICY is not here: agents, allowances, payees, domains,
+// rules, the two-person threshold, members, and the freeze switch all live in the org's Dharma
+// contract on Arc. Locally we keep only what must stay private or isn't policy:
+//   - human-readable labels (names are never written onchain)
+//   - agent token hashes (an agent's identity, not a permission)
+//   - pointers: the org's wallet and its Dharma contract
+//   - pending access requests from new browsers
 import { isAddress } from "viem";
 import { DEFAULT_ALLOWLISTED_DOMAINS } from "@prekaruna/engine";
 
@@ -8,53 +12,34 @@ import { DEFAULT_ALLOWLISTED_DOMAINS } from "@prekaruna/engine";
 export const WALLET_CHAIN = "ARC-TESTNET";
 /** USDC (ERC-20 interface, 6 decimals) on Arc. */
 export const USDC_TOKEN = "0x3600000000000000000000000000000000000000";
+export const EXPLORER = "https://testnet.arcscan.app";
+export { DEFAULT_ALLOWLISTED_DOMAINS };
 
-export interface Member {
-  id: string;
-  name: string;
-  createdAt: string;
-}
-
-export interface AgentConfig {
-  id: string;
-  name: string;
-  dailyAllowanceUsd: number;
-  /** sha256 of the agent's token. The token itself is shown once and never stored. */
-  tokenHash: string;
-  createdAt: string;
-}
-
-export interface Recipient {
-  address: string; // lowercased
-  name: string;
-  category: string;
-  addedAt: string;
-}
-
-export interface OrgConfig {
-  version: 1;
+export interface OrgFile {
+  version: 2;
   name: string;
   wallet: { address: string; chain: string } | null;
-  members: Member[];
-  agents: AgentConfig[];
-  recipients: Recipient[];
-  allowlistedDomains: string[];
-  /** Payments at or above this need two different members to approve. */
-  twoPersonThresholdUsd: number;
+  dharma: { address: string; chainId: number; deployedAt: string; txRef: string } | null;
+  labels: {
+    members: Record<string, string>; // lowercased address -> name
+    agents: Record<string, string>; // agent id -> name
+    payees: Record<string, string>; // lowercased address -> name
+  };
+  agentTokens: Record<string, string>; // agent id -> sha256(token)
+  enrollments: { address: string; name: string; requestedAt: string }[];
 }
 
-export const emptyOrg = (): OrgConfig => ({
-  version: 1,
+export const emptyOrg = (): OrgFile => ({
+  version: 2,
   name: "",
   wallet: null,
-  members: [],
-  agents: [],
-  recipients: [],
-  allowlistedDomains: [...DEFAULT_ALLOWLISTED_DOMAINS],
-  twoPersonThresholdUsd: 500,
+  dharma: null,
+  labels: { members: {}, agents: {}, payees: {} },
+  agentTokens: {},
+  enrollments: [],
 });
 
-export const isSetUp = (o: OrgConfig) => !!o.name && !!o.wallet && o.members.length > 0;
+export const isSetUp = (o: OrgFile) => !!o.name && !!o.wallet && !!o.dharma;
 
 export class ConfigError extends Error {}
 
@@ -78,15 +63,9 @@ export function requireUsd(v: unknown, field: string, { allowZero = true } = {})
   return Math.round(n * 1e6) / 1e6;
 }
 
-export function requireDomain(v: unknown): string {
-  const s = (typeof v === "string" ? v : "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
-  if (!/^([a-z0-9-]+\.)+[a-z]{2,}$/.test(s)) throw new ConfigError("domain must look like example.com");
-  return s;
-}
-
-/** URL-safe id from a display name, unique within `taken`. */
+/** URL-safe id from a display name, unique within `taken`, ≤ 32 chars (fits bytes32). */
 export function slugId(name: string, taken: Set<string>): string {
-  const base = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "item";
+  const base = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 28) || "agent";
   let id = base;
   for (let i = 2; taken.has(id); i++) id = `${base}-${i}`;
   return id;

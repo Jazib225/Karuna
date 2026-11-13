@@ -5,3 +5,4 @@ packages:
   - web
   - agents
   - services/*
+  - contracts

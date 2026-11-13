@@ -1,7 +1,7 @@
 // The default policy: the 12 website rules (CLAUDE.md §1) + the per-agent allowance rule.
 // Organization-specific values (agents, allowances, payees, domains) come from buildContext().
 // Rules are evaluated in order; the FIRST matching rule decides (CLAUDE.md §1).
-import type { Rule, Request, PolicyContext } from "./types.ts";
+import type { Outcome, Rule, Request, PolicyContext } from "./types.ts";
 
 // --- helpers ---------------------------------------------------------------
 
@@ -191,4 +191,78 @@ export function buildContext(cfg: OrgPolicyConfig, spentTodayUsd: Record<string,
     allowances: Object.fromEntries(cfg.agents.map((a) => [a.id, a.dailyAllowanceUsd])),
     spentTodayUsd: { ...spentTodayUsd },
   };
+}
+
+// ---------------------------------------------------------------- Dharma (onchain policy)
+
+/** A rule as stored in the Dharma contract. */
+export interface OnchainRule {
+  id: string;
+  outcome: Outcome;
+  core: boolean;
+  builtin: boolean;
+  active: boolean;
+  agent?: string; // undefined = every agent
+  scope: string; // custom rules: "payment", "payment:<category>", "http"
+  target: string; // payee address or domain ("" = any)
+  maxUsd: number; // custom allow rules: upper bound (0 = none)
+}
+
+/** A custom (non-default) Dharma rule as an engine rule. Unknown scopes never match. */
+export function customRule(r: OnchainRule): Rule {
+  const [kind, sub] = r.scope.split(":");
+  const target = r.target.toLowerCase();
+  const what = `${r.scope}${r.target ? ` → ${r.target}` : ""}${r.agent ? ` for ${r.agent}` : ""}`;
+  return {
+    id: r.id,
+    outcome: r.outcome,
+    agent: r.agent,
+    category: r.scope,
+    description:
+      r.outcome === "deny" ? `Blocked by Dharma rule: ${what}` : r.outcome === "approval" ? `Dharma rule requires approval: ${what}` : `Allowed by Dharma rule: ${what}`,
+    match: (req) => {
+      if (r.agent && req.agent !== r.agent) return false;
+      if (kind === "payment") {
+        if (req.tool !== "payment") return false;
+        if (sub && (req.category ?? "").toLowerCase() !== sub.toLowerCase()) return false;
+        if (target && (req.to ?? "").toLowerCase() !== target) return false;
+        if (r.outcome === "allow" && r.maxUsd > 0 && (req.amountUsd ?? Infinity) > r.maxUsd) return false;
+        return true;
+      }
+      if (kind === "http") {
+        if (req.tool !== "http" || !req.url) return false;
+        return !target || registrableDomain(req.url) === target;
+      }
+      return false;
+    },
+  };
+}
+
+/**
+ * The engine's ordered ruleset for an org, from its Dharma rules. First match wins:
+ *   1. core-boundary, secrets-read           (core, always)
+ *   2. custom deny rules                     (blocks beat everything below)
+ *   3. unknown-recipient                     (core, always)
+ *   4. custom approval rules, then custom allow rules
+ *   5. every other default rule still active (in default order; default-deny is core, always last)
+ * Core rules apply even if the chain somehow reported them inactive: fail closed.
+ */
+export function buildRuleset(onchain: OnchainRule[]): Rule[] {
+  const byId = new Map(onchain.map((r) => [r.id, r]));
+  const builtinActive = (id: string) => {
+    const r = byId.get(id);
+    return !r || r.active || r.core; // unknown to the chain → keep (fail closed)
+  };
+  const custom = onchain.filter((r) => !r.builtin && r.active).map(customRule);
+  const pick = (id: string) => defaultRules.find((r) => r.id === id)!;
+  const head = ["core-boundary", "secrets-read"].map(pick);
+  const rest = defaultRules.filter((r) => !["core-boundary", "secrets-read", "unknown-recipient"].includes(r.id) && builtinActive(r.id));
+  return [
+    ...head,
+    ...custom.filter((r) => r.outcome === "deny"),
+    pick("unknown-recipient"),
+    ...custom.filter((r) => r.outcome === "approval"),
+    ...custom.filter((r) => r.outcome === "allow"),
+    ...rest,
+  ];
 }

@@ -6,9 +6,11 @@
   "scripts": {
     "start": "tsx src/main.ts",
     "test": "vitest run",
-    "verify:phase2": "tsx scripts/verify-phase2.ts"
+    "verify:phase2": "tsx scripts/verify-phase2.ts",
+    "verify:phase3": "tsx scripts/verify-phase3.ts"
   },
   "dependencies": {
+    "@prekaruna/dharma": "workspace:*",
     "@prekaruna/engine": "workspace:*",
     "dotenv": "^18.0.10",
     "viem": "2.57.17"

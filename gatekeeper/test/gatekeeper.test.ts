@@ -1,27 +1,63 @@
-import { describe, it, expect, beforeEach } from "vitest";
+// Gatekeeper ↔ Dharma, end to end, against the REAL contract on a local chain (anvil).
+// Payments use a fake wallet; governance uses real signatures and real transactions.
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  createPublicClient, createTestClient, createWalletClient, defineChain, http,
+  type Address, type Hex, type PublicClient,
+} from "viem";
+import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
+import {
+  Kind, actionTypedData, encodeChange, paymentDecisionTypedData, type Change,
+} from "@prekaruna/dharma";
 import { Store } from "../src/store.ts";
-import { Gatekeeper, GatekeeperError } from "../src/gatekeeper.ts";
+import { Gatekeeper, GatekeeperError, type SignedAction } from "../src/gatekeeper.ts";
+import { ViemChainWriter, ChainError } from "../src/chain.ts";
 import type { WalletBackend, X402Quote } from "../src/wallet.ts";
 
-const WALLET = "0x00000000000000000000000000000000000000aa";
-const SELLER = "0x00000000000000000000000000000000000000bb";
-const PAYEE = "0x00000000000000000000000000000000000000cc";
-const STRANGER = "0x00000000000000000000000000000000000000dd";
+const PORT = 18545 + Math.floor(Math.random() * 1000);
+const RPC = `http://127.0.0.1:${PORT}`;
+const chain = defineChain({
+  id: 5042002, name: "anvil-arc", nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 },
+  rpcUrls: { default: { http: [RPC] } },
+});
+// anvil's first default account plays the org's Circle wallet (the Gatekeeper's address)
+const GK_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" as const;
+const SELLER = "0x00000000000000000000000000000000000000bb" as Address;
+const PAYEE = "0x00000000000000000000000000000000000000cc" as Address;
 
-/** In-memory wallet: records what was paid, lets a test change the seller's price. */
+let anvil: ChildProcess;
+let client: PublicClient;
+const test = () => createTestClient({ chain, mode: "anvil", transport: http(RPC) });
+
+beforeAll(async () => {
+  anvil = spawn(join(homedir(), ".foundry/bin/anvil"), ["--port", String(PORT), "--chain-id", "5042002", "--silent"], { stdio: "ignore" });
+  client = createPublicClient({ chain, transport: http(RPC) }) as PublicClient;
+  for (let i = 0; i < 50; i++) {
+    try {
+      await client.getBlockNumber();
+      return;
+    } catch {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  throw new Error("anvil did not start");
+}, 20_000);
+afterAll(() => anvil?.kill());
+
 class FakeWallet implements WalletBackend {
   price = 0.001;
-  paid: { kind: string; amount: number; to: string; max?: number }[] = [];
+  paid: { kind: string; amount: number; to: string }[] = [];
   async quoteX402(): Promise<X402Quote> {
     return { amountUsd: this.price, seller: SELLER, network: "eip155:5042002", scheme: "exact", transferMethod: "gateway" };
   }
   async payX402(_f: string, _u: string, _m: string, _b: string | undefined, maxUsd: number) {
-    if (this.price > maxUsd) throw new Error(`Payment of $${this.price} exceeds --max-amount ${maxUsd}`);
-    this.paid.push({ kind: "x402", amount: this.price, to: SELLER, max: maxUsd });
-    return { response: { data: "secret data" }, transaction: "tx-x402" };
+    if (this.price > maxUsd) throw new Error("exceeds max");
+    this.paid.push({ kind: "x402", amount: this.price, to: SELLER });
+    return { response: { data: "paid data" }, transaction: "tx" };
   }
   async transfer(_f: string, to: string, amountUsd: number) {
     this.paid.push({ kind: "transfer", amount: amountUsd, to });
@@ -31,190 +67,279 @@ class FakeWallet implements WalletBackend {
     return { usdc: "10", gateway: "1" };
   }
   async listWallets() {
-    return [WALLET];
+    return [];
   }
 }
 
-let dir: string, wallet: FakeWallet, gk: Gatekeeper, token: string, owner: string, second: string;
+// ---------------------------------------------------------------- per-test org
 
-beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "karuna-gk-"));
+let gk: Gatekeeper;
+let wallet: FakeWallet;
+let dir: string;
+let alice: PrivateKeyAccount;
+let bob: PrivateKeyAccount;
+const gkAccount = privateKeyToAccount(GK_KEY);
+
+function makeGatekeeper(d: string) {
+  const writer = new ViemChainWriter(createWalletClient({ chain, account: gkAccount, transport: http(RPC) }), client);
+  return new Gatekeeper({ store: new Store(d), wallet, client, writerFor: () => writer, timelockSeconds: 60, anchorEvery: 1000 });
+}
+
+beforeEach(async () => {
+  if (gk) await gk.idle(); // let the previous org's background writes land first
+  dir = mkdtempSync(join(tmpdir(), "karuna-gk3-"));
   wallet = new FakeWallet();
-  gk = new Gatekeeper(new Store(dir), wallet);
-  owner = gk.setup({ orgName: "Test Org", memberName: "Owner", walletAddress: WALLET }).id;
-  second = gk.addMember("Second", owner).id;
-  gk.addRecipient({ address: SELLER, name: "Data seller", category: "data" }, owner);
-  gk.addRecipient({ address: PAYEE, name: "Payee", category: "services" }, owner);
-  token = gk.addAgent({ name: "Ops agent", dailyAllowanceUsd: 1 }, owner).token;
-});
+  alice = privateKeyToAccount(generatePrivateKey());
+  bob = privateKeyToAccount(generatePrivateKey());
+  gk = makeGatekeeper(dir);
+  await gk.setup({ orgName: "Test Org", memberName: "Alice", memberAddress: alice.address, walletAddress: gkAccount.address });
+}, 30_000);
 
-const agentId = () => gk.authenticateAgent(token)!.id;
+async function sign(who: PrivateKeyAccount, kind: number, change: Change, proposalId = 0, support = false): Promise<SignedAction> {
+  const { op, data } = encodeChange(change);
+  const nonce = await gk.nonceOf(who.address);
+  const deadline = await chainDeadline();
+  const signature = await who.signTypedData(
+    actionTypedData(gk.org.dharma!.address as Address, 5042002, { kind, op, data, proposalId: BigInt(proposalId), support, nonce, deadline }),
+  );
+  return { kind, op, data, proposalId, support, signer: who.address, deadline: deadline.toString(), signature };
+}
+/** Tests fast-forward the chain clock, so deadlines follow chain time (≥ wall clock). */
+async function chainDeadline() {
+  const t = (await client.getBlock()).timestamp;
+  const wall = BigInt(Math.floor(Date.now() / 1000));
+  return (t > wall ? t : wall) + 600n;
+}
+const tighten = async (who: PrivateKeyAccount, c: Change) => gk.submitAction(await sign(who, Kind.Tighten, c));
+const propose = async (who: PrivateKeyAccount, c: Change, label?: string) => gk.submitAction({ ...(await sign(who, Kind.Propose, c)), label });
+const vote = async (who: PrivateKeyAccount, id: number, c: Change, support = true) => gk.submitAction(await sign(who, Kind.Vote, c, id, support));
+async function waitTimelock() {
+  await test().increaseTime({ seconds: 61 });
+  await test().mine({ blocks: 1 });
+  await gk.housekeeping(); // the Gatekeeper executes passed proposals itself
+}
+async function activateAgent(capUsd: number) {
+  const { id, token } = gk.prepareAgent("Ops agent");
+  await propose(alice, { op: "SetAgent", id, capUsd });
+  await waitTimelock();
+  return { id, token };
+}
+async function addPayee(account: Address, category: string, name = "Payee") {
+  await propose(alice, { op: "SetPayee", account, category }, name);
+  await waitTimelock();
+}
+async function signDecision(who: PrivateKeyAccount, proposalId: string, payloadHash: string, approve: boolean) {
+  const deadline = await chainDeadline();
+  const h = (payloadHash.startsWith("0x") ? payloadHash : `0x${payloadHash}`) as Hex;
+  const signature = await who.signTypedData(
+    paymentDecisionTypedData(gk.org.dharma!.address as Address, 5042002, { proposalId, payloadHash: h, approve, deadline }),
+  );
+  return { approve, payloadHash: h, signer: who.address, deadline: deadline.toString(), signature };
+}
 const pending = () => gk.snapshot().proposals.filter((p) => p.status === "pending");
 
-describe("setup is universal", () => {
-  it("a new gatekeeper starts empty — no built-in org, agents, or recipients", () => {
-    const fresh = new Gatekeeper(new Store(mkdtempSync(join(tmpdir(), "karuna-empty-"))), wallet);
-    const s = fresh.snapshot();
-    expect(s.setUp).toBe(false);
-    expect(s.org.name).toBe("");
-    expect(s.org.agents).toEqual([]);
-    expect(s.org.recipients).toEqual([]);
-    expect(s.org.members).toEqual([]);
+// ================================================================ tests
+
+describe("setup deploys the org's own Dharma", () => {
+  it("starts with one member, the default rules and domains, and no agents or payees", () => {
+    const s = gk.snapshot();
+    expect(s.setUp).toBe(true);
+    expect(s.policy!.members).toEqual([{ address: alice.address.toLowerCase(), name: "Alice" }]);
+    expect(s.policy!.rules).toHaveLength(13);
+    expect(s.policy!.domains).toEqual(["github.com", "stripe.com", "pypi.org", "npmjs.com"]);
+    expect(s.policy!.agents).toEqual([]);
+    expect(s.policy!.payees).toEqual([]);
   });
 
-  it("agents cannot propose before setup", async () => {
-    const fresh = new Gatekeeper(new Store(mkdtempSync(join(tmpdir(), "karuna-empty-"))), wallet);
-    await expect(fresh.propose("x", { type: "transfer", to: PAYEE, amountUsd: 1 })).rejects.toThrow(/setup/);
-  });
-
-  it("agent tokens are never stored, only their hash", () => {
-    const org = readFileSync(join(dir, "org.json"), "utf8");
-    expect(org).not.toContain(token);
-    expect(gk.authenticateAgent(token)).not.toBeNull();
-    expect(gk.authenticateAgent("kag_wrong")).toBeNull();
+  it("names stay off-chain", async () => {
+    const { id } = gk.prepareAgent("Secret project agent");
+    await propose(alice, { op: "SetAgent", id, capUsd: 1 });
+    const onchain = JSON.stringify(gk.policy);
+    expect(onchain).not.toContain("Alice");
+    expect(onchain).not.toContain("Secret project");
   });
 });
 
-describe("Phase 2: allowed request pays and returns the result", () => {
-  it("x402 purchase within allowance → paid → agent gets the data", async () => {
-    const r = await gk.propose(agentId(), { type: "x402", url: "http://seller.test/v1/data" });
-    expect(r.status).toBe("done");
-    expect(r.result).toEqual({ data: "secret data" });
-    expect(wallet.paid).toEqual([{ kind: "x402", amount: 0.001, to: SELLER, max: 0.001 }]);
-    expect(gk.spentToday()[agentId()]).toBe(0.001);
-  });
+describe("ROADMAP Phase 3: tighten fast, loosen slow", () => {
+  it("adding a block rule takes effect immediately", async () => {
+    const { token } = await activateAgent(10);
+    await addPayee(SELLER, "data");
+    const agent = gk.authenticateAgent(token)!;
+    expect((await gk.propose(agent, { type: "x402", url: "http://seller.test/x" })).status).toBe("done");
 
-  it("transfer to a known recipient within allowance → sent", async () => {
-    const r = await gk.propose(agentId(), { type: "transfer", to: PAYEE, amountUsd: 0.5 });
-    expect(r.status).toBe("done");
-    expect(wallet.paid[0]).toMatchObject({ kind: "transfer", amount: 0.5, to: PAYEE });
-  });
-
-  it("over the daily allowance → waits for a human; nothing paid yet", async () => {
-    const r = await gk.propose(agentId(), { type: "transfer", to: PAYEE, amountUsd: 5 }, "invoice 12");
-    expect(r).toEqual({ id: r.id, status: "pending" });
-    expect(wallet.paid).toEqual([]);
-    const p = pending()[0];
-    expect(p.reason).toBe("invoice 12");
-    expect(p.facts.find((f) => f.label === "Recipient")?.value).toBe("Payee");
-  });
-});
-
-describe("blank denial to the agent (CLAUDE.md §2 rule 7)", () => {
-  it("unknown recipient → denied with no reason, real reason kept for humans", async () => {
-    const r = await gk.propose(agentId(), { type: "transfer", to: STRANGER, amountUsd: 0.01 });
-    expect(r).toEqual({ id: r.id, status: "denied" });
-    const p = gk.snapshot().proposals[0];
-    expect(p.decision.ruleId).toBe("unknown-recipient");
-  });
-
-  it("non-payment actions are decided by the same engine", async () => {
-    expect((await gk.propose(agentId(), { type: "action", tool: "shell", command: "cat .env" })).status).toBe("denied");
-    expect((await gk.propose(agentId(), { type: "action", tool: "shell", command: "ls ./workspace" })).status).toBe("allowed");
-  });
-
-  it("an agent cannot read another agent's proposals", async () => {
-    const other = gk.addAgent({ name: "Other", dailyAllowanceUsd: 0 }, owner).agent.id;
-    const r = await gk.propose(agentId(), { type: "transfer", to: PAYEE, amountUsd: 0.1 });
-    expect(gk.agentView(other, r.id)).toBeNull();
-  });
-});
-
-describe("Exact Match (CLAUDE.md §2 rule 8)", () => {
-  it("approve with the hash on the card → executes exactly that payment", async () => {
-    await gk.propose(agentId(), { type: "transfer", to: PAYEE, amountUsd: 5 });
-    const p = pending()[0];
-    const r = await gk.approve(p.id, owner, p.payloadHash);
-    expect(r.status).toBe("executed");
-    expect(wallet.paid).toEqual([{ kind: "transfer", amount: 5, to: PAYEE }]);
-  });
-
-  it("approving a different hash than the payload → refused, nothing paid", async () => {
-    await gk.propose(agentId(), { type: "transfer", to: PAYEE, amountUsd: 5 });
-    const p = pending()[0];
-    await expect(gk.approve(p.id, owner, "0".repeat(64))).rejects.toThrow(/Exact Match failed/);
-    expect(wallet.paid).toEqual([]);
-  });
-
-  it("seller raises the price after approval → refused, nothing paid", async () => {
-    gk.updateAgent(agentId(), { dailyAllowanceUsd: 0 }, owner); // force human approval
-    await gk.propose(agentId(), { type: "x402", url: "http://seller.test/v1/data" });
-    const p = pending()[0];
-    wallet.price = 0.002; // terms change between approval card and payment
-    const r = await gk.approve(p.id, owner, p.payloadHash);
-    expect(r.status).toBe("failed");
-    expect(r.error).toMatch(/Seller now asks \$0\.002 but \$0\.001 was approved/);
-    expect(wallet.paid).toEqual([]);
-  });
-
-  it("stored payload edited after the card was shown → refused at execution", async () => {
-    await gk.propose(agentId(), { type: "transfer", to: PAYEE, amountUsd: 5 });
-    const p = pending()[0];
-    const live = (gk as unknown as { state: { proposals: { id: string; payload: { amountUsd: number } }[] } }).state.proposals.find((x) => x.id === p.id)!;
-    live.payload.amountUsd = 50; // tampering with the queue
-    const r = await gk.approve(p.id, owner, p.payloadHash);
-    expect(r.status).toBe("failed");
-    expect(wallet.paid).toEqual([]);
-  });
-});
-
-describe("two-person approval", () => {
-  it("at or above the threshold needs two different members", async () => {
-    gk.updateSettings({ twoPersonThresholdUsd: 2 }, owner);
-    await gk.propose(agentId(), { type: "transfer", to: PAYEE, amountUsd: 3 });
-    const p = pending()[0];
-    expect((await gk.approve(p.id, owner, p.payloadHash)).status).toBe("needs-another-approval");
-    await expect(gk.approve(p.id, owner, p.payloadHash)).rejects.toThrow(/already approved/);
-    expect(wallet.paid).toEqual([]);
-    expect((await gk.approve(p.id, second, p.payloadHash)).status).toBe("executed");
+    await tighten(alice, { op: "AddRule", id: "no-data", outcome: "Deny", agent, scope: "payment:data" });
+    const r = await gk.propose(agent, { type: "x402", url: "http://seller.test/x" });
+    expect(r.status).toBe("denied");
+    expect(gk.snapshot().proposals[0].decision.ruleId).toBe("no-data");
     expect(wallet.paid).toHaveLength(1);
+  }, 30_000);
+
+  it("removing a rule only works after the vote and the wait", async () => {
+    await gk.submitAction({ ...(await sign(bob, Kind.Propose, { op: "AddMember", member: bob.address })), signer: bob.address }).catch(() => undefined);
+    await propose(alice, { op: "AddMember", member: bob.address }, "Bob"); // 1 of 1 → queued
+    await waitTimelock();
+    expect(gk.snapshot().policy!.members).toHaveLength(2);
+
+    await tighten(bob, { op: "AddRule", id: "no-data", outcome: "Deny", scope: "payment:data" });
+    const removal: Change = { op: "RemoveRule", id: "no-data" };
+    const { proposalId } = await propose(alice, removal);
+    const prop = () => gk.snapshot().policy!.proposals.find((p) => p.id === proposalId)!;
+    expect(prop().status).toBe("open"); // 1 of 2 votes
+
+    await waitTimelock(); // time alone doesn't pass it
+    expect(gk.snapshot().policy!.rules.find((r) => r.id === "no-data")!.active).toBe(true);
+
+    await vote(bob, proposalId!, removal);
+    expect(prop().status).toBe("queued");
+    await gk.housekeeping(); // timelock not elapsed yet
+    expect(gk.snapshot().policy!.rules.find((r) => r.id === "no-data")!.active).toBe(true);
+
+    await waitTimelock();
+    expect(prop().status).toBe("executed");
+    expect(gk.snapshot().policy!.rules.find((r) => r.id === "no-data")!.active).toBe(false);
+  }, 60_000);
+
+  it("removing a core boundary always fails", async () => {
+    for (const id of ["core-boundary", "secrets-read", "unknown-recipient", "default-deny"]) {
+      await expect(propose(alice, { op: "RemoveRule", id })).rejects.toThrow(/CoreBoundary/);
+      await expect(tighten(alice, { op: "RemoveRule", id })).rejects.toThrow(/NotTightening/);
+    }
+  }, 30_000);
+
+  it("a new agent can't act until Dharma adds it", async () => {
+    const { id, token } = gk.prepareAgent("Waiting agent");
+    expect(gk.authenticateAgent(token)).toBe(id);
+    await expect(gk.propose(id, { type: "action", tool: "shell", command: "ls" })).rejects.toThrow(/not active/);
+    await propose(alice, { op: "SetAgent", id, capUsd: 1 });
+    await expect(gk.propose(id, { type: "action", tool: "shell", command: "ls" })).rejects.toThrow(/not active/);
+    await waitTimelock();
+    expect((await gk.propose(id, { type: "action", tool: "shell", command: "ls" })).status).toBe("allowed");
+  }, 30_000);
+});
+
+describe("nobody can act without a member's signature", () => {
+  it("a non-member's signature is refused", async () => {
+    const mallory = privateKeyToAccount(generatePrivateKey());
+    await expect(tighten(mallory, { op: "Freeze" })).rejects.toThrow(/not a Dharma member/);
   });
+
+  it("a signature for one change can't be used for another", async () => {
+    const signed = await sign(alice, Kind.Propose, { op: "SetPayee", account: PAYEE, category: "data" });
+    const swapped = encodeChange({ op: "SetPayee", account: SELLER, category: "data" });
+    await expect(gk.submitAction({ ...signed, data: swapped.data })).rejects.toThrow(/Signature does not match/);
+  });
+
+  it("the Gatekeeper's own key can tighten but never loosen", async () => {
+    const writer = new ViemChainWriter(createWalletClient({ chain, account: gkAccount, transport: http(RPC) }), client);
+    const { op, data } = encodeChange({ op: "SetPayee", account: PAYEE, category: "x" });
+    await expect(writer.write(gk.org.dharma!.address as Address, "tighten", [op, data, "0x0000000000000000000000000000000000000000", 0n, "0x"]))
+      .rejects.toBeInstanceOf(ChainError);
+  });
+});
+
+describe("payment approvals are signed by members (Exact Match)", () => {
+  it("a member's signature on the payload hash pays exactly that", async () => {
+    const { token } = await activateAgent(0);
+    await addPayee(PAYEE, "services");
+    const r = await gk.propose(gk.authenticateAgent(token)!, { type: "transfer", to: PAYEE, amountUsd: 5 });
+    expect(r.status).toBe("pending");
+    const p = pending()[0];
+    expect((await gk.decide(p.id, await signDecision(alice, p.id, p.payloadHash!, true))).status).toBe("executed");
+    expect(wallet.paid).toEqual([{ kind: "transfer", amount: 5, to: PAYEE }]);
+  }, 30_000);
+
+  it("approving a different payload hash is refused; nothing paid", async () => {
+    const { token } = await activateAgent(0);
+    await addPayee(PAYEE, "services");
+    await gk.propose(gk.authenticateAgent(token)!, { type: "transfer", to: PAYEE, amountUsd: 5 });
+    const p = pending()[0];
+    await expect(gk.decide(p.id, await signDecision(alice, p.id, "ab".repeat(32), true))).rejects.toThrow(/Exact Match failed/);
+    expect(wallet.paid).toEqual([]);
+  }, 30_000);
+
+  it("seller raises the price after approval → refused", async () => {
+    const { token } = await activateAgent(0);
+    await addPayee(SELLER, "data");
+    await gk.propose(gk.authenticateAgent(token)!, { type: "x402", url: "http://seller.test/x" });
+    const p = pending()[0];
+    wallet.price = 0.002;
+    const r = await gk.decide(p.id, await signDecision(alice, p.id, p.payloadHash!, true));
+    expect(r.status).toBe("failed");
+    expect(r.error).toMatch(/Seller now asks/);
+    expect(wallet.paid).toEqual([]);
+  }, 30_000);
+
+  it("two-person approval needs two different members' keys", async () => {
+    await propose(alice, { op: "AddMember", member: bob.address }, "Bob");
+    await waitTimelock();
+    await tighten(bob, { op: "SetThreshold", usd: 2 }); // lowering it is a tightening
+    const { id, token } = gk.prepareAgent("Ops agent");
+    const add: Change = { op: "SetAgent", id, capUsd: 0 };
+    const { proposalId } = await propose(alice, add);
+    await vote(bob, proposalId!, add);
+    await addPayeeTwo();
+    await gk.propose(gk.authenticateAgent(token)!, { type: "transfer", to: PAYEE, amountUsd: 3 });
+    const p = pending()[0];
+    expect((await gk.decide(p.id, await signDecision(alice, p.id, p.payloadHash!, true))).status).toBe("needs-another-approval");
+    await expect(gk.decide(p.id, await signDecision(alice, p.id, p.payloadHash!, true))).rejects.toThrow(/already approved/);
+    expect(wallet.paid).toEqual([]);
+    expect((await gk.decide(p.id, await signDecision(bob, p.id, p.payloadHash!, true))).status).toBe("executed");
+
+    async function addPayeeTwo() {
+      const c: Change = { op: "SetPayee", account: PAYEE, category: "services" };
+      const r = await propose(alice, c, "Payee");
+      await vote(bob, r.proposalId!, c);
+      await waitTimelock();
+    }
+  }, 60_000);
 });
 
 describe("panic button", () => {
-  it("any one member freezes everything; agents get the same blank denial", async () => {
-    gk.freeze(owner);
-    const r = await gk.propose(agentId(), { type: "x402", url: "http://seller.test/v1/data" });
-    expect(r).toEqual({ id: r.id, status: "denied" });
-    expect(wallet.paid).toEqual([]);
-  });
+  it("one member freezes instantly; unfreezing goes through a vote and the timelock", async () => {
+    const { token } = await activateAgent(10);
+    const agent = gk.authenticateAgent(token)!;
+    await tighten(alice, { op: "Freeze" });
+    expect(gk.snapshot().policy && gk.policy!.frozen).toBe(true);
+    expect((await gk.propose(agent, { type: "action", tool: "shell", command: "ls" })).status).toBe("denied");
 
-  it("approvals are blocked while frozen", async () => {
-    await gk.propose(agentId(), { type: "transfer", to: PAYEE, amountUsd: 5 });
-    gk.freeze(owner);
-    const p = pending()[0];
-    await expect(gk.approve(p.id, owner, p.payloadHash)).rejects.toBeInstanceOf(GatekeeperError);
-  });
-
-  it("unfreezing needs a vote from two members", () => {
-    gk.freeze(owner);
-    gk.voteUnfreeze(owner);
-    expect(gk.snapshot().frozen).not.toBeNull();
-    gk.voteUnfreeze(second);
-    expect(gk.snapshot().frozen).toBeNull();
-  });
+    await propose(alice, { op: "Unfreeze" });
+    expect(gk.policy!.frozen).toBe(true); // still frozen until the timelock passes
+    await waitTimelock();
+    expect(gk.policy!.frozen).toBe(false);
+    expect((await gk.propose(agent, { type: "action", tool: "shell", command: "ls" })).status).toBe("allowed");
+  }, 30_000);
 });
 
 describe("nothing is erasable", () => {
-  it("every decision and event lands in the signed log, which survives a restart", async () => {
-    await gk.propose(agentId(), { type: "x402", url: "http://seller.test/v1/data" });
-    gk.freeze(owner);
-    const types = gk.log.all().map((e) => e.event?.type ?? `decision:${e.decision?.ruleId}`);
-    expect(types).toContain("decision:payment-within-allowance");
-    expect(types).toContain("executed");
-    expect(types).toContain("freeze");
-    const reopened = new Gatekeeper(new Store(dir), wallet);
-    expect(reopened.log.length).toBe(gk.log.length);
-    expect(reopened.log.verify().ok).toBe(true);
-  });
+  it("the log head is anchored on Dharma and can't be rewound", async () => {
+    await activateAgent(1);
+    await gk.anchorNow();
+    expect(gk.policy!.logLength).toBe(gk.log.length);
+    expect(gk.policy!.logHead).toBe(`0x${gk.log.head()}`);
+  }, 30_000);
 
-  it("refuses to start on an edited log", () => {
+  it("a restarted Gatekeeper resumes from disk + chain; an edited log refuses to start", async () => {
+    await activateAgent(1);
+    const again = makeGatekeeper(dir);
+    await again.sync();
+    expect(again.log.length).toBe(gk.log.length);
+    expect(again.policy!.agents).toHaveLength(1);
+
     const path = join(dir, "log.jsonl");
     const lines = readFileSync(path, "utf8").trim().split("\n");
     const e = JSON.parse(lines[0]);
-    e.event.org = "Someone Else";
+    e.event.firstMember = bob.address;
     lines[0] = JSON.stringify(e);
     writeFileSync(path, lines.join("\n") + "\n");
-    expect(() => new Gatekeeper(new Store(dir), wallet)).toThrow(/failed verification/);
-  });
+    expect(() => makeGatekeeper(dir)).toThrow(/failed verification/);
+  }, 30_000);
+});
+
+describe("agents still never see reasons", () => {
+  it("unknown recipient → blank denial", async () => {
+    const { token } = await activateAgent(10);
+    const r = await gk.propose(gk.authenticateAgent(token)!, { type: "transfer", to: PAYEE, amountUsd: 1 });
+    expect(r).toEqual({ id: r.id, status: "denied" });
+    expect(GatekeeperError).toBeDefined();
+  }, 30_000);
 });

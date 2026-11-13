@@ -1,0 +1,21 @@
+{
+  "name": "@prekaruna/dharma",
+  "private": true,
+  "type": "module",
+  "description": "Dharma contract (Solidity) + its shared TypeScript vocabulary: ABI, ops, encoders, typed data.",
+  "exports": {
+    ".": "./js/index.ts",
+    "./bytecode": "./js/bytecode.ts"
+  },
+  "scripts": {
+    "build": "forge build && node scripts/export-abi.mjs",
+    "test": "forge test"
+  },
+  "dependencies": {
+    "viem": "2.57.17"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "5.9.3"
+  }
+}

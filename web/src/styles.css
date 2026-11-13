@@ -288,3 +288,32 @@ button { font-family: inherit; }
 .gk .item.event .act b { color: var(--n700); font-weight: 600; }
 .gk .item.event .act .ag { font-size: .74rem; }
 .panic:disabled { opacity: .7; cursor: default; }
+
+/* ============ Dharma: signing, ballots, governance ============ */
+.busy-bar { position: fixed; top: 0; left: 0; right: 0; height: 2px; z-index: 200; overflow: hidden; background: transparent; }
+.busy-bar::after { content: ""; position: absolute; top: 0; left: -40%; width: 40%; height: 100%; background: var(--black); animation: busy 1s var(--ease) infinite; }
+@keyframes busy { to { left: 100%; } }
+.keybox { border: 1px dashed var(--line-strong); border-radius: var(--radius-lg); padding: .6rem .8rem; background: #fcfcfc; display: grid; gap: .2rem; }
+.keybox .mono { font-size: .82rem; word-break: break-all; }
+.ok-text { color: var(--allow); font-size: .9rem; }
+.kv { display: flex; justify-content: space-between; gap: 1rem; color: var(--n500); }
+.kv b { color: var(--black); font-weight: 500; }
+.grid-kv { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; }
+@media (max-width: 900px) { .grid-kv { grid-template-columns: 1fr 1fr; } }
+.grid-kv .k { font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; color: var(--n400); font-family: var(--font-mono); margin-bottom: .25rem; }
+.grid-kv .mono { font-size: .82rem; word-break: break-all; }
+.ballot { overflow: hidden; }
+.ballot-top { display: flex; align-items: center; gap: .7rem; padding: .9rem 1.1rem .4rem; flex-wrap: wrap; }
+.ballot-top b { font-weight: 600; }
+.ballot-top .muted { margin-left: auto; }
+.ballot-body { display: flex; align-items: center; gap: 1rem; padding: .5rem 1.1rem 1rem; flex-wrap: wrap; }
+.votes { display: flex; align-items: center; gap: .7rem; flex: 1; min-width: 220px; }
+.votes .track { flex: 1; }
+.countdown { color: var(--allow); font-size: .82rem; }
+.ballot-actions { display: flex; gap: .5rem; }
+.lock { margin-left: .5rem; font-size: .66rem; color: var(--n500); border: 1px solid var(--line); border-radius: 999px; padding: 0 .4rem; }
+.rule-actions { display: flex; align-items: center; gap: .5rem; justify-content: flex-end; }
+.policy .p { grid-template-columns: 28px 1fr auto; }
+.policy .p.off .nm { text-decoration: line-through; color: var(--n400); }
+.field select { font: inherit; font-size: .9rem; border: 1px solid var(--line-strong); border-radius: var(--radius-lg); padding: .5rem .6rem; background: #fff; }
+.who > div { line-height: 1.2; }

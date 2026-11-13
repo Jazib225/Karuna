@@ -5,9 +5,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 export type Outcome = "allow" | "deny" | "approval";
 export type Status = "pending" | "executing" | "executed" | "allowed" | "denied" | "failed";
 
-export interface Member { id: string; name: string; createdAt: string }
-export interface Agent { id: string; name: string; dailyAllowanceUsd: number; createdAt: string; spentTodayUsd: number }
-export interface Recipient { address: string; name: string; category: string; addedAt: string }
 export interface Fact { label: string; value: string; tone?: "warn" | "ok" }
 
 export interface Proposal {
@@ -30,20 +27,53 @@ export interface Proposal {
   error?: string;
 }
 
+export interface OnchainRule {
+  id: string; outcome: Outcome; core: boolean; builtin: boolean; active: boolean;
+  agent?: string; scope: string; target: string; maxUsd: number;
+}
+
+export interface Governance {
+  id: number;
+  op: number;
+  description: string;
+  proposer: string;
+  createdAt: number;
+  queuedAt: number;
+  eta: number | null;
+  yes: number;
+  no: number;
+  status: "none" | "open" | "queued" | "executed" | "defeated";
+  voters: string[];
+  change: Record<string, unknown> & { op: string };
+}
+
+export interface AgentView { id: string; name: string; capUsd: number; spentTodayUsd: number; active: boolean; hasToken: boolean }
+
 export interface Snapshot {
   setUp: boolean;
+  deploying: boolean;
   org: {
     name: string;
     wallet: { address: string; chain: string } | null;
-    members: Member[];
-    agents: Agent[];
-    recipients: Recipient[];
-    allowlistedDomains: string[];
-    twoPersonThresholdUsd: number;
+    dharma: { address: string; chainId: number; deployedAt: string; txRef: string; explorer: string } | null;
   };
-  frozen: { at: string; by: string } | null;
-  unfreezeVotes: string[];
-  unfreezeVotesNeeded: number;
+  policy: null | {
+    loaded: true;
+    chainTime: number;
+    timelock: number;
+    required: number;
+    thresholdUsd: number;
+    policyVersion: number;
+    anchor: { head: string; length: number };
+    members: { address: string; name: string | null }[];
+    agents: AgentView[];
+    payees: { account: string; category: string; name: string | null }[];
+    domains: string[];
+    rules: OnchainRule[];
+    proposals: Governance[];
+  };
+  frozen: null | false | { by: string | null; at: string; confirmed: boolean };
+  enrollments: { address: string; name: string; requestedAt: string }[];
   proposals: Proposal[];
   log: { length: number; head: string; verified: boolean; brokenAt: number | null; publicKeyPem: string };
 }
