@@ -1,0 +1,142 @@
+import { describe, it, expect } from "vitest";
+import { evaluate } from "../src/engine.ts";
+import { bakeryContext, registrableDomain } from "../src/rules.ts";
+import type { Request } from "../src/types.ts";
+
+const ctx = bakeryContext();
+const verdict = (r: Request, c = ctx) => evaluate(r, c);
+
+describe("Phase 1 roadmap checks (ROADMAP.md §Phase 1)", () => {
+  it("ls ./workspace -> allow", () => {
+    const d = verdict({ tool: "shell", command: "ls ./workspace" });
+    expect(d.outcome).toBe("allow");
+    expect(d.ruleId).toBe("workspace-read");
+  });
+
+  it("cat .env -> deny", () => {
+    const d = verdict({ tool: "shell", command: "cat .env" });
+    expect(d.outcome).toBe("deny");
+    expect(d.ruleId).toBe("secrets-read");
+  });
+
+  it("send 50 USDC to unknown recipient -> deny", () => {
+    const d = verdict({ tool: "payment", agent: "bills", to: "0xUNKNOWN", amountUsd: 50 });
+    expect(d.outcome).toBe("deny");
+    expect(d.ruleId).toBe("unknown-recipient");
+  });
+
+  it("rm -rf ./data -> approval", () => {
+    const d = verdict({ tool: "shell", command: "rm -rf ./data" });
+    expect(d.outcome).toBe("approval");
+    expect(d.ruleId).toBe("destructive-shell");
+  });
+
+  it("Supplies agent over its daily budget -> approval", () => {
+    // $10/day cap, $9 already spent, asks for $5 more -> over budget
+    const c = bakeryContext({ spentTodayUsd: { supplies: 9 } });
+    const d = verdict(
+      { tool: "payment", agent: "supplies", to: "0xGoldenMills", amountUsd: 5, category: "supplies" },
+      c,
+    );
+    expect(d.outcome).toBe("approval");
+    expect(d.ruleId).toBe("payment-approval");
+  });
+});
+
+describe("all 12 website default rules fire in order", () => {
+  it("1 core-boundary: rm -rf / -> deny", () => {
+    expect(verdict({ tool: "shell", command: "rm -rf /" }).ruleId).toBe("core-boundary");
+    expect(verdict({ tool: "shell", command: "sudo mkfs.ext4 /dev/sda" }).ruleId).toBe("core-boundary");
+    expect(verdict({ tool: "shell", command: ":(){ :|:& };:" }).ruleId).toBe("core-boundary");
+  });
+
+  it("2 secrets-read: .env / *.pem / id_rsa -> deny", () => {
+    expect(verdict({ tool: "file", fileOp: "read", path: "config/prod.pem" }).ruleId).toBe("secrets-read");
+    expect(verdict({ tool: "file", fileOp: "read", path: "~/.ssh/id_rsa" }).ruleId).toBe("secrets-read");
+    expect(verdict({ tool: "shell", command: "cat secrets/.env" }).outcome).toBe("deny");
+  });
+
+  it("3 unknown-recipient -> deny", () => {
+    expect(verdict({ tool: "payment", agent: "bills", to: "0xNope", amountUsd: 5 }).ruleId).toBe(
+      "unknown-recipient",
+    );
+  });
+
+  it("payment-within-allowance: known recipient under cap -> allow", () => {
+    const d = verdict({ tool: "payment", agent: "supplies", to: "0xGoldenMills", amountUsd: 0.05, category: "supplies" });
+    expect(d.outcome).toBe("allow");
+    expect(d.ruleId).toBe("payment-within-allowance");
+  });
+
+  it("4 payment-approval: known recipient, no agent/over cap -> approval", () => {
+    expect(verdict({ tool: "payment", to: "0xGoldenMills", amountUsd: 900 }).ruleId).toBe("payment-approval");
+  });
+
+  it("5 destructive-shell: rm -rf <path> -> approval", () => {
+    expect(verdict({ tool: "shell", command: "rm -rf ./build" }).ruleId).toBe("destructive-shell");
+  });
+
+  it("6 package-install -> approval", () => {
+    expect(verdict({ tool: "shell", command: "npm install lodash" }).ruleId).toBe("package-install");
+    expect(verdict({ tool: "shell", command: "pip install requests" }).ruleId).toBe("package-install");
+  });
+
+  it("7 human-approval-writes: file write -> approval", () => {
+    expect(verdict({ tool: "file", fileOp: "write", path: "out/report.txt" }).ruleId).toBe(
+      "human-approval-writes",
+    );
+  });
+
+  it("8 allowlisted-domain: GET trusted -> allow", () => {
+    expect(verdict({ tool: "http", method: "GET", url: "https://api.stripe.com/v1/balance" }).ruleId).toBe(
+      "allowlisted-domain",
+    );
+    expect(verdict({ tool: "http", method: "GET", url: "https://github.com/x/y" }).outcome).toBe("allow");
+  });
+
+  it("9 http-mutations: POST trusted -> approval", () => {
+    expect(verdict({ tool: "http", method: "POST", url: "https://api.stripe.com/v1/charges" }).ruleId).toBe(
+      "http-mutations",
+    );
+  });
+
+  it("10 unlisted-domain: GET untrusted -> deny", () => {
+    expect(verdict({ tool: "http", method: "GET", url: "https://evil.example.com/x" }).ruleId).toBe(
+      "unlisted-domain",
+    );
+  });
+
+  it("11 workspace-read: bare ls -> allow", () => {
+    expect(verdict({ tool: "shell", command: "ls" }).ruleId).toBe("workspace-read");
+    expect(verdict({ tool: "shell", command: "grep foo ./workspace/log.txt" }).outcome).toBe("allow");
+  });
+
+  it("12 default-deny: anything else -> deny", () => {
+    expect(verdict({ tool: "shell", command: "curl http://x" }).ruleId).toBe("default-deny");
+    expect(verdict({ tool: "message", agent: "research", body: "hi" }).ruleId).toBe("default-deny");
+  });
+});
+
+describe("engine properties", () => {
+  it("is deterministic: same input -> same output", () => {
+    const r: Request = { tool: "http", method: "GET", url: "https://github.com/a" };
+    expect(evaluate(r, ctx)).toEqual(evaluate(r, ctx));
+  });
+
+  it("a cat outside workspace is not allowed by workspace-read", () => {
+    expect(verdict({ tool: "shell", command: "cat /etc/passwd" }).outcome).toBe("deny");
+  });
+
+  it("spend exactly at the cap is still allowed; one cent over asks", () => {
+    const c = bakeryContext({ spentTodayUsd: { bills: 45 } });
+    expect(verdict({ tool: "payment", agent: "bills", to: "0xGoldenMills", amountUsd: 5 }, c).outcome).toBe("allow");
+    expect(verdict({ tool: "payment", agent: "bills", to: "0xGoldenMills", amountUsd: 5.01 }, c).outcome).toBe(
+      "approval",
+    );
+  });
+
+  it("registrableDomain reduces subdomains", () => {
+    expect(registrableDomain("https://api.stripe.com/v1")).toBe("stripe.com");
+    expect(registrableDomain("not a url")).toBeNull();
+  });
+});
