@@ -8,6 +8,12 @@ the same brand (Inter / Geist Mono, monochrome palette) but it's an application.
 pnpm --dir web dev      # http://localhost:5173
 ```
 
+## Design
+Same visual language as karunaprotocol.dev: Inter + Geist Mono, monochrome palette, a
+centered container with rails and `+` crosshairs, a topographic contour texture behind page
+headers, grey "frames" holding glass panels, `—— EYEBROW` labels, and two-tone headlines.
+The live gatekeeper window types new decisions in, with a floating signed decision-log card.
+
 ## Views
 | View | What |
 |---|---|
