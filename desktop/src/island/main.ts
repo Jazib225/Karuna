@@ -7,7 +7,7 @@
 // plain text, in a quieter box, labeled untrusted.
 import "./island.css";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { createContour } from "../../../web/src/site/contour.ts";
 import { createLotus, contextAttributes } from "../../../web/src/site/lotus.ts";
 
@@ -52,6 +52,29 @@ const LABELS: Record<State, string> = {
 const REASON_CAP = 280;
 const RETRACT_MS = 700;
 const DOCK = { halfWidth: 170, maxY: 90 };
+
+// ------------------------------------------------------------------ appearance (from the console)
+// The console's Appearance page sends the theme (light / dark / system) and whether the island is on.
+// Remembered here too, so the island looks right even before the console has opened.
+type Appearance = { theme: "system" | "light" | "dark"; island: boolean };
+const APPEAR_KEY = "karuna.appearance";
+const darkMedia = matchMedia("(prefers-color-scheme: dark)");
+const loadAppearance = (): Appearance => {
+  try {
+    const a = JSON.parse(localStorage.getItem(APPEAR_KEY) ?? "") as Partial<Appearance>;
+    return { theme: a.theme === "light" || a.theme === "dark" ? a.theme : "system", island: a.island !== false };
+  } catch {
+    return { theme: "system", island: true };
+  }
+};
+let appearance = loadAppearance();
+function applyAppearance() {
+  const dark = appearance.theme === "dark" || (appearance.theme === "system" && darkMedia.matches);
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  document.body.classList.toggle("island-off", !appearance.island);
+}
+applyAppearance();
+darkMedia.addEventListener("change", applyAppearance);
 
 // ------------------------------------------------------------------ state
 let connected = false;
@@ -435,6 +458,13 @@ let lastRects = "";
 function reportRects() {
   if (!visible) return;
   const rects: { x: number; y: number; w: number; h: number }[] = [];
+  if (!appearance.island) {
+    if (lastRects !== "[]") {
+      lastRects = "[]";
+      void invoke("island_rects", { rects });
+    }
+    return;
+  }
   const add = (r: DOMRect, pad = 0) => rects.push({ x: r.left - pad, y: r.top - pad, w: r.width + pad * 2, h: r.height + pad * 2 });
   if (mode.mode === "notch") {
     const p = pill.getBoundingClientRect();
@@ -602,6 +632,19 @@ void listen<{ connected: boolean }>("gk-status", (e) => {
   render();
 });
 void listen<{ inside: boolean }>("island-hover", (e) => setHover(e.payload.inside));
+void listen<Partial<Appearance>>("karuna://appearance", (e) => {
+  appearance = { theme: e.payload.theme === "light" || e.payload.theme === "dark" ? e.payload.theme : "system", island: e.payload.island !== false };
+  try {
+    localStorage.setItem(APPEAR_KEY, JSON.stringify(appearance));
+  } catch {
+    /* remembered for next time only */
+  }
+  applyAppearance();
+  if (!appearance.island) hovering = false;
+  lastRects = "";
+  render();
+});
+void emit("karuna://appearance-request");
 void listen<{ visible: boolean }>("island-visible", (e) => {
   visible = e.payload.visible;
   lastRects = "";

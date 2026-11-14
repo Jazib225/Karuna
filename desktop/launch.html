@@ -19,6 +19,13 @@
       pre { margin: 0; padding: 14px 16px; border-radius: 12px; background: #050505; border: 1px solid rgba(255,255,255,.08); font: 12.5px/1.7 "Geist Mono", monospace; color: #e5e5e5; overflow-x: auto; }
       .status { font: 12px "Geist Mono", monospace; color: #737373; }
       [hidden] { display: none !important; }
+      /* Light theme (from the console's Appearance setting) */
+      :root[data-theme="light"], :root[data-theme="light"] body { background: #ededef; color: #0a0a0a; }
+      :root[data-theme="light"] .marble > canvas, :root[data-theme="light"] .marble > img { filter: invert(1); opacity: .07 !important; }
+      :root[data-theme="light"] .box { background: rgba(255,255,255,.88); border-color: rgba(10,10,10,.1); }
+      :root[data-theme="light"] p { color: #525252; }
+      :root[data-theme="light"] .eyebrow::before { background: #d4d4d4; }
+      :root[data-theme="light"] pre { background: #f4f4f5; border-color: rgba(10,10,10,.08); color: #262626; }
     </style>
   </head>
   <body>

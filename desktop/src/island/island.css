@@ -9,6 +9,8 @@
   --text: #fafafa;
   --text-2: #a3a3a3;
   --text-3: #737373;
+  --mid: #404040; --mid-2: #525252; --deny-bg: #262626; --well: rgba(0,0,0,.35); --wash: rgba(255,255,255,.015);
+  --approve-hover: #e5e5e5; --hover-wash: rgba(255,255,255,.03); --shadow: rgba(0,0,0,.9);
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
   --sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --mono: "Geist Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
@@ -68,7 +70,7 @@ button { font: inherit; }
 .card-body { position: relative; padding: 16px 18px 18px; display: flex; flex-direction: column; gap: 14px; max-height: inherit; overflow-y: auto; }
 
 .eyebrow { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--text-3); }
-.eyebrow::before { content: ""; width: 18px; height: 1px; background: #404040; }
+.eyebrow::before { content: ""; width: 18px; height: 1px; background: var(--mid); }
 .eyebrow .right { margin-left: auto; letter-spacing: .06em; }
 
 .feed { display: flex; flex-direction: column; }
@@ -76,19 +78,19 @@ button { font: inherit; }
 .feed .row:first-child { border-top: 0; }
 .feed .t { color: var(--text-3); }
 .feed .s { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.feed .row.deny .s { text-decoration: line-through; text-decoration-color: #525252; color: var(--text-3); }
+.feed .row.deny .s { text-decoration: line-through; text-decoration-color: var(--mid-2); color: var(--text-3); }
 .verdict { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; padding: 2px 6px; border-radius: 5px; border: 1px solid transparent; }
 .verdict.allow { background: var(--text); color: var(--ink); }
-.verdict.deny { background: #262626; color: var(--text-2); border-color: #404040; }
-.verdict.approval { border: 1px dashed #737373; color: var(--text); }
+.verdict.deny { background: var(--deny-bg); color: var(--text-2); border-color: var(--mid); }
+.verdict.approval { border: 1px dashed var(--text-3); color: var(--text); }
 .empty { color: var(--text-3); font-size: 12.5px; line-height: 1.5; }
 
 /* ------------------------------------------------------------------ approval card */
 .appr { display: flex; flex-direction: column; gap: 12px; }
 .appr-head { display: flex; align-items: center; gap: 10px; }
-.appr-type { font-family: var(--mono); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; padding: 3px 8px; border: 1px dashed #737373; border-radius: 6px; }
+.appr-type { font-family: var(--mono); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; padding: 3px 8px; border: 1px dashed var(--text-3); border-radius: 6px; }
 .appr-exp { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--text-2); font-variant-numeric: tabular-nums; }
-.payload { margin: 0; border: 1px solid var(--line-2); border-radius: 12px; background: rgba(0,0,0,.35); overflow: hidden; }
+.payload { margin: 0; border: 1px solid var(--line-2); border-radius: 12px; background: var(--well); overflow: hidden; }
 .payload .lbl { font-family: var(--mono); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-3); padding: 8px 12px; border-bottom: 1px solid var(--line); }
 .payload dl { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); }
 .payload dt, .payload dd { padding: 7px 12px; border-top: 1px solid var(--line); font-size: 12px; }
@@ -97,8 +99,8 @@ button { font: inherit; }
 .payload dd { margin: 0; font-family: var(--mono); color: var(--text); text-align: right; overflow-wrap: anywhere; white-space: pre-wrap; user-select: text; }
 .meta { display: flex; flex-wrap: wrap; gap: 8px 14px; font-family: var(--mono); font-size: 11px; color: var(--text-2); }
 .meta .k { color: var(--text-3); }
-.meta .hash { cursor: help; border-bottom: 1px dotted #525252; }
-.reason { border: 1px dashed #404040; border-radius: 10px; padding: 10px 12px; background: rgba(255,255,255,.015); }
+.meta .hash { cursor: help; border-bottom: 1px dotted var(--mid-2); }
+.reason { border: 1px dashed var(--mid); border-radius: 10px; padding: 10px 12px; background: var(--wash); }
 .reason .lbl { font-family: var(--mono); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-3); margin-bottom: 6px; }
 .reason p { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-3); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
 .reason .more { margin-top: 6px; background: none; border: 0; padding: 0; color: var(--text-2); font-family: var(--mono); font-size: 10.5px; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
@@ -106,9 +108,9 @@ button { font: inherit; }
 .btn { flex: 1; height: 38px; border-radius: 999px; font-size: 13px; font-weight: 500; cursor: pointer; transition: background-color 180ms var(--ease), border-color 180ms var(--ease), opacity 180ms; }
 .btn:disabled { opacity: .35; cursor: default; }
 .btn-approve { background: var(--text); color: var(--ink); border: 1px solid var(--text); }
-.btn-approve:hover:not(:disabled) { background: #e5e5e5; }
+.btn-approve:hover:not(:disabled) { background: var(--approve-hover); }
 .btn-deny { background: transparent; color: var(--text); border: 1px solid var(--line-2); }
-.btn-deny:hover:not(:disabled) { border-color: #525252; background: rgba(255,255,255,.03); }
+.btn-deny:hover:not(:disabled) { border-color: var(--mid-2); background: var(--hover-wash); }
 .status-line { font-family: var(--mono); font-size: 11px; color: var(--text-2); min-height: 14px; }
 .status-line.err { color: var(--text); }
 .queue { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
@@ -129,8 +131,26 @@ button { font: inherit; }
 }
 
 .decide { position: sticky; bottom: -18px; margin: 0 -18px -18px; padding: 12px 18px 16px; display: flex; flex-direction: column; gap: 8px;
-  background: linear-gradient(180deg, rgba(10,10,10,0) 0%, rgba(10,10,10,.92) 22%, #0a0a0a 100%); border-top: 1px solid var(--line); }
+  background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 0%, transparent) 0%, color-mix(in srgb, var(--panel) 92%, transparent) 22%, var(--panel) 100%); border-top: 1px solid var(--line); }
 
 /* No visible scrollbars: the card still scrolls. */
 * { scrollbar-width: none; }
 *::-webkit-scrollbar { display: none; width: 0; height: 0; }
+
+/* ------------------------------------------------------------------ light theme */
+/* Set from the console's Appearance setting (Light, Dark or System), remembered here. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --ink: #ffffff; --panel: #fafafa;
+  --line: rgba(10,10,10,.08); --line-2: rgba(10,10,10,.14);
+  --text: #0a0a0a; --text-2: #525252; --text-3: #737373;
+  --mid: #d4d4d4; --mid-2: #a3a3a3; --deny-bg: #f4f4f5; --well: rgba(10,10,10,.03); --wash: rgba(10,10,10,.02);
+  --approve-hover: #262626; --hover-wash: rgba(10,10,10,.03); --shadow: rgba(10,10,10,.25);
+}
+/* The lotus and the marble contours are drawn light-on-dark: flip them on a light island. */
+:root[data-theme="light"] #sprite, :root[data-theme="light"] #fsprite { filter: invert(1); }
+:root[data-theme="light"] .surface-bg { filter: invert(1); opacity: .07; }
+:root[data-theme="light"] .pill, :root[data-theme="light"] .floater, :root[data-theme="light"] .card { box-shadow: 0 1px 2px rgba(10,10,10,.06), 0 18px 40px -24px var(--shadow); }
+
+/* Island turned off in the console's Appearance settings: nothing shows, nothing catches clicks. */
+.island-off .notch, .island-off .floater, .island-off .card, .island-off .dock-hint { display: none !important; }

@@ -4,6 +4,15 @@
 import { createContour } from "../../web/src/site/contour.ts";
 import { mountGL } from "../../web/src/site/glrun.ts";
 
+// Same theme as the console and island (remembered by the island: same origin as this page).
+try {
+  const pref = (JSON.parse(localStorage.getItem("karuna.appearance") ?? "{}") as { theme?: string }).theme;
+  const dark = pref === "dark" || (pref !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+} catch {
+  document.documentElement.dataset.theme = "dark";
+}
+
 const target = new URLSearchParams(location.search).get("console") ?? (import.meta.env.DEV ? "http://127.0.0.1:5173" : "http://127.0.0.1:4173");
 const dev = target.includes(":5173");
 

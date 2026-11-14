@@ -9,25 +9,26 @@ import { Palette, type Command } from "./palette.tsx";
 import { keccak256, stringToHex } from "viem";
 import { PREVIEW, previewLog, previewSigner, previewSnapshot, previewWallet } from "./preview.ts";
 import { Badge, Icon, type IconName } from "./icons.tsx";
-import { setDesktopSigner } from "./desktop.ts";
+import { IN_APP, getIslandEnabled, setDesktopSigner, setIslandEnabled } from "./desktop.ts";
+import { setThemePref, useThemePref, type ThemePref } from "./theme.ts";
 import { eventName, NAMED_KEYS } from "./eventNames.ts";
 
 // One job per page. The menu groups them: everyday work first, then the automatic safety systems,
 // settings, and a testing tool. Older names (pop-ups, saved state) still resolve.
-type Page = "overview" | "approvals" | "votes" | "agents" | "payees" | "activity" | "shield" | "swarm" | "rules" | "keys" | "team" | "inbox";
+type Page = "overview" | "approvals" | "votes" | "agents" | "payees" | "activity" | "shield" | "swarm" | "rules" | "keys" | "team" | "appearance" | "inbox";
 type View = Page | "dharma" | "safety" | "policy";
 const PAGE_OF: Record<View, Page> = {
   overview: "overview", approvals: "approvals", votes: "votes", agents: "agents", payees: "payees", activity: "activity",
-  shield: "shield", swarm: "swarm", rules: "rules", keys: "keys", team: "team", inbox: "inbox",
+  shield: "shield", swarm: "swarm", rules: "rules", keys: "keys", team: "team", appearance: "appearance", inbox: "inbox",
   dharma: "votes", safety: "shield", policy: "rules",
 };
 const TITLES: Record<Page, string> = {
   overview: "Home", approvals: "Approvals", votes: "Votes", agents: "Agents", payees: "Payments", activity: "Activity",
-  shield: "Drills", swarm: "Tripwire", rules: "Rules", keys: "Keys", team: "Team", inbox: "Inbox",
+  shield: "Drills", swarm: "Tripwire", rules: "Rules", keys: "Keys", team: "Team", appearance: "Appearance", inbox: "Inbox",
 };
 const ICON: Record<Page, IconName> = {
   overview: "home", approvals: "approvals", votes: "votes", agents: "agents", payees: "payees", activity: "activity",
-  shield: "shield", swarm: "swarm", rules: "rules", keys: "key", team: "team", inbox: "inbox",
+  shield: "shield", swarm: "swarm", rules: "rules", keys: "key", team: "team", appearance: "sun", inbox: "inbox",
 };
 /** One line under each page title: what the page is for. */
 const LEDE: Record<Page, string> = {
@@ -41,13 +42,14 @@ const LEDE: Record<Page, string> = {
   swarm: "",
   rules: "",
   keys: "",
+  appearance: "",
   team: "",
   inbox: "",
 };
 const NAV: { label: string | null; hint?: string; pages: Page[] }[] = [
   { label: null, pages: ["overview", "approvals", "votes", "agents", "payees", "activity"] },
   { label: "Safety", pages: ["shield", "swarm", "inbox"] },
-  { label: "Settings", pages: ["rules", "keys", "team"] },
+  { label: "Settings", pages: ["rules", "keys", "team", "appearance"] },
 ];
 /** Arc explorer link for a transaction hash (payments, Dharma writes, freezes, anchors). */
 const isTx = (v: unknown): v is string => typeof v === "string" && /^0x[0-9a-fA-F]{64}$/.test(v);
@@ -515,6 +517,8 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
     { id: "new-agent", label: "Add an agent", hint: "Agents", icon: "plus", keywords: "token", run: () => setView("agents") },
     { id: "new-key", label: "Add an API key", hint: "Keys", icon: "key", keywords: "secret anthropic gemini openai", run: () => setView("keys") },
     { id: "waits", label: "Change the waits", hint: "Votes", icon: "clock", keywords: "timelock core", run: () => setView("votes") },
+    ...(["system", "light", "dark"] as const).map((t) => ({ id: `theme-${t}`, label: `Theme: ${t === "system" ? "System" : t === "light" ? "Light" : "Dark"}`, hint: "Appearance", icon: "sun" as IconName, keywords: "dark light mode appearance", run: () => setThemePref(t) })),
+    ...(IN_APP ? [{ id: "island", label: getIslandEnabled() ? "Turn the island off" : "Turn the island on", hint: "Appearance", icon: "sun" as IconName, keywords: "notch lotus", run: () => setIslandEnabled(!getIslandEnabled()) }] : []),
     { id: "sidebar", label: sideHidden ? "Pin the sidebar" : "Hide the sidebar", hint: "View", icon: sideHidden ? "pin" : "panel", keywords: "menu nav", run: toggleSide },
     ...(frozen
       ? [{ id: "unfreeze", label: "Unfreeze agents (goes to a vote)", hint: "Safety", icon: "stop" as IconName, run: () => (openUnfreeze ? setView("votes") : void ctx.change({ op: "Unfreeze" })) }]
@@ -641,6 +645,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
           {view === "rules" && <div className="stack"><Policy ctx={ctx} /><Learned ctx={ctx} /></div>}
           {view === "team" && <Team ctx={ctx} />}
           {view === "keys" && <Keys ctx={ctx} />}
+          {view === "appearance" && <Appearance />}
           {view === "inbox" && <Shield ctx={ctx} part="messages" />}
           {view === "activity" && <Activity ctx={ctx} log={log} />}
         </div>
@@ -2018,6 +2023,45 @@ function Keys({ ctx }: { ctx: Ctx }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ============================================================== appearance
+
+function Appearance() {
+  const theme = useThemePref();
+  const [island, setIsland] = useState(getIslandEnabled);
+  const options: { v: ThemePref; label: string; note: string }[] = [
+    { v: "system", label: "System", note: "Follows your computer" },
+    { v: "light", label: "Light", note: "Light backdrop and panels" },
+    { v: "dark", label: "Dark", note: "Dark backdrop and panels" },
+  ];
+  return (
+    <div className="stack">
+      <div className="card">
+        <div className="hd"><h2>Theme</h2></div>
+        <div className="pad theme-choices" role="radiogroup" aria-label="Theme">
+          {options.map((o) => (
+            <button key={o.v} type="button" role="radio" aria-checked={theme === o.v} className={`theme-choice ${theme === o.v ? "on" : ""}`} onClick={() => setThemePref(o.v)}>
+              <span className={`theme-swatch ${o.v}`} aria-hidden="true" />
+              <b>{o.label}</b>
+              <small>{o.note}</small>
+            </button>
+          ))}
+        </div>
+      </div>
+      {IN_APP && (
+        <div className="card">
+          <div className="hd"><h2>Island</h2></div>
+          <div className="pad">
+            <label className="switch-row">
+              <span><b>Show the island</b><small>The notch at the top of the screen while Karuna is minimized or closed to the tray. Approvals still reach this console and the tray when it's off.</small></span>
+              <input type="checkbox" role="switch" checked={island} onChange={(e) => { setIsland(e.target.checked); setIslandEnabled(e.target.checked); }} />
+            </label>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
