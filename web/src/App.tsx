@@ -391,9 +391,21 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
       const r = bar.querySelector(".right")?.getBoundingClientRect();
       if (!r) return;
       const mid = window.innerWidth / 2;
-      const room = 2 * (r.left - mid) - 32;
-      bar.style.setProperty("--search-x", `${mid - b.left}px`);
-      bar.style.setProperty("--search-w", `${Math.max(150, Math.min(340, room))}px`);
+      // Left side: a fixed allowance for the longest page title (not the current one, so the bar
+      // doesn't move between pages). Right side: the buttons.
+      const titleEnd = b.left + 32 + 160; // widest title block measured at 145px
+      const room = 2 * Math.min(r.left - mid, mid - titleEnd) - 32;
+      // Prefer the window's center. When that's too tight (narrow window, sidebar pinned), center it
+      // in the free space between the title and the buttons instead; then icon only; then hidden.
+      const gap = r.left - titleEnd - 32;
+      const [x, size] =
+        room >= 200 ? [mid, "full"] :
+        gap >= 200 ? [titleEnd + 16 + gap / 2, "full"] :
+        gap >= 54 ? [titleEnd + 16 + gap / 2, "icon"] :
+        [mid, "none"];
+      bar.dataset.search = size;
+      bar.style.setProperty("--search-x", `${x - b.left}px`);
+      bar.style.setProperty("--search-w", size === "full" ? `${Math.min(340, x === mid ? room : gap)}px` : "38px");
     };
     const ro = new ResizeObserver(fit);
     ro.observe(bar);
