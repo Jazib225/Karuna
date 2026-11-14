@@ -97,50 +97,49 @@ const flash = (state: State, ms: number) => {
   setTimeout(render, ms + 20);
 };
 
-// ------------------------------------------------------------------ lotus: sprite sheet + live
-const FRAMES = 60;
-// Rendered big (the site's dither at a fine grain), then drawn at the screen's real pixel density.
-const SPR = 144; // backing px per frame
-let sheet: HTMLCanvasElement | null = null;
+// ------------------------------------------------------------------ lotus
+// One turn of the site's lotus (20 s per turn on the site), rendered once at start-up into separate
+// frames. Enough frames, plus a crossfade between neighbours, make the slow turn continuous.
+const FRAMES = 240;
+const SPR = 112; // backing px per frame: the site's dither at a fine grain, drawn at device pixels
+const frames: HTMLCanvasElement[] = [];
 /** Square crop (in sprite px) centered on the flower itself: the site's camera frames it off-center. */
-let crop = { x: 0, y: 0, s: 40 };
-/** Render the site's lotus shader once into a sprite sheet of one slow turn (20 s per turn on the site). */
+let crop = { x: 0, y: 0, s: SPR };
 function buildSprites() {
   const glc = document.createElement("canvas");
-  glc.width = SPR;
-  glc.height = SPR;
+  glc.width = glc.height = SPR;
   const gl = (glc.getContext("webgl2", { ...contextAttributes, preserveDrawingBuffer: true }) ??
     glc.getContext("webgl", { ...contextAttributes, preserveDrawingBuffer: true })) as WebGLRenderingContext | null;
   if (!gl) return;
   const r = createLotus(gl);
   r.resize(SPR, SPR);
-  sheet = document.createElement("canvas");
-  sheet.width = SPR * FRAMES;
-  sheet.height = SPR;
-  const ctx = sheet.getContext("2d")!;
+  let x0 = SPR, y0 = SPR, x1 = -1, y1 = -1;
   for (let i = 0; i < FRAMES; i++) {
     r.frame((i / FRAMES) * 20, 0);
-    ctx.drawImage(glc, i * SPR, 0);
+    const f = document.createElement("canvas");
+    f.width = f.height = SPR;
+    const fx = f.getContext("2d", { willReadFrequently: i % 8 === 0 })!;
+    fx.drawImage(glc, 0, 0);
+    frames.push(f);
+    // Union of the lotus' pixels over the turn (sampled every 8th frame is plenty).
+    if (i % 8 === 0) {
+      const px = fx.getImageData(0, 0, SPR, SPR).data;
+      for (let y = 0; y < SPR; y++)
+        for (let x = 0; x < SPR; x++)
+          if (px[(y * SPR + x) * 4 + 3] > 8) {
+            if (x < x0) x0 = x;
+            if (x > x1) x1 = x;
+            if (y < y0) y0 = y;
+            if (y > y1) y1 = y;
+          }
+    }
   }
   r.destroy();
   gl.getExtension("WEBGL_lose_context")?.loseContext();
-  // Union of the lotus' pixels over every frame of the turn, then a square around its center.
-  const px = ctx.getImageData(0, 0, sheet.width, SPR).data;
-  let x0 = SPR, y0 = SPR, x1 = -1, y1 = -1;
-  for (let f = 0; f < FRAMES; f++)
-    for (let y = 0; y < SPR; y++)
-      for (let x = 0; x < SPR; x++)
-        if (px[(y * sheet.width + f * SPR + x) * 4 + 3] > 8) {
-          if (x < x0) x0 = x;
-          if (x > x1) x1 = x;
-          if (y < y0) y0 = y;
-          if (y > y1) y1 = y;
-        }
   if (x1 >= x0) {
-    const side = Math.min(SPR, Math.max(x1 - x0 + 1, y1 - y0 + 1) + 2);
+    const side = Math.min(SPR, Math.max(x1 - x0 + 1, y1 - y0 + 1) + 4);
     const cx = (x0 + x1 + 1) / 2;
     const cy = (y0 + y1 + 1) / 2;
-    // Kept inside the frame so a crop never bleeds into the neighbouring frame of the sheet.
     crop = { x: Math.max(0, Math.min(SPR - side, cx - side / 2)), y: Math.max(0, Math.min(SPR - side, cy - side / 2)), s: side };
   }
 }
@@ -151,21 +150,30 @@ let lastT = 0;
 let settleFrom = 0;
 function drawSprite(now: number) {
   requestAnimationFrame(drawSprite);
-  if (!sheet || !visible) return;
-  const dt = Math.min(0.1, (now - lastT) / 1000);
+  const dt = Math.min(0.1, (now - (lastT || now)) / 1000);
   lastT = now;
+  if (!frames.length || !visible) return;
   const st = currentState();
   // Approved settles: the turn slows to a stop. Everything else turns at its own pace.
   let speed = SPEED[st];
   if (st === "approved") speed = Math.max(0, 1.6 * (1 - (now - settleFrom) / 1100));
   phase = (phase + (dt * speed * FRAMES) / 20) % FRAMES;
-  // The same sprite sheet drives the pill and the floating lotus.
+  const a = Math.floor(phase);
+  const b = (a + 1) % FRAMES;
+  const t = phase - a;
+  // The same frames drive the pill and the floating lotus; neighbours crossfade for smooth motion.
   for (const c of [sprite, fsprite]) {
     const ctx = c.getContext("2d")!;
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
     ctx.clearRect(0, 0, c.width, c.height);
-    ctx.drawImage(sheet, Math.floor(phase) * SPR + crop.x, crop.y, crop.s, crop.s, 0, 0, c.width, c.height);
+    ctx.globalAlpha = 1;
+    ctx.drawImage(frames[a], crop.x, crop.y, crop.s, crop.s, 0, 0, c.width, c.height);
+    if (t > 0.02) {
+      ctx.globalAlpha = t;
+      ctx.drawImage(frames[b], crop.x, crop.y, crop.s, crop.s, 0, 0, c.width, c.height);
+    }
+    ctx.globalAlpha = 1;
   }
 }
 
