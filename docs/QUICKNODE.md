@@ -30,26 +30,41 @@ Just tell me "QuickNode is in .env" — I don't need to see the URL.
 
 ---
 
-## Part B — Stream (Phase 4, after the Dharma contract is deployed)
+## Part B — Stream (Phase 4): live alerts on every member's screen
 
-For the submission (QuickNode bounty requires "Streams as a core data source"):
+The relay is built and tested; it runs on the direct-RPC fallback until this is connected. Three
+things only you can do, then one command:
 
-1. Dashboard → **Streams → Create Stream**.
-2. Network: **Arc Testnet**.
-3. Dataset: **Logs / Receipts** (contract events).
-4. **Filter** to our Dharma contract only — by address, and by the event topics we emit
-   (`ApprovalRequested`, `AgentFrozen`, `TestFailed`, `RuleAdded`, `VoteCast`). We'll paste the
-   filter function once the contract address exists.
-5. Destination: **Webhook** → our relay's public URL (e.g. an ngrok/Cloudflare tunnel in dev,
-   `POST /quicknode/webhook`). Enable the **signing/security token** so the relay can verify it.
-6. Start the Stream. The relay verifies the signature → pushes to browsers over WebSocket →
-   every member's console lights up.
+1. **Install `cloudflared`** (free quick tunnel, no account) so QuickNode can reach your relay:
+   https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+2. **Start a tunnel to the relay's webhook port** (leave it running):
+   ```bash
+   cloudflared tunnel --url http://127.0.0.1:8791
+   ```
+   It prints a `https://…trycloudflare.com` URL. Put it in `.env`:
+   `RELAY_PUBLIC_URL=https://….trycloudflare.com`
+3. **QuickNode API key** — dashboard → API Keys → create one with Streams access. It's a secret:
+   add it to `.env` yourself as `QUICKNODE_API_KEY=…` (don't paste it in chat).
+4. Then:
+   ```bash
+   pnpm --dir relay stream:create
+   ```
+   It first test-runs the filter on QuickNode against a real block with a Dharma event, then
+   creates the Stream, generates the security token into `.env` (`QUICKNODE_SECURITY_TOKEN`), and
+   saves the Stream id. Restart the relay; the console badge switches to **QuickNode live**.
 
-We'll record the exact config (network, dataset, filter logic, destination, and *why*) in the
-main README for the submission checklist.
+### The Stream's config (for the submission README)
+| Setting | Value | Why |
+|---|---|---|
+| Network | `arc-testnet` | Dharma lives on Arc |
+| Dataset | `logs` | Dharma's state changes are all events |
+| Filter | JavaScript `main()` keeping only logs whose topic0 is a Dharma event (generated from the ABI in `relay/src/events.ts`) | Sends only governance + alert events; one Stream serves any org — the relay keeps just its own Dharma |
+| Destination | Webhook → `https://<tunnel>/quicknode/webhook`, HMAC security token, no compression, 3 retries | Signed so nobody can inject fake alerts; the relay refuses unsigned or replayed deliveries |
+| Batch | 1 block, elastic batching on | Lowest latency for approval pop-ups |
 
 ---
 
-### Backup (if QuickNode Streams is slow during the demo)
-The relay can subscribe directly to Arc over `ARC_WS_URL` (QuickNode or public) and get the same
-events. Streams stays the headline path; the direct WS is the fallback (ROADMAP backup plan).
+### Backup (if Streams is slow or down during the demo)
+The relay automatically reads Dharma's events straight from Arc (`eth_getLogs` every 3s) whenever
+QuickNode hasn't delivered for 45s, and de-duplicates if both arrive. The console badge shows
+which path is live ("QuickNode live" / "Arc RPC (fallback)").

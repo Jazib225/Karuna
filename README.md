@@ -9,7 +9,7 @@ Read [`CLAUDE.md`](CLAUDE.md) for the product and [`ROADMAP.md`](ROADMAP.md) for
 | `engine/` | Deterministic first-match policy engine + signed log (Phase 1) ✅ |
 | `gatekeeper/` | The only process that holds the wallet: proposals, approvals, payments, Exact Match (Phase 2) ✅ |
 | `contracts/` | **Dharma** — the org's onchain rulebook on Arc + shared TS vocabulary (Phase 3) ✅ |
-| `relay/` | QuickNode Streams webhook → WebSocket (Phase 4) |
+| `relay/` | QuickNode Stream → verified Dharma events → every member's console + Gatekeeper refresh; direct-RPC fallback (Phase 4) ✅ |
 | `web/` | Karuna Console — the product frontend (setup, approvals, agents, payees, policy, signed log) |
 | `agents/` | Agent-side client: can only propose to the Gatekeeper; no keys (Phase 2 ✅, sandbox in Phase 6) |
 | `services/test-seller/` | **Test fixture only** — a local x402 seller used to verify payments |
@@ -34,6 +34,7 @@ pnpm install
 cp .env.example .env                  # optional: put your QuickNode Arc URL in ARC_RPC_URL
 circle wallet login <email> --testnet # the Gatekeeper pays with this Circle session
 pnpm --dir gatekeeper start           # agent API :8787 · console API :8788
+pnpm --dir relay start                # live chain events (QuickNode or direct RPC) :8790 / :8791
 pnpm --dir web dev                    # console at http://127.0.0.1:5173
 ```
 A new install opens on **setup**: name your organization, pick the wallet, and Karuna deploys your
@@ -51,6 +52,7 @@ For x402 services the wallet also needs a Gateway balance:
 pnpm --dir engine test       # policy engine + signed log + Dharma rule ordering
 pnpm --dir contracts test    # Dharma (forge)
 pnpm --dir gatekeeper test   # gatekeeper against the real Dharma on a local chain (anvil)
+pnpm --dir relay test        # QuickNode signature, replay, decoding, filter
 pnpm --dir agents check:no-keys
 # live, on Arc testnet (needs the test seller running):
 TEST_SELLER_ADDRESS=0x… pnpm --dir services/test-seller start
