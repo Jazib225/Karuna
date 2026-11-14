@@ -6,11 +6,18 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+/** Free model providers the rule drafter can use (see draft.ts). */
+export const DRAFTER_PROVIDERS = ["groq", "gemini"] as const;
+export type DrafterProvider = (typeof DRAFTER_PROVIDERS)[number];
+
 export interface KeyMeta {
   name: string; // slug, e.g. "openai"
   envVar: string; // what the agent reads, e.g. OPENAI_API_KEY
   createdAt: string;
   rotatedAt?: string;
+  /** "drafter": only Karuna's rule drafter may use it. Agents never get it, not even a placeholder. */
+  purpose?: "drafter";
+  provider?: DrafterProvider; // for drafter keys
 }
 
 interface Stored extends KeyMeta {
@@ -42,11 +49,26 @@ export class SecretStore {
   }
 
   list(): KeyMeta[] {
-    return this.items.map(({ name, envVar, createdAt, rotatedAt }) => ({ name, envVar, createdAt, rotatedAt }));
+    return this.items.map(({ name, envVar, createdAt, rotatedAt, purpose, provider }) => ({ name, envVar, createdAt, rotatedAt, ...(purpose ? { purpose, provider } : {}) }));
+  }
+
+  /** True for a key agents may use (through a placeholder and a binding). Drafter keys never are. */
+  forAgents(name: string): boolean {
+    const s = this.items.find((x) => x.name === name);
+    return !!s && s.purpose !== "drafter";
+  }
+
+  /** The rule drafter's key for a provider: a key marked for the drafter, newest first. */
+  drafterKey(provider: DrafterProvider): string | null {
+    const k = [...this.items].reverse().find((x) => x.purpose === "drafter" && x.provider === provider);
+    return k ? this.reveal(k.name) : null;
   }
 
   /** Add or rotate a key. The value is encrypted immediately and never handed back out. */
-  put(name: string, envVar: string, value: string, now = new Date()): KeyMeta {
+  put(name: string, envVar: string, value: string, now = new Date(), opts: { purpose?: "drafter"; provider?: string } = {}): KeyMeta {
+    if (opts.purpose === "drafter" && !DRAFTER_PROVIDERS.includes(opts.provider as DrafterProvider)) {
+      throw new Error(`Rule drafter keys are for: ${DRAFTER_PROVIDERS.join(", ")}`);
+    }
     if (!NAME_RE.test(name)) throw new Error("Key name: lowercase letters, digits and dashes (max 40)");
     if (!ENV_RE.test(envVar)) throw new Error("Variable name: UPPER_CASE letters, digits and _");
     if (!value || value.length > 8192) throw new Error("Key value is empty or too long");
@@ -59,6 +81,7 @@ export class SecretStore {
     const prev = this.items.find((x) => x.name === name);
     const item: Stored = {
       name, envVar, createdAt: prev?.createdAt ?? now.toISOString(), rotatedAt: prev ? now.toISOString() : undefined,
+      ...(opts.purpose === "drafter" ? { purpose: "drafter" as const, provider: opts.provider as DrafterProvider } : {}),
       iv: iv.toString("base64"), tag: c.getAuthTag().toString("base64"), data: data.toString("base64"),
     };
     this.items = [...this.items.filter((x) => x.name !== name), item];
@@ -80,9 +103,9 @@ export class SecretStore {
     return Buffer.concat([d.update(Buffer.from(s.data, "base64")), d.final()]).toString("utf8");
   }
 
-  /** The env a box gets: each key's variable set to its placeholder. */
+  /** The env a box gets: each agent key's variable set to its placeholder (never drafter keys). */
   placeholderEnv(): Record<string, string> {
-    return Object.fromEntries(this.items.map((x) => [x.envVar, placeholderFor(x.name)]));
+    return Object.fromEntries(this.items.filter((x) => x.purpose !== "drafter").map((x) => [x.envVar, placeholderFor(x.name)]));
   }
 
   /** Every placeholder named in some text (headers, URL). */

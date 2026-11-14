@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import type { Address } from "viem";
 import type { PrivateKeyAccount } from "viem/accounts";
-import { isAddr, decodeChange, describeChange, type Change } from "@prekaruna/dharma";
+import { isAddr, decodeChange, describeChange, describeScope, waitText, type Change } from "@prekaruna/dharma";
 import { api, useGatekeeper, type LooseningPreview, type AgentView, type Governance, type LogEntry, type Proposal, type Rule, type Snapshot, type WalletInfo } from "./api.ts";
 import { Kind, SignerUnavailable, decidePayment, loadSigner, submitChange } from "./signer.ts";
 import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
+import { Palette, type Command } from "./palette.tsx";
 import { keccak256, stringToHex } from "viem";
 import { PREVIEW, previewLog, previewSigner, previewSnapshot, previewWallet } from "./preview.ts";
 import { Badge, Icon, type IconName } from "./icons.tsx";
@@ -20,8 +21,8 @@ const PAGE_OF: Record<View, Page> = {
   dharma: "votes", safety: "shield", policy: "rules",
 };
 const TITLES: Record<Page, string> = {
-  overview: "Home", approvals: "Approvals", votes: "Votes", agents: "Agents", payees: "Payees", activity: "Activity",
-  shield: "Auto-Shield", swarm: "Swarm Stopper", rules: "Rules", keys: "Keys", team: "Team", inbox: "Test inbox",
+  overview: "Home", approvals: "Approvals", votes: "Votes", agents: "Agents", payees: "Payments", activity: "Activity",
+  shield: "Drills", swarm: "Tripwire", rules: "Rules", keys: "Keys", team: "Team", inbox: "Inbox",
 };
 const ICON: Record<Page, IconName> = {
   overview: "home", approvals: "approvals", votes: "votes", agents: "agents", payees: "payees", activity: "activity",
@@ -29,30 +30,61 @@ const ICON: Record<Page, IconName> = {
 };
 /** One line under each page title: what the page is for. */
 const LEDE: Record<Page, string> = {
-  overview: "What needs you, what your agents spent, and what Dharma is deciding.",
-  approvals: "Payments an agent asked for that a person has to sign.",
-  votes: "Every rule change waits here for a majority vote and a timelock.",
-  agents: "Who can ask for money, and how much each may spend in a day.",
-  payees: "The only addresses an agent can ever pay.",
-  activity: "The signed, hash-chained record of every decision and event.",
-  shield: "Fake scam messages that test your agents, and the blocks they earn.",
-  swarm: "Bait credentials and the trip-wire that freezes every agent at once.",
-  rules: "The policy on Dharma. First matching rule decides.",
-  keys: "API keys your agents use. Boxes only ever see placeholders; Karuna adds the real key on the way out.",
-  team: "Members sign approvals and votes with keys in their own browsers.",
-  inbox: "Hand an agent work the way a supplier or teammate would.",
+  overview: "",
+  approvals: "",
+  votes: "",
+  agents: "",
+  payees: "",
+  activity: "",
+  shield: "",
+  swarm: "",
+  rules: "",
+  keys: "",
+  team: "",
+  inbox: "",
 };
 const NAV: { label: string | null; hint?: string; pages: Page[] }[] = [
   { label: null, pages: ["overview", "approvals", "votes", "agents", "payees", "activity"] },
-  { label: "Safety", hint: "runs on its own", pages: ["shield", "swarm"] },
+  { label: "Safety", pages: ["shield", "swarm", "inbox"] },
   { label: "Settings", pages: ["rules", "keys", "team"] },
-  { label: "Testing", hint: "demos only", pages: ["inbox"] },
 ];
 /** Arc explorer link for a transaction hash (payments, Dharma writes, freezes, anchors). */
 const isTx = (v: unknown): v is string => typeof v === "string" && /^0x[0-9a-fA-F]{64}$/.test(v);
 function TxLink({ tx, s }: { tx: unknown; s: Snapshot }) {
   if (!isTx(tx) || !s.org.dharma) return null;
   return <a className="txlink" href={`${s.org.dharma.explorer.replace(/\/address\/.*$/, "")}/tx/${tx}`} target="_blank" rel="noreferrer" title={tx}>Arc tx <Icon name="external" size={12} /></a>;
+}
+/** Info boxes people can close for good (remembered in this browser only). */
+const dismissKey = (id: string) => `karuna.dismissed.${id}`;
+function isDismissed(id: string): boolean {
+  try {
+    return localStorage.getItem(dismissKey(id)) === "1";
+  } catch {
+    return false;
+  }
+}
+function dismiss(id: string) {
+  try {
+    localStorage.setItem(dismissKey(id), "1");
+  } catch {
+    /* per-browser convenience only */
+  }
+}
+function DismissX({ onClick }: { onClick: () => void }) {
+  return <button type="button" className="dismiss-x" aria-label="Close" title="Close" onClick={onClick}><Icon name="x" size={14} /></button>;
+}
+function InfoBox({ id, icon, children }: { id: string; icon: IconName; children: ReactNode }) {
+  const [hidden, setHidden] = useState(() => isDismissed(id));
+  if (hidden) return null;
+  return (
+    <div className="card rise">
+      <div className="intro">
+        <span className="intro-mark"><Icon name={icon} size={18} /></span>
+        {children}
+        <DismissX onClick={() => (dismiss(id), setHidden(true))} />
+      </div>
+    </div>
+  );
 }
 function Empty({ icon, children }: { icon: IconName; children: ReactNode }) {
   return <div className="empty"><span className="empty-mark"><Icon name={icon} size={18} /></span><p>{children}</p></div>;
@@ -337,6 +369,67 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
     window.scrollTo({ top: 0 });
   };
   const [menu, setMenu] = useState(false);
+  const [sideHidden, setSideHidden] = useState(() => {
+    try {
+      return localStorage.getItem("karuna.sidebar") === "hidden";
+    } catch {
+      return false;
+    }
+  });
+  const [palette, setPalette] = useState(false);
+  const topbar = useRef<HTMLElement>(null);
+  // Keep the search bar centered on the whole window, sidebar or not, and the same on every page:
+  // its width depends only on the window and the buttons on the right (never on the page title).
+  useEffect(() => {
+    const bar = topbar.current;
+    if (!bar) return;
+    const fit = () => {
+      const b = bar.getBoundingClientRect();
+      const r = bar.querySelector(".right")?.getBoundingClientRect();
+      if (!r) return;
+      const mid = window.innerWidth / 2;
+      const room = 2 * (r.left - mid) - 32;
+      bar.style.setProperty("--search-x", `${mid - b.left}px`);
+      bar.style.setProperty("--search-w", `${Math.max(150, Math.min(340, room))}px`);
+    };
+    const ro = new ResizeObserver(fit);
+    ro.observe(bar);
+    const right = bar.querySelector(".right");
+    if (right) ro.observe(right);
+    fit();
+    return () => ro.disconnect();
+  }, []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPalette((o) => !o);
+        return;
+      }
+      // ← / →: previous / next page in the sidebar, unless you are typing or a dialog is open.
+      if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        const t = e.target as HTMLElement | null;
+        if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+        if (document.querySelector(".palette-scrim")) return;
+        e.preventDefault();
+        const order = NAV.flatMap((g) => g.pages);
+        setPage((cur) => order[(order.indexOf(cur) + (e.key === "ArrowRight" ? 1 : -1) + order.length) % order.length]);
+        window.scrollTo({ top: 0 });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  const toggleSide = () => {
+    const next = !sideHidden;
+    setSideHidden(next);
+    setMenu(false);
+    try {
+      localStorage.setItem("karuna.sidebar", next ? "hidden" : "pinned");
+    } catch {
+      /* per-browser convenience only */
+    }
+  };
   useEffect(() => {
     if (!menu) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && setMenu(false);
@@ -399,7 +492,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
           return {
             id: a.id, title: a.title, body: a.body, source: "rpc", at: Date.now(), sticky: bad,
             tone: bad ? "bad" : a.kind === "shield-passed" ? "ok" : "warn",
-            go: swarm ? "swarm" : "shield", cta: swarm ? "Swarm Stopper" : "Auto-Shield",
+            go: swarm ? "swarm" : "shield", cta: swarm ? "Tripwire" : "Drills",
           };
         }),
         ...prev,
@@ -412,18 +505,45 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
   const frozen = s.frozen || null;
   const openUnfreeze = pol.proposals.find((g) => g.change?.op === "Unfreeze" && (g.status === "open" || g.status === "queued"));
 
+  // ---- Ctrl+K: every page, then the common actions
+  const commands: Command[] = [
+    ...NAV.flatMap((g) => g.pages.map((v) => ({ id: `go-${v}`, label: TITLES[v], hint: g.label ?? "Go to", icon: ICON[v], keywords: v, run: () => setView(v) }))),
+    ...(pending.length ? [{ id: "review", label: `Review ${pending.length} waiting approval${pending.length > 1 ? "s" : ""}`, hint: "Approvals", icon: "approvals" as IconName, run: () => setView("approvals") }] : []),
+    ...(ballots.length ? [{ id: "vote", label: `Vote on ${ballots.length} open change${ballots.length > 1 ? "s" : ""}`, hint: "Votes", icon: "votes" as IconName, run: () => setView("votes") }] : []),
+    { id: "new-rule", label: "Add a rule", hint: "Rules", icon: "plus", keywords: "policy block allow approval english", run: () => setView("rules") },
+    { id: "new-agent", label: "Add an agent", hint: "Agents", icon: "plus", keywords: "token", run: () => setView("agents") },
+    { id: "new-key", label: "Add an API key", hint: "Keys", icon: "key", keywords: "secret anthropic gemini openai", run: () => setView("keys") },
+    { id: "waits", label: "Change the waits", hint: "Votes", icon: "clock", keywords: "timelock core", run: () => setView("votes") },
+    { id: "sidebar", label: sideHidden ? "Pin the sidebar" : "Hide the sidebar", hint: "View", icon: sideHidden ? "pin" : "panel", keywords: "menu nav", run: toggleSide },
+    ...(frozen
+      ? [{ id: "unfreeze", label: "Unfreeze agents (goes to a vote)", hint: "Safety", icon: "stop" as IconName, run: () => (openUnfreeze ? setView("votes") : void ctx.change({ op: "Unfreeze" })) }]
+      : [{ id: "freeze", label: "Freeze all agents", hint: "Safety", icon: "stop" as IconName, keywords: "panic stop", run: () => confirm("Freeze every agent now? Unfreezing needs a vote.") && void ctx.change({ op: "Freeze" }) }]),
+  ];
+
+
   return (
-    <div className="app">
+    <div className={`app ${sideHidden ? "side-hidden" : ""}`}>
       <div className={`scrim ${menu ? "open" : ""}`} onClick={() => setMenu(false)} aria-hidden />
+      <Palette open={palette} onClose={() => setPalette(false)} commands={commands} />
       <aside className={`sidebar ${menu ? "open" : ""}`} id="console-nav">
         <div className="brand-row">
           <img className="lockup" src="/brand/lockup-transparent.png" alt="Karuna" />
+          <button type="button" className="side-toggle" onClick={toggleSide} aria-label={sideHidden ? "Pin sidebar" : "Hide sidebar"} title={sideHidden ? "Pin sidebar" : "Hide sidebar"}>
+            <Icon name={sideHidden ? "pin" : "panel"} size={16} />
+          </button>
         </div>
         <div className="org">
           <b title={s.org.name}>{s.org.name}</b>
           <a href={s.org.dharma!.explorer} target="_blank" rel="noreferrer" title="Dharma contract on Arc">Dharma {short(s.org.dharma!.address)} <Icon name="external" size={11} /></a>
         </div>
-        <nav className="nav" aria-label="Console">
+        <nav className="nav" aria-label="Console" onKeyDown={(e) => {
+          if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+          const links = [...e.currentTarget.querySelectorAll<HTMLAnchorElement>("a")];
+          const i = links.indexOf(document.activeElement as HTMLAnchorElement);
+          if (i < 0) return;
+          e.preventDefault();
+          links[(i + (e.key === "ArrowDown" ? 1 : -1) + links.length) % links.length].focus();
+        }}>
           {NAV.map((g) => (
             <div key={g.label ?? "main"} className="nav-group">
               {g.label && <div className="nav-label">{g.label}{g.hint && <span> · {g.hint}</span>}</div>}
@@ -448,7 +568,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
       </aside>
 
       <main className="main">
-        <header className="topbar">
+        <header className="topbar" ref={topbar}>
           <div className="left">
             <button className="menu-btn" aria-label="Open menu" aria-expanded={menu} aria-controls="console-nav" onClick={() => setMenu(true)}><Icon name="menu" size={20} /></button>
             <div className="title">
@@ -456,6 +576,11 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
               <h1>{TITLES[view]}</h1>
             </div>
           </div>
+          <button type="button" className="top-search" onClick={() => setPalette(true)} aria-label="Search or jump to (Ctrl+K)">
+            <Icon name="search" size={15} />
+            <span>Search or jump to…</span>
+            <kbd>Ctrl K</kbd>
+          </button>
           <div className="right">
             <LiveBadge mode={live.mode} />
             <span className={`status ${frozen || offline ? "frozen" : ""}`}>
@@ -495,7 +620,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
         </div>
 
         <div className="content" key={view}>
-          <p className="lede page-enter">{LEDE[view]}</p>
+          {LEDE[view] && <p className="lede page-enter">{LEDE[view]}</p>}
           {frozen && (
             <div className="freeze-banner" role="alert">
               <Icon name="stop" size={20} />
@@ -531,21 +656,28 @@ function Overview({ ctx, wallet, go }: { ctx: Ctx; wallet: WalletInfo | null; go
   const pending = s.proposals.filter((p) => p.status === "pending");
   const spent = pol.agents.reduce((n, a) => n + a.spentTodayUsd, 0);
   const live = pol.proposals.filter((g) => g.status === "open" || g.status === "queued");
+  const today = new Date().toDateString();
+  const todays = s.proposals.filter((p) => new Date(p.createdAt).toDateString() === today);
+  const count = (f: (p: Proposal) => boolean) => todays.filter(f).length;
+  const allowedToday = count((p) => p.status === "allowed" || p.status === "executed" || p.status === "executing");
+  const blockedToday = count((p) => p.status === "denied" || p.status === "failed");
+  const heldToday = count((p) => p.status === "pending");
+  const [startHidden, setStartHidden] = useState(() => isDismissed("get-started"));
   const steps = [
-    { done: pol.agents.length > 0, text: "Add an agent (its token works once Dharma adds it)", view: "agents" as View },
-    { done: pol.payees.length > 0, text: "Add the payees and services your agents may pay", view: "payees" as View },
-    { done: pol.members.length > 1, text: "Add a second member (two-person approval, real votes)", view: "team" as View },
+    { done: pol.agents.length > 0, text: "Add an agent", view: "agents" as View },
+    { done: pol.payees.length > 0, text: "Add who your agents may pay", view: "payees" as View },
+    { done: pol.members.length > 1, text: "Add a second member", view: "team" as View },
   ];
   return (
     <div className="stack">
       <div className="tiles">
-        <div className={`tile rise ${pending.length ? "attention" : ""}`} style={st(0)}><div className="k">Waiting for you <Icon name="approvals" size={14} /></div><div className="v heading-gradient">{pending.length}</div><div className="note">{pending.length ? "payments to sign" : "all clear"}</div></div>
-        <div className="tile rise" style={st(1)}><div className="k">Wallet USDC <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{wallet ? Number(wallet.usdc).toFixed(2) : "…"}</div><div className="note">Gateway {wallet?.gateway ?? "—"}</div></div>
-        <div className={`tile rise ${live.length ? "attention" : ""}`} style={st(2)}><div className="k">Votes open <Icon name="votes" size={14} /></div><div className="v heading-gradient">{live.length}</div><div className="note">{pol.required} of {pol.members.length} to pass</div></div>
-        <div className="tile rise" style={st(3)}><div className="k">Spent today <Icon name="activity" size={14} /></div><div className="v heading-gradient">{usd(spent)}</div><div className="note">of {usd(pol.agents.filter((a) => a.active).reduce((n, a) => n + a.capUsd, 0))} allowed</div></div>
+        <div className={`tile rise ${pending.length ? "attention" : ""}`} style={st(0)}><div className="k">Waiting for you <Icon name="approvals" size={14} /></div><div className="v heading-gradient">{pending.length}</div><div className="note">{pending.length ? "to approve" : "all clear"}</div></div>
+        <div className="tile rise" style={st(1)}><div className="k">Wallet (USDC) <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{wallet ? usd(Number(wallet.usdc)) : "…"}</div><div className="note">Gateway {wallet?.gateway ?? "—"}</div></div>
+        <div className="tile rise" style={st(2)}><div className="k">Actions today <Icon name="activity" size={14} /></div><div className="v heading-gradient">{todays.length}</div><div className="note">{allowedToday} allowed · {blockedToday} blocked · {heldToday} held</div></div>
+        <div className="tile rise" style={st(3)}><div className="k">Spent today <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{usd(spent)}</div><div className="note">of {usd(pol.agents.filter((a) => a.active).reduce((n, a) => n + a.capUsd, 0))} allowed</div></div>
       </div>
 
-      {steps.some((x) => !x.done) && (
+      {steps.some((x) => !x.done) && !startHidden && (
         <div className="card rise" style={st(1)}>
           <div className="hd">
             <h2>Get started</h2>
@@ -553,6 +685,7 @@ function Overview({ ctx, wallet, go }: { ctx: Ctx; wallet: WalletInfo | null; go
               <span className="progress-dots">{steps.map((x) => <i key={x.text} className={x.done ? "on" : ""} />)}</span>
               {steps.filter((x) => x.done).length}/{steps.length}
             </span>
+            <DismissX onClick={() => (dismiss("get-started"), setStartHidden(true))} />
           </div>
           <div className="checklist">
             {steps.map((x) => (
@@ -574,9 +707,8 @@ function Overview({ ctx, wallet, go }: { ctx: Ctx; wallet: WalletInfo | null; go
         <div className="card rise" style={st(3)}>
           <div className="hd"><h2>Dharma</h2><a className="sub link-u" href={s.org.dharma!.explorer} target="_blank" rel="noreferrer">{short(s.org.dharma!.address)} ↗</a></div>
           <div className="pad">
-            <div className="kv"><span>Policy version</span><b>v{pol.policyVersion}</b></div>
             <div className="kv"><span>Members · votes to change a rule</span><b>{pol.members.length} · {pol.required}</b></div>
-            <div className="kv"><span>Timelock</span><b>{pol.timelock}s</b></div>
+            <div className="kv"><span>{pol.coreTimelock === undefined ? "Wait" : "Wait · core changes"}</span><b>{waitText(pol.timelock)}{pol.coreTimelock === undefined ? "" : ` · ${waitText(pol.coreTimelock)}`}</b></div>
             <div className="kv"><span>Log anchored onchain</span><b>{pol.anchor.length}/{s.log.length}</b></div>
           </div>
           <div className="log-foot">
@@ -595,8 +727,20 @@ function Overview({ ctx, wallet, go }: { ctx: Ctx; wallet: WalletInfo | null; go
   );
 }
 
+/** What kind of action a request is, in words, for approval cards. */
+function actionKind(p: Proposal): string {
+  if (p.payload) return p.payload.kind === "x402" ? "Paid API" : "Payment";
+  const t = p.request.tool;
+  if (t === "http") return `Web request · ${p.request.method ?? "GET"}`;
+  if (t === "message") return "Message to an agent";
+  if (t === "shell") return "Shell command";
+  if (t === "file") return p.request.fileOp === "write" ? "File write" : "File read";
+  return "Payment";
+}
+
 function describe(p: Proposal, ctx: Ctx) {
   const a = p.action;
+  if (a.type === "message") return `message → ${ctx.s.policy!.agents.find((x) => x.id === a.to)?.name ?? a.to}`;
   if (a.type === "x402") return `buy ${a.method ?? "GET"} ${a.url}`;
   if (a.type === "transfer") {
     const r = ctx.s.policy!.payees.find((x) => x.account === String(a.to).toLowerCase());
@@ -635,8 +779,7 @@ function Approvals({ ctx, dharma }: { ctx: Ctx; dharma: Address }) {
   const resolved = s.proposals.filter((p) => p.decision.outcome === "approval" && p.status !== "pending").slice(0, 10);
   return (
     <div className="stack">
-      <p className="section-title">Facts first · your signature covers this exact payment</p>
-      {pending.length === 0 && <div className="card"><Empty icon="check">Nothing is waiting for a person. When an agent asks for a payment your rules hold back, it appears here.</Empty></div>}
+      {pending.length === 0 && <div className="card"><Empty icon="check">Nothing is waiting for you.</Empty></div>}
       {pending.map((p, i) => <div className="rise" style={st(i)} key={p.id}><ApprovalCard p={p} ctx={ctx} dharma={dharma} /></div>)}
       {resolved.length > 0 && (
         <div className="card">
@@ -672,7 +815,7 @@ function ApprovalCard({ p, ctx, dharma }: { p: Proposal; ctx: Ctx; dharma: Addre
     <article className="approval">
       <div className="appr-top">
         <span className="agent-mark"><Icon name="agents" size={18} /></span>
-        <span className="who"><b>{agent?.name ?? p.agentId}</b><span>{p.payload?.kind === "x402" ? "buy a service" : "send a payment"} · {ago(p.createdAt)}</span></span>
+        <span className="who"><b>{agent?.name ?? p.agentId}</b><span>{actionKind(p)} · {ago(p.createdAt)}</span></span>
         {p.payload && <span className="amt"><span>amount</span><strong className="heading-gradient">{usd(p.payload.amountUsd)}</strong></span>}
       </div>
       <div className="facts">
@@ -716,40 +859,51 @@ function Dharma({ ctx }: { ctx: Ctx }) {
   const now = useNow();
   const myAddr = me.address.toLowerCase();
   const live = pol.proposals.filter((g) => g.status === "open" || g.status === "queued");
-  const done = pol.proposals.filter((g) => g.status === "executed" || g.status === "defeated").slice(0, 15);
+  const done = pol.proposals.filter((g) => g.status === "executed" || g.status === "defeated" || g.status === "cancelled").slice(0, 15);
+  const team = pol.members.length >= 2;
+  // An org on an older Dharma (before core changes and the core wait) has no core settings to show.
+  const hasCore = Number.isFinite(pol.coreTimelock);
   return (
     <div className="stack">
       <div className="card dharma-head rise">
-        <div className="grid-kv">
+        <div className={`grid-kv ${hasCore ? "" : "kv3"}`}>
           <div><div className="k">Contract</div><a className="mono link-u" href={s.org.dharma!.explorer} target="_blank" rel="noreferrer">{short(s.org.dharma!.address)} ↗</a></div>
-          <div><div className="k">Policy version</div><div className="big tnum">v{pol.policyVersion}</div></div>
-          <div><div className="k">To pass a change</div><div className="big tnum">{pol.required}/{pol.members.length} <span className="muted small mono">+ {pol.timelock}s</span></div></div>
+          <div><div className="k">To pass a change</div><div className="big tnum">{pol.required}/{pol.members.length} <span className="muted small mono">+ {waitText(pol.timelock)}</span></div></div>
+          {hasCore && <div><div className="k">Core changes</div><div className="big tnum">{pol.members.length}/{pol.members.length} <span className="muted small mono">+ {waitText(pol.coreTimelock)}</span></div></div>}
           <div><div className="k">Log anchored</div><div className="big tnum">{pol.anchor.length}<span className="muted small mono"> / {s.log.length}</span></div></div>
         </div>
-        <div className="log-foot"><span>proposal → majority vote → timelock · panic button: instant</span><span><Icon name="lock" size={12} /> core boundaries: never</span></div>
       </div>
+
+      <Waits ctx={ctx} />
 
       <p className="section-title">In progress</p>
       {live.length === 0 && <div className="card"><Empty icon="votes">No changes are waiting. A new payee, a higher allowance, a new member or an unfreeze appears here for a vote.</Empty></div>}
       {live.map((g, i) => {
         const voted = g.voters.includes(myAddr);
         const remaining = g.eta ? Math.max(0, g.eta - Math.floor(now / 1000)) : null;
+        const need = Number.isFinite(g.needed) ? g.needed : pol.required;
+        // Every member can skip the wait on a normal change (not Unfreeze, never core).
+        const canSkip = g.status === "queued" && !g.core && g.change.op !== "Unfreeze" && team && !voted && !!remaining;
         return (
           <div className="card ballot rise" style={st(i)} key={g.id}>
             <div className="ballot-top">
               <Badge v={g.status === "queued" ? "allow" : "approval"}>{g.status === "queued" ? "passed" : "voting"}</Badge>
+              {g.core && <span className="badge badge-danger" title={`Core change: needs every member and waits ${waitText(pol.coreTimelock)}. A freeze cancels it.`}><Icon name="lock" size={11} /> core</span>}
               <b>{g.description}</b>
               <span className="muted">#{g.id} · {ctx.name(g.proposer)} · {ago(g.createdAt)}</span>
             </div>
             <div className="ballot-body">
               <div className="votes">
-                <span className="segs" aria-label={`${g.yes} of ${pol.required} votes`}>{Array.from({ length: pol.required }, (_, k) => <i key={k} className={k < g.yes ? "on" : ""} />)}</span>
-                <span className="mono small tnum">{g.yes}/{pol.required} yes{g.no ? ` · ${g.no} no` : ""}</span>
+                <span className="segs" aria-label={`${g.yes} of ${need} votes`}>{Array.from({ length: need }, (_, k) => <i key={k} className={k < g.yes ? "on" : ""} />)}</span>
+                <span className="mono small tnum">{g.yes}/{need} yes{g.no ? ` · ${g.no} no` : ""}{g.core ? " · everyone" : ""}</span>
               </div>
               {g.status === "queued" ? (
-                <span className="countdown"><Icon name="clock" size={14} />{remaining ? <>in effect in <b className="tnum">{remaining}s</b></> : <span className="shimmer">executing…</span>}</span>
+                <span className="ballot-actions">
+                  <span className="countdown"><Icon name="clock" size={14} />{remaining ? <>in effect in <b className="tnum">{waitText(remaining)}</b></> : <span className="shimmer">executing…</span>}</span>
+                  {canSkip && <button className="btn btn-approve btn-sm" disabled={busy} title="When every member signs, it applies now" onClick={() => ctx.vote(g, true)}><Icon name="pen" size={14} /> Sign to apply now</button>}
+                </span>
               ) : voted ? (
-                <span className="muted small">You voted · {pol.required - g.yes} more needed</span>
+                <span className="muted small">You voted · {need - g.yes} more needed</span>
               ) : (
                 <span className="ballot-actions">
                   <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => ctx.vote(g, false)}>Vote no</button>
@@ -768,7 +922,7 @@ function Dharma({ ctx }: { ctx: Ctx }) {
           <div className="resolved">
             {done.map((g) => (
               <div key={g.id} className="res">
-                <Badge v={g.status === "executed" ? "allow" : "deny"}>{g.status === "executed" ? "in effect" : g.status}</Badge>
+                <Badge v={g.status === "executed" ? "allow" : "deny"}>{g.status === "executed" ? "in effect" : g.status === "cancelled" ? "cancelled by freeze" : g.status}</Badge>
                 <span className="small">{g.description}</span>
                 <span className="muted small">#{g.id} · {g.yes} yes · {g.no} no</span>
               </div>
@@ -776,6 +930,46 @@ function Dharma({ ctx }: { ctx: Ctx }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Propose new waits: the normal wait (majority vote) and the core wait (every member). */
+function Waits({ ctx }: { ctx: Ctx }) {
+  const pol = ctx.s.policy!;
+  const UNITS = { minutes: 60, hours: 3600, days: 86400 } as const;
+  type Unit = keyof typeof UNITS;
+  const fit = (sec: number): { n: string; unit: Unit } =>
+    sec % 86400 === 0 && sec >= 86400 ? { n: String(sec / 86400), unit: "days" } : sec % 3600 === 0 && sec >= 3600 ? { n: String(sec / 3600), unit: "hours" } : { n: String(sec / 60), unit: "minutes" };
+  const [normal, setNormal] = useState(fit(pol.timelock));
+  const [core, setCore] = useState(fit(Number.isFinite(pol.coreTimelock) ? pol.coreTimelock : 86400));
+  const secs = (v: { n: string; unit: Unit }) => Math.round(Number(v.n) * UNITS[v.unit]);
+  const row = (label: string, v: { n: string; unit: Unit }, set: (x: { n: string; unit: Unit }) => void, current: number, min: number, max: number, op: "SetTimelock" | "SetCoreTimelock", who: string) => {
+    const sec = secs(v);
+    const ok = Number.isFinite(sec) && v.n.trim() !== "" && sec >= min && sec <= max && sec !== current;
+    return (
+      <div className="wait-row">
+        <span className="wait-label">{label}<small>{waitText(current)} now · {who}</small></span>
+        <input className="select-sm mono" inputMode="decimal" aria-label={`${label} amount`} value={v.n} onChange={(e) => set({ ...v, n: e.target.value })} />
+        <select className="select-sm" aria-label={`${label} unit`} value={v.unit} onChange={(e) => set({ ...v, unit: e.target.value as Unit })}>
+          {Object.keys(UNITS).map((u) => <option key={u} value={u}>{u}</option>)}
+        </select>
+        <button className="btn btn-ghost btn-sm" disabled={ctx.busy || !ok}
+          title={sec < min || sec > max ? `Between ${waitText(min) === "no wait" ? "0" : waitText(min)} and ${waitText(max)}` : undefined}
+          onClick={() => {
+            if (op === "SetTimelock" && sec === 0 && !confirm("No wait means a passed change applies at once, so stolen keys could loosen rules immediately. Propose it anyway?")) return;
+            ctx.change({ op, seconds: sec } as Change);
+          }}>Propose</button>
+      </div>
+    );
+  };
+  return (
+    <div className="card">
+      <div className="hd"><h2>Waits</h2></div>
+      <div className="pad waits">
+        {row("Normal changes", normal, setNormal, pol.timelock, 0, 7 * 86400, "SetTimelock", "majority vote")}
+        {Number.isFinite(pol.coreTimelock) && row("Core changes", core, setCore, pol.coreTimelock, 60, 30 * 86400, "SetCoreTimelock", "every member")}
+      </div>
     </div>
   );
 }
@@ -851,11 +1045,10 @@ function Agents({ ctx }: { ctx: Ctx }) {
       </form>
       <SandboxRuns ctx={ctx} />
       <RemoteRuns ctx={ctx} />
-      <p className="section-title">Adding, removing or changing an allowance goes to a team vote</p>
       {pol.agents.length === 0 ? (
         <div className="card"><Empty icon="agents">No agents yet. Propose one above; it can ask for money once Dharma adds it.</Empty></div>
       ) : (
-        <div className="grid2">
+        <div className="grid2 agent-grid">
           {pol.agents.map((a, i) => {
             const ed = editing[a.id];
             return (
@@ -921,9 +1114,8 @@ function Payees({ ctx }: { ctx: Ctx }) {
         <label className="field"><span>Category</span><input required value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="e.g. data, utilities" /></label>
         <button className="btn btn-dark" type="submit" disabled={busy}><Icon name="plus" /> Propose payee</button>
       </form>
-      <p className="section-title">Any address not on this list is denied · changes go to a team vote</p>
       <div className="card">
-        <div className="hd"><h2>Known payees</h2><span className="sub">{pol.payees.length} onchain</span></div>
+        <div className="hd"><h2>Known payees</h2><span className="sub">{pol.payees.length}</span></div>
         {pol.payees.length === 0 ? (
           <Empty icon="payees">No payees yet, so every payment is denied.</Empty>
         ) : (
@@ -946,13 +1138,96 @@ function Payees({ ctx }: { ctx: Ctx }) {
 
 // ============================================================== policy
 
+/** The key the Gatekeeper uses to draft rules from English (KARUNA_DRAFT_KEY on the Gatekeeper). */
+const DRAFTER_KEY = "gemini";
+
+type RuleKind = "payment" | "http" | "shell" | "file" | "message";
+type RuleChange = Extract<Change, { op: "AddRule" }>;
+interface RuleForm { kind: RuleKind; outcome: "Deny" | "Approval" | "Allow"; agent: string; target: string; method: string; fileOp: string; category: string; maxUsd: string }
+interface RuleDraft { change: RuleChange; sentence: string }
+const EMPTY_RULE: RuleForm = { kind: "payment", outcome: "Deny", agent: "", target: "", method: "", fileOp: "", category: "", maxUsd: "" };
+
+/** The form as the exact Dharma change it proposes, or why it can't be proposed yet. */
+function buildRuleChange(f: RuleForm): { change: RuleChange } | { error: string } {
+  let target = f.target.trim();
+  let scope: string = f.kind;
+  let maxUsd = 0;
+  if (f.kind === "payment") {
+    if (f.category.trim()) scope = `payment:${f.category.trim().toLowerCase()}`;
+    target = target.toLowerCase();
+    if (f.outcome === "Allow" && f.maxUsd.trim()) {
+      maxUsd = Number(f.maxUsd);
+      if (!(maxUsd > 0)) return { error: "The cap must be a dollar amount above 0." };
+    }
+  } else if (f.kind === "http") {
+    if (f.method) scope = `http:${f.method}`;
+    target = target.toLowerCase().replace(/^https?:\/\//, "");
+    if (f.outcome === "Allow" && !target) return { error: "Name the site to allow." };
+  } else if (f.kind === "file") {
+    if (f.fileOp) scope = `file:${f.fileOp}`;
+  }
+  if (f.outcome === "Allow" && (f.kind === "shell" || f.kind === "file") && (!target || target === "*")) {
+    return { error: `Name the ${f.kind === "shell" ? "command" : "path"} to allow; allowing every one is too broad.` };
+  }
+  const id = `r-${f.kind}-${Date.now().toString(36)}`;
+  return { change: { op: "AddRule", id, outcome: f.outcome, ...(f.agent ? { agent: f.agent } : {}), scope, target, ...(maxUsd ? { maxUsd } : {}) } };
+}
+
+/** A drafted (or any) rule change back into the form, to edit it. */
+function formFromChange(c: RuleChange): RuleForm {
+  const [kind, sub = ""] = (c.scope ?? "payment").split(":");
+  return {
+    ...EMPTY_RULE,
+    kind: (["payment", "http", "shell", "file", "message"].includes(kind) ? kind : "payment") as RuleKind,
+    outcome: c.outcome as RuleForm["outcome"],
+    agent: c.agent ?? "",
+    target: c.target ?? "",
+    method: kind === "http" ? sub.toUpperCase() : "",
+    fileOp: kind === "file" ? sub : "",
+    category: kind === "payment" ? sub : "",
+    maxUsd: c.maxUsd ? String(c.maxUsd) : "",
+  };
+}
+
+/** The sentence a member reads before proposing; the same wording the Gatekeeper and Votes use. */
+function describeRule(c: RuleChange, names: { agent: (id: string) => string; payee: (a: string) => string }): string {
+  const verb = c.outcome === "Allow" ? "Allow" : c.outcome === "Deny" ? "Block" : "Require approval for";
+  return `${verb} ${describeScope(c.scope ?? "", c.target ?? "", names)} for ${c.agent ? names.agent(c.agent) : "every agent"}${c.maxUsd ? ` up to $${c.maxUsd.toFixed(2)}` : ""}.`;
+}
+
 function Policy({ ctx }: { ctx: Ctx }) {
   const { s, busy } = ctx;
   const pol = s.policy!;
   const [meta, setMeta] = useState<Rule[]>([]);
   const [domain, setDomain] = useState("");
   const [threshold, setThreshold] = useState(String(pol.thresholdUsd));
-  const [rule, setRule] = useState({ outcome: "Deny" as "Deny" | "Approval", agent: "", category: "", payee: "" });
+  const [rule, setRule] = useState<RuleForm>(EMPTY_RULE);
+  const [english, setEnglish] = useState("");
+  const [drafting, setDrafting] = useState(false);
+  const [drafts, setDrafts] = useState<RuleDraft[] | null>(null);
+  const [draftNote, setDraftNote] = useState<{ note: string; skipped: string[]; model?: string; savedFrom?: string } | null>(null);
+  const [draftErr, setDraftErr] = useState("");
+  const names = {
+    agent: (id: string) => pol.agents.find((a) => a.id === id)?.name ?? id,
+    payee: (a: string) => pol.payees.find((p) => p.account.toLowerCase() === a.toLowerCase())?.name ?? short(a),
+  };
+  const built = buildRuleChange(rule);
+  const draft = async () => {
+    if (!english.trim() || drafting) return;
+    setDrafting(true);
+    setDraftErr("");
+    setDrafts(null);
+    setDraftNote(null);
+    try {
+      const r = await api<{ rules: RuleDraft[]; note: string; skipped: string[]; model?: string; savedFrom?: string }>("/rules/draft", { text: english });
+      setDrafts(r.rules);
+      setDraftNote({ note: r.note, skipped: r.skipped, model: r.model, savedFrom: r.savedFrom });
+    } catch (e) {
+      setDraftErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDrafting(false);
+    }
+  };
   useEffect(() => {
     api<Rule[]>("/policy").then(setMeta).catch(() => undefined);
   }, []);
@@ -960,27 +1235,32 @@ function Policy({ ctx }: { ctx: Ctx }) {
 
   const addRule = (e: FormEvent) => {
     e.preventDefault();
-    const scope = rule.category ? `payment:${rule.category.trim().toLowerCase()}` : "payment";
-    const id = `rule-${Date.now().toString(36)}`;
-    ctx.change({ op: "AddRule", id, outcome: rule.outcome, agent: rule.agent || undefined, scope, target: rule.payee || "" });
+    if ("error" in built) return;
+    ctx.change(built.change).then((ok) => ok && setRule({ ...EMPTY_RULE, kind: rule.kind }));
   };
 
   return (
     <div className="stack">
       <div className="card">
-        <div className="hd window-hd"><h2>Rules on Dharma</h2><span className="sub">{pol.rules.filter((r) => r.active).length} active · first match decides</span></div>
+        <div className="hd window-hd"><h2>Rules on Dharma</h2><span className="sub">{pol.rules.filter((r) => r.active).length} active</span></div>
         <div className="policy">
           {pol.rules.map((r, i) => (
             <div className={`p ${r.active ? "" : "off"}`} key={r.id}>
               <span className="i">{String(i + 1).padStart(2, "0")}</span>
               <span className="nm">
                 <span>{r.id}{r.core && <span className="lock" title="Core boundary: can never be removed"><Icon name="lock" size={10} /> core</span>}</span>
-                <span className="desc">{r.builtin ? desc(r.id) ?? r.scope : `${r.scope}${r.target ? ` → ${short(r.target)}` : ""}${r.agent ? ` · ${r.agent}` : " · every agent"}`}</span>
+                <span className="desc">{r.builtin ? desc(r.id) ?? r.scope : `${describeScope(r.scope, r.target, names)} · ${r.agent ? names.agent(r.agent) : "every agent"}`}</span>
               </span>
               <span className="rule-actions">
                 {r.active ? <Badge v={r.outcome} /> : <span className="badge badge-quiet">removed</span>}
                 {!r.core && r.active && (
                   <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => ctx.change({ op: "RemoveRule", id: r.id })}>{r.outcome === "allow" ? "remove" : "propose removal"}</button>
+                )}
+                {r.core && r.active && (
+                  <button className="btn btn-ghost btn-sm" disabled={busy}
+                    onClick={() => confirm(`${r.id} is a core rule. Removing it needs every member's vote and a ${waitText(pol.coreTimelock)} wait, and any freeze cancels it. Propose anyway?`) && ctx.change({ op: "RemoveRule", id: r.id })}>
+                    propose removal
+                  </button>
                 )}
                 {!r.core && !r.active && r.builtin && (
                   <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => ctx.change({ op: "AddRule", id: r.id, outcome: "Deny" })}>{"propose re-enable"}</button>
@@ -991,11 +1271,58 @@ function Policy({ ctx }: { ctx: Ctx }) {
         </div>
       </div>
 
-      <form className="card inline-form" onSubmit={addRule}>
-        <label className="field"><span>New rule</span>
-          <select value={rule.outcome} onChange={(e) => setRule({ ...rule, outcome: e.target.value as "Deny" | "Approval" })}>
-            <option value="Deny">Block payments</option>
-            <option value="Approval">Require approval for payments</option>
+      <div className="card rule-english">
+        <div className="hd"><h2>Describe a rule in plain English</h2></div>
+        <div className="rule-english-body">
+          <textarea
+            rows={3}
+            value={english}
+            onChange={(e) => setEnglish(e.target.value)}
+            onKeyDown={(e) => (e.key === "Enter" && (e.metaKey || e.ctrlKey) ? void draft() : undefined)}
+            placeholder={'e.g. "The research agent can\'t message the payables agent, nobody runs git push, and writes to the finance folder need a person."'}
+          />
+          <div className="rule-english-actions">
+            <button className="btn btn-dark" type="button" disabled={drafting || !english.trim()} onClick={() => void draft()}>{drafting ? "Drafting…" : "Draft rules"}</button>
+          </div>
+          {draftErr && <div className="draft-err">{draftErr}</div>}
+          {drafts && (
+            <div className="drafts">
+              {drafts.length === 0 && <div className="hint">No rules could be drafted from that. Try being more specific, or use the form below.</div>}
+              {drafts.map((d) => (
+                <div className="draft" key={d.change.id}>
+                  <div className="draft-text">
+                    <div className="draft-sentence">{describeRule(d.change, names)}</div>
+                    <code className="draft-code">{d.change.outcome.toLowerCase()} · {d.change.scope}{d.change.target ? ` → ${d.change.target}` : ""}{d.change.agent ? ` · ${d.change.agent}` : " · every agent"}{d.change.maxUsd ? ` · ≤ $${d.change.maxUsd}` : ""}</code>
+                  </div>
+                  <div className="draft-actions">
+                    <button className="btn btn-ghost btn-sm" type="button" onClick={() => setRule(formFromChange(d.change))}>Edit</button>
+                    <button className="btn btn-dark btn-sm" type="button" disabled={busy} onClick={() => ctx.change(d.change).then((ok) => ok && setDrafts((x) => x?.filter((y) => y !== d) ?? null))}>Propose</button>
+                  </div>
+                </div>
+              ))}
+              {draftNote?.model && <div className="hint">{draftNote.model === "saved" ? `From a saved draft (first drafted by ${draftNote.savedFrom ?? "a model"}), no model call needed.` : `Drafted by ${draftNote.model}.`}</div>}
+              {draftNote?.note && <div className="hint">Note from the drafter: {draftNote.note}</div>}
+              {!!draftNote?.skipped.length && <div className="hint">Left out {draftNote.skipped.length} suggestion{draftNote.skipped.length > 1 ? "s" : ""} that didn't fit your org: {draftNote.skipped.join("; ")}.</div>}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <form className="card inline-form rule-form" onSubmit={addRule}>
+        <label className="field"><span>Outcome</span>
+          <select value={rule.outcome} onChange={(e) => setRule({ ...rule, outcome: e.target.value as RuleForm["outcome"] })}>
+            <option value="Deny">Block</option>
+            <option value="Approval">Require approval</option>
+            <option value="Allow">Allow</option>
+          </select>
+        </label>
+        <label className="field"><span>Action</span>
+          <select value={rule.kind} onChange={(e) => setRule({ ...EMPTY_RULE, outcome: rule.outcome, agent: rule.agent, kind: e.target.value as RuleKind })}>
+            <option value="payment">Payments</option>
+            <option value="http">Web requests</option>
+            <option value="shell">Shell commands</option>
+            <option value="file">Files</option>
+            <option value="message">Messages to other agents</option>
           </select>
         </label>
         <label className="field"><span>Agent</span>
@@ -1004,14 +1331,48 @@ function Policy({ ctx }: { ctx: Ctx }) {
             {pol.agents.filter((a) => a.active).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
           </select>
         </label>
-        <label className="field"><span>Category (optional)</span><input value={rule.category} onChange={(e) => setRule({ ...rule, category: e.target.value })} placeholder="e.g. data" /></label>
-        <label className="field grow"><span>Payee (optional)</span>
-          <select value={rule.payee} onChange={(e) => setRule({ ...rule, payee: e.target.value })}>
-            <option value="">Any payee</option>
-            {pol.payees.map((p) => <option key={p.account} value={p.account}>{p.name ?? short(p.account)}</option>)}
-          </select>
-        </label>
-        <button className="btn btn-dark" disabled={busy}><Icon name="plus" /> Propose rule</button>
+        {rule.kind === "payment" && <>
+          <label className="field"><span>Payee</span>
+            <select value={rule.target} onChange={(e) => setRule({ ...rule, target: e.target.value })}>
+              <option value="">Any payee</option>
+              {pol.payees.map((p) => <option key={p.account} value={p.account}>{p.name ?? short(p.account)}</option>)}
+            </select>
+          </label>
+          <label className="field"><span>Category</span><input value={rule.category} onChange={(e) => setRule({ ...rule, category: e.target.value })} placeholder="any" /></label>
+          {rule.outcome === "Allow" && <label className="field"><span>Up to (USD)</span><input inputMode="decimal" value={rule.maxUsd} onChange={(e) => setRule({ ...rule, maxUsd: e.target.value })} placeholder="no cap" /></label>}
+        </>}
+        {rule.kind === "http" && <>
+          <label className="field"><span>Method</span>
+            <select value={rule.method} onChange={(e) => setRule({ ...rule, method: e.target.value })}>
+              <option value="">Any</option>
+              {["GET", "POST", "PUT", "PATCH", "DELETE"].map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </label>
+          <label className="field grow"><span>Site</span><input value={rule.target} onChange={(e) => setRule({ ...rule, target: e.target.value })} placeholder="api.github.com or api.openai.com/v1/" /></label>
+        </>}
+        {rule.kind === "shell" && (
+          <label className="field grow"><span>Command</span><input value={rule.target} onChange={(e) => setRule({ ...rule, target: e.target.value })} placeholder="git push   ·   or a pattern like *curl *" /></label>
+        )}
+        {rule.kind === "file" && <>
+          <label className="field"><span>Access</span>
+            <select value={rule.fileOp} onChange={(e) => setRule({ ...rule, fileOp: e.target.value })}>
+              <option value="">Read or write</option>
+              <option value="read">Read</option>
+              <option value="write">Write</option>
+            </select>
+          </label>
+          <label className="field grow"><span>Path</span><input value={rule.target} onChange={(e) => setRule({ ...rule, target: e.target.value })} placeholder="finance   ·   or a pattern like *.csv" /></label>
+        </>}
+        {rule.kind === "message" && (
+          <label className="field grow"><span>To</span>
+            <select value={rule.target} onChange={(e) => setRule({ ...rule, target: e.target.value })}>
+              <option value="">Any agent</option>
+              {pol.agents.filter((a) => a.active).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </label>
+        )}
+        <button className="btn btn-dark" disabled={busy || "error" in built}><Icon name="plus" /> Propose rule</button>
+        <div className="rule-preview">{"error" in built ? built.error : <>Will be voted on as: <strong>{describeRule(built.change, names)}</strong></>}</div>
       </form>
 
       <div className="grid2">
@@ -1029,7 +1390,7 @@ function Policy({ ctx }: { ctx: Ctx }) {
           </div>
         </div>
         <div className="card">
-          <div className="hd"><h2>Two-person approval</h2><span className="sub">{usd(pol.thresholdUsd)}</span></div>
+          <div className="hd"><h2>Large payments need two approvals</h2><span className="sub">from {usd(pol.thresholdUsd)}</span></div>
           <div className="pad stack-sm">
             <p className="muted">Payments at or above this need two members' signatures{pol.members.length < 2 ? " (once there are two members)" : ""}. Changing it goes to a team vote.</p>
             <form className="row-form" onSubmit={(e) => { e.preventDefault(); ctx.change({ op: "SetThreshold", usd: Number(threshold) }); }}>
@@ -1058,7 +1419,7 @@ function Activity({ ctx, log }: { ctx: Ctx; log: LogEntry[] }) {
   return (
     <div className="card">
       <div className="hd">
-        <h2>Everything that happened</h2>
+        <h2>Decision log</h2>
         <span className="filters" role="tablist" aria-label="Filter the log">{(["all", "decisions", "events", "on Arc"] as const).map((k) => <button key={k} role="tab" aria-selected={filter === k} className={filter === k ? "on" : ""} onClick={() => setFilter(k)}>{k}</button>)}</span>
       </div>
       {shown.length === 0 ? (
@@ -1131,9 +1492,8 @@ function Team({ ctx }: { ctx: Ctx }) {
           </div>
         </div>
       )}
-      <p className="section-title">Adding or removing a member: {pol.required} vote{pol.required > 1 ? "s" : ""} + {pol.timelock}s</p>
       <div className="card">
-        <div className="hd"><h2>Members on Dharma</h2><span className="sub">{pol.members.length}</span></div>
+        <div className="hd"><h2>Members</h2><span className="sub">{pol.members.length}</span></div>
         <div className="table">
           {pol.members.map((m) => (
             <div className="tr" key={m.address}>
@@ -1149,7 +1509,7 @@ function Team({ ctx }: { ctx: Ctx }) {
         <div className="hd"><h2>Gatekeeper wallet</h2><span className="sub">{s.org.wallet?.chain}</span></div>
         <div className="pad stack-sm">
           <div className="token-row"><code className="token">{s.org.wallet?.address}</code></div>
-          <p className="muted small">Pays for services and relays Dharma transactions. Agents never see it. It can tighten Dharma but never loosen it.</p>
+          <p className="muted small">Pays for services and relays Dharma transactions.</p>
         </div>
       </div>
     </div>
@@ -1184,8 +1544,8 @@ function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string
         body: `${agentName(a.agent)} wants to pay $${Number(a.amountUsd).toFixed(2)}${who ? ` to ${who}` : ""}` };
     }
     case "AgentFrozen":
-      if (s.frozen && s.frozen.by === "Swarm Stopper")
-        return { ...base, tone: "bad", sticky: true, go: "swarm", cta: "Swarm Stopper", title: "Swarm freeze recorded on Dharma", body: "Swarm Stopper froze every agent. Unfreezing needs a member vote." };
+      if (s.frozen && (s.frozen.by === "Tripwire" || s.frozen.by === "Swarm Stopper"))
+        return { ...base, tone: "bad", sticky: true, go: "swarm", cta: "Tripwire", title: "Tripwire freeze recorded on Dharma", body: "Tripwire froze every agent. Unfreezing needs a member vote." };
       return { ...base, tone: "bad", sticky: true, title: "All agents frozen", body: `${name(String(a.by))} hit the panic button. Recorded on Dharma.` };
     case "AgentsUnfrozen":
       return { ...base, tone: "ok", sticky: false, title: "Agents unfrozen", body: "The vote passed and the timelock ended." };
@@ -1216,14 +1576,14 @@ function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string
     case "RuleAdded":
       return { ...base, tone: "info", sticky: false, title: "Rule added", body: `${String(a.id)} — in effect now` };
     case "TestFailed":
-      return { ...base, tone: "bad", sticky: true, title: "Agent failed a scam test", body: `${agentName(a.agent)} · ${String(a.category)} payments are now blocked for it.` };
+      return { ...base, tone: "bad", sticky: true, title: "Agent fell for a drill", body: `${agentName(a.agent)} · ${String(a.category)} payments are now blocked for it.` };
     default:
       return null; // anchors, payee/domain changes etc. update the screen without a pop-up
   }
 }
 
 function LiveBadge({ mode }: { mode: LiveMode }) {
-  const label = mode === "quicknode" ? "QuickNode live" : mode === "rpc" ? "Arc RPC (fallback)" : mode === "connecting" ? "connecting…" : "relay offline";
+  const label = mode === "quicknode" ? "QuickNode" : mode === "rpc" ? "Arc" : mode === "connecting" ? "connecting…" : "relay offline";
   return <span className={`live ${mode}`} title="Where live chain events come from"><span className="d" /> {label}</span>;
 }
 
@@ -1256,10 +1616,10 @@ function Shield({ ctx, part }: { ctx: Ctx; part: "tests" | "messages" }) {
   if (part === "messages") {
     return (
       <div className="stack">
+        <InfoBox id="inbox" icon="inbox"><p>Hand an agent work the way a supplier or teammate would.</p></InfoBox>
           <form className="card" onSubmit={send}>
-            <div className="hd"><h2>Send a message to an agent</h2><span className="badge badge-approval">demo tool</span></div>
+            <div className="hd"><h2>Send a message to an agent</h2></div>
             <div className="pad stack-sm">
-              <p className="muted small">An invoice for the Bills agent, a data request for the Supplies agent: whatever a supplier or teammate would send.</p>
               <div className="row-form">
                 <select aria-label="Agent" value={msg.agentId} onChange={(e) => setMsg({ ...msg, agentId: e.target.value })}>
                   {active.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
@@ -1272,7 +1632,7 @@ function Shield({ ctx, part }: { ctx: Ctx; part: "tests" | "messages" }) {
             </div>
           </form>
       <div className="card">
-        <div className="hd"><h2>Inboxes</h2><span className="sub">what agents received</span></div>
+        <div className="hd"><h2>Inboxes</h2></div>
         {s.inbox.length === 0 ? <Empty icon="inbox">No messages yet.</Empty> : (
           <div className="resolved">
             {s.inbox.slice(0, 20).map((m) => (
@@ -1291,15 +1651,12 @@ function Shield({ ctx, part }: { ctx: Ctx; part: "tests" | "messages" }) {
 
   return (
     <div className="stack">
-      <div className="card rise">
-        <div className="intro">
-          <span className="intro-mark"><Icon name="shield" size={18} /></span>
-          <p>Karuna sends your agents fake scam messages{s.shield.testsPerDay ? ` (about ${s.shield.testsPerDay} per agent per day)` : ""}. An agent that falls for one can't pay that category until you restore it below. <b>You only need this page when an agent is blocked.</b></p>
-        </div>
-      </div>
+      <InfoBox id="shield" icon="shield">
+          <p className="center-line">Karuna sends each agent {s.shield.testsPerDay ? `about ${s.shield.testsPerDay}` : "a few"} fake scams a day. One that falls for it stays blocked until you restore it below.</p>
+      </InfoBox>
 
       {active.length > 0 && (
-        <div className="grid-tiles">
+        <div className="grid2 agent-grid">
           {active.map((a, i) => {
             const st2 = stats(a.id);
             const rules = s.shield.autoRules.filter((r) => r.active && r.agent === a.id);
@@ -1350,11 +1707,10 @@ function Shield({ ctx, part }: { ctx: Ctx; part: "tests" | "messages" }) {
             })}
           </div>
         )}
-        <div className="log-foot"><span>lifting a block is a loosening: {pol.required} vote{pol.required > 1 ? "s" : ""} + {pol.timelock}s</span><span>Auto-Shield's own blocks apply instantly</span></div>
       </div>
 
       <form className="card" onSubmit={runTest}>
-          <div className="hd"><h2>Run a scam test now</h2><span className="sub">looks exactly like a real message</span></div>
+          <div className="hd"><h2>Run a drill now</h2></div>
           <div className="inline-form">
             <label className="field"><span>Agent</span>
               <select value={test.agentId} onChange={(e) => setTest({ ...test, agentId: e.target.value })}>
@@ -1376,7 +1732,7 @@ function Shield({ ctx, part }: { ctx: Ctx; part: "tests" | "messages" }) {
         </form>
 
       <div className="card">
-        <div className="hd"><h2>Tests</h2><span className="sub">only humans can see which messages were tests</span></div>
+        <div className="hd"><h2>Tests</h2></div>
         {tests.length === 0 ? <Empty icon="shield">No tests yet.</Empty> : (
           <div className="resolved">
             {tests.slice(0, 20).map((t) => (
@@ -1408,16 +1764,13 @@ function Swarm({ ctx }: { ctx: Ctx }) {
 
   return (
     <div className="stack">
-      <div className="card rise">
-        <div className="intro">
-          <span className="intro-mark"><Icon name="swarm" size={18} /></span>
-          <p>Agents never get real passwords, so any password an agent uses is bait. If an agent shares one, or {sw.agentsToTrip} agents go after the same new target within {sw.windowSeconds}s, <b>every agent freezes</b>. Unfreeze from the top bar (needs a vote).</p>
-        </div>
-      </div>
+      <InfoBox id="swarm" icon="swarm">
+          <p>Agents never get real passwords, so any password an agent uses is bait. If an agent shares one, or {sw.agentsToTrip} agents go after the same new target within {sw.windowSeconds}s, every agent freezes. Unfreeze from the top bar (needs a vote).</p>
+      </InfoBox>
 
       <div className="grid2">
         <div className="card">
-          <div className="hd"><h2>Swarm trips</h2><span className="sub">{sw.trips.length}</span></div>
+          <div className="hd"><h2>Trips</h2><span className="sub">{sw.trips.length}</span></div>
           {sw.trips.length === 0 ? <Empty icon="swarm">No swarm detected.</Empty> : (
             <div className="resolved">
               {sw.trips.map((t) => (
@@ -1449,7 +1802,7 @@ function Swarm({ ctx }: { ctx: Ctx }) {
       </div>
 
       <div className="card">
-        <div className="hd"><h2>Trap credentials</h2><span className="sub">fake keys that work nowhere and are watched everywhere</span></div>
+        <div className="hd"><h2>Trap credentials</h2></div>
         <form className="pad row-form" onSubmit={(e) => { e.preventDefault(); run(() => api("/traps", { agentId: target || undefined }), "Trap credentials minted. Plant them where the agent can find them."); }}>
           <select aria-label="Which agent the traps are for" value={target} onChange={(e) => setTarget(e.target.value)}>
             <option value="">For every agent</option>
@@ -1499,7 +1852,7 @@ function Learned({ ctx }: { ctx: Ctx }) {
   if (!L.precedents.length && !L.blocks.length && !L.allows.length) return null;
   return (
     <div className="card">
-      <div className="hd"><h2>Learned from your choices</h2><span className="sub">a "no" is learned at once · a "yes" only after {L.suggestAfter} approvals and a vote</span></div>
+      <div className="hd"><h2>Learned from your choices</h2></div>
       {L.suggestions.map((x) => (
         <div className="tr learn-tr" key={x.id}>
           <Badge v="approval">suggestion</Badge>
@@ -1573,13 +1926,26 @@ const ruleId = (prefix: string) => `${prefix}-${Date.now().toString(36)}`.slice(
 function Keys({ ctx }: { ctx: Ctx }) {
   const { s, run, busy } = ctx;
   const sb = s.sandbox;
-  const [form, setForm] = useState({ name: "", envVar: "", value: "", host: "", llm: true });
+  const [form, setForm] = useState({ name: "", envVar: "", value: "", host: "", llm: true, use: "agents" as "agents" | "drafter", provider: "groq" as "groq" | "gemini" });
+  const drafter = form.use === "drafter";
+  const PROVIDERS = { groq: { label: "Groq", env: "GROQ_API_KEY", where: "console.groq.com" }, gemini: { label: "Gemini", env: "GEMINI_API_KEY", where: "aistudio.google.com" } } as const;
+  const blank = { name: "", envVar: "", value: "", host: "", llm: true, use: form.use, provider: form.provider };
   const [bind, setBind] = useState<Record<string, string>>({});
   const proposing = (scope: string) =>
     s.policy!.proposals.some((g) => (g.status === "open" || g.status === "queued") && g.change?.op === "AddRule" && g.change.scope === scope);
 
   const add = (e: FormEvent) => {
     e.preventDefault();
+    if (drafter) {
+      // A drafter key is used by Karuna itself to draft rules from English. Agents never get it,
+      // so there's nothing to bind and nothing to vote on.
+      const name = form.name.trim().toLowerCase() || `${form.provider}-drafter`;
+      run(async () => {
+        await api("/keys", { name, envVar: PROVIDERS[form.provider].env, value: form.value, purpose: "drafter", provider: form.provider });
+        setForm(blank);
+      }, `${PROVIDERS[form.provider].label} key stored for the rule drafter. Agents can't use it.`);
+      return;
+    }
     const name = form.name.trim().toLowerCase();
     const host = form.host.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "");
     run(async () => {
@@ -1587,31 +1953,42 @@ function Keys({ ctx }: { ctx: Ctx }) {
       // Where the key may travel is policy: a Dharma rule, voted like any loosening.
       await submitChange(ctx.me, s.org.dharma!.address as Address, { kind: Kind.Propose, change: { op: "AddRule", id: ruleId(`k-${name}`), outcome: "Allow", scope: `key:${name}`, target: host } });
       if (form.llm) await submitChange(ctx.me, s.org.dharma!.address as Address, { kind: Kind.Propose, change: { op: "AddRule", id: ruleId(`p-${name}`), outcome: "Allow", scope: "http:POST", target: host } });
-      setForm({ name: "", envVar: "", value: "", host: "", llm: true });
+      setForm(blank);
     }, `Key stored. Proposed on Dharma: ${name} may be sent to ${host}${form.llm ? ", and POSTs there skip approval" : ""}`);
   };
 
   return (
     <div className="stack">
-      <div className="card rise">
-        <div className="intro">
-          <span className="intro-mark"><Icon name="key" size={18} /></span>
-          <p>Paste a key once. Karuna encrypts it and never shows it again. Boxed agents read a placeholder like <span className="mono">karuna_key_openai</span> from the variable they always used, and the egress proxy swaps in the real key only on requests to the services you bind it to. <b>A compromised agent can't leak a key it never had.</b></p>
-        </div>
-      </div>
-
       <form className="card" onSubmit={add}>
-        <div className="hd"><h2>Add a key</h2><span className="sub">value is write-only</span></div>
+        <div className="hd"><h2>Add a key</h2></div>
         <div className="inline-form">
-          <label className="field"><span>Name</span><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="openai" pattern="[a-zA-Z0-9\-]{1,40}" /></label>
-          <label className="field"><span>Variable name</span><input required className="mono" value={form.envVar} onChange={(e) => setForm({ ...form, envVar: e.target.value.toUpperCase() })} placeholder="OPENAI_API_KEY" /></label>
-          <label className="field grow"><span>Key value</span><input required type="password" autoComplete="off" className="mono" value={form.value} onChange={(e) => setForm({ ...form, value: e.target.value })} placeholder="sk-…" /></label>
+          <label className="field"><span>Use for</span>
+            <select value={form.use} onChange={(e) => setForm({ ...form, use: e.target.value as "agents" | "drafter" })}>
+              <option value="agents">Agents</option>
+              <option value="drafter">Drafter</option>
+            </select>
+          </label>
+          {drafter ? (
+            <label className="field"><span>Provider</span>
+              <select value={form.provider} onChange={(e) => setForm({ ...form, provider: e.target.value as "groq" | "gemini" })}>
+                <option value="groq">Groq (free)</option>
+                <option value="gemini">Gemini (free)</option>
+              </select>
+            </label>
+          ) : <>
+            <label className="field"><span>Name</span><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="openai" pattern="[a-zA-Z0-9\-]{1,40}" /></label>
+            <label className="field"><span>Variable name</span><input required className="mono" value={form.envVar} onChange={(e) => setForm({ ...form, envVar: e.target.value.toUpperCase() })} placeholder="OPENAI_API_KEY" /></label>
+          </>}
+          <label className="field grow"><span>Key value</span><input required type="password" autoComplete="off" className="mono" value={form.value} onChange={(e) => setForm({ ...form, value: e.target.value })} placeholder={drafter ? `from ${PROVIDERS[form.provider].where}` : "sk-…"} /></label>
+          {drafter && <button className="btn btn-dark" disabled={busy}><Icon name="plus" /> Store</button>}
         </div>
-        <div className="inline-form" style={{ paddingTop: 0 }}>
-          <label className="field grow"><span>Allowed service</span><input required className="mono" value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} placeholder="api.openai.com" /></label>
-          <label className="check"><input type="checkbox" checked={form.llm} onChange={(e) => setForm({ ...form, llm: e.target.checked })} /> <span>POSTs to it skip approval <small>(needed for LLM APIs)</small></span></label>
-          <button className="btn btn-dark" disabled={busy}><Icon name="plus" /> Store &amp; propose</button>
-        </div>
+        {!drafter && (
+          <div className="inline-form" style={{ paddingTop: 0 }}>
+            <label className="field grow"><span>Allowed service</span><input required className="mono" value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} placeholder="api.openai.com" /></label>
+            <label className="check"><input type="checkbox" checked={form.llm} onChange={(e) => setForm({ ...form, llm: e.target.checked })} /> <span>POSTs to it skip approval <small>(needed for LLM APIs)</small></span></label>
+            <button className="btn btn-dark" disabled={busy}><Icon name="plus" /> Store &amp; propose</button>
+          </div>
+        )}
       </form>
 
       <div className="card">
@@ -1621,13 +1998,15 @@ function Keys({ ctx }: { ctx: Ctx }) {
             {sb.keys.map((k) => (
               <div className="tr key-tr" key={k.name}>
                 <span className="intro-mark"><Icon name="key" size={15} /></span>
-                <span className="b">{k.name}<div className="muted small mono">{k.envVar}={k.placeholder}</div></span>
+                <span className="b">{k.name}<div className="muted small mono">{k.purpose === "drafter" ? "used by Karuna, never by agents" : `${k.envVar}=${k.placeholder}`}</div></span>
                 <span className="pills">
                   {k.boundTo.length ? k.boundTo.map((h) => <span className="tag" key={h}><Icon name="lock" size={11} /> {h}</span>)
+                    : k.purpose === "drafter" ? <span className="tag"><Icon name="lock" size={11} /> rule drafter · {k.provider === "gemini" ? "Gemini" : "Groq"}</span>
+                    : k.name === DRAFTER_KEY ? <span className="tag"><Icon name="lock" size={11} /> rule drafter · used by Karuna only</span>
                     : proposing(`key:${k.name}`) ? <Badge v="approval">binding proposed</Badge> : <span className="badge badge-quiet">not bound · unusable</span>}
                 </span>
                 <span className="shield-actions">
-                  {!k.boundTo.length && !proposing(`key:${k.name}`) && <>
+                  {!k.boundTo.length && k.purpose !== "drafter" && k.name !== DRAFTER_KEY && !proposing(`key:${k.name}`) && <>
                     <input className="select-sm mono bind-input" aria-label={`Bind ${k.name} to a host`} placeholder="api.example.com" value={bind[k.name] ?? ""} onChange={(e) => setBind({ ...bind, [k.name]: e.target.value })} />
                     <button className="btn btn-ghost btn-sm" disabled={busy || !bind[k.name]} onClick={() => ctx.change({ op: "AddRule", id: ruleId(`k-${k.name}`), outcome: "Allow", scope: `key:${k.name}`, target: bind[k.name].trim().toLowerCase() })}>Propose binding</button>
                   </>}
@@ -1637,7 +2016,6 @@ function Keys({ ctx }: { ctx: Ctx }) {
             ))}
           </div>
         )}
-        <div className="log-foot"><span>binding a key to a service: {s.policy!.required} vote{s.policy!.required > 1 ? "s" : ""} + {s.policy!.timelock}s</span><span>deleting a key is instant</span></div>
       </div>
     </div>
   );
@@ -1650,7 +2028,7 @@ function SandboxRuns({ ctx }: { ctx: Ctx }) {
   const sb = s.sandbox;
   return (
     <div className="card">
-      <div className="hd"><h2>Running in a sandbox</h2><span className="sub">{sb.sessions.length} live · {sb.requireSandbox ? "sandbox required" : "sandbox optional"}</span></div>
+      <div className="hd"><h2>Running in a sandbox</h2><span className="sub">{sb.sessions.length} live</span></div>
       {sb.sessions.length === 0 ? <Empty icon="agents">No boxes running. Start one with <span className="mono">pnpm karuna run --agent &lt;id&gt; ./folder -- &lt;command&gt;</span>.</Empty> : (
         <div className="table">
           {sb.sessions.map((x) => (
@@ -1674,7 +2052,6 @@ function SandboxRuns({ ctx }: { ctx: Ctx }) {
           ))}
         </div>
       )}
-      <div className="log-foot"><span>no network except Karuna · no host files unless mounted · no real keys · wiped on exit</span><span>panic button stops every box</span></div>
     </div>
   );
 }
@@ -1698,7 +2075,7 @@ function RemoteRuns({ ctx }: { ctx: Ctx }) {
             </div>
           </>
         ) : (
-          <p className="muted small">Off. Start the Gatekeeper with <span className="mono">KARUNA_REMOTE_PORT=8443 KARUNA_REMOTE_HOST=0.0.0.0</span> (and <span className="mono">KARUNA_PUBLIC_HOSTS=&lt;its LAN or VPN name&gt;</span>) to let other machines run boxes here.</p>
+          <p className="muted small">Off. Start the Gatekeeper with <span className="mono">KARUNA_REMOTE_PORT=8443 KARUNA_REMOTE_HOST=0.0.0.0</span> to turn it on.</p>
         )}
       </div>
     </div>

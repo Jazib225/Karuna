@@ -3,22 +3,29 @@ pragma solidity ^0.8.24;
 
 /// @title Dharma — Karuna's onchain rulebook (CLAUDE.md §1, §2)
 /// @notice Holds an organization's policy: rules, core boundaries, payees, agent allowances,
-///         allowlisted domains, the two-person threshold, members, and the freeze switch.
-///         - Tightening is fast: one member's signature (or the Gatekeeper, which can only tighten).
-///         - Loosening is slow and public: a member proposes, a majority votes, a timelock passes.
-///         - Core boundaries can never be removed.
-///         - The contract decides what counts as tightening; callers can't relabel a loosening.
+///         allowlisted domains, the two-person threshold, members, the freeze switch, and the waits.
+///         Two tiers of change:
+///         - Normal changes: proposed, passed by a majority, applied after the wait (`timelock`).
+///           If every member votes yes (2+ members), the wait is skipped — except for Unfreeze.
+///         - Core changes (removing a core rule, the core wait itself, upgrading this code): need every
+///           member, always wait `coreTimelock`, can't be skipped, and any member's Freeze cancels them.
+///         Only two things are instant: a member's Freeze, and the Gatekeeper's own tighten-only writes.
+///         A changed wait applies to proposals that pass after it, never to ones already waiting.
 ///         Members sign EIP-712 actions with their own keys. The Gatekeeper only relays them and
 ///         pays gas — it cannot forge a member's vote.
+/// @dev    Runs behind DharmaProxy (ERC-1967): the proxy holds the address and all storage, and
+///         `Upgrade` (a core change) points it at new code. Upgrades must keep this storage layout:
+///         only ever append new state variables at the end.
 contract Dharma {
     // ------------------------------------------------------------------ types
 
     enum Op {
         AddRule, RemoveRule, SetPayee, RemovePayee, SetAgent, RemoveAgent,
-        AddDomain, RemoveDomain, SetThreshold, Freeze, Unfreeze, AddMember, RemoveMember
+        AddDomain, RemoveDomain, SetThreshold, Freeze, Unfreeze, AddMember, RemoveMember,
+        SetTimelock, SetCoreTimelock, Upgrade
     }
     enum Outcome { Allow, Deny, Approval }
-    enum Status { None, Open, Queued, Executed, Defeated }
+    enum Status { None, Open, Queued, Executed, Defeated, Cancelled }
     enum Kind { Tighten, Propose, Vote }
 
     struct Rule {
@@ -47,6 +54,8 @@ contract Dharma {
         uint32 yes;
         uint32 no;
         Status status;
+        bool core; // core tier: every member, the core wait, no skip, cancelled by Freeze
+        uint64 eta; // when it can be executed (set when it passes)
     }
 
     // ------------------------------------------------------------------ events
@@ -70,6 +79,11 @@ contract Dharma {
     event ProposalQueued(uint256 indexed id, uint64 eta);
     event ProposalExecuted(uint256 indexed id);
     event ProposalDefeated(uint256 indexed id);
+    event ProposalCancelled(uint256 indexed id);
+    event WaitSkipped(uint256 indexed id); // every member voted yes on a normal change
+    event TimelockSet(uint64 secondsWait);
+    event CoreTimelockSet(uint64 secondsWait);
+    event Upgraded(address indexed implementation);
     event LogAnchored(bytes32 head, uint64 length);
     event ApprovalRequested(bytes32 indexed requestId, bytes32 indexed agent, uint256 amountMicroUsd, bytes32 payloadHash);
     event TestFailed(bytes32 indexed agent, string category);
@@ -86,16 +100,25 @@ contract Dharma {
     error CoreBoundary();
     error Invalid(string why);
     error NotReady();
+    error AlreadyInitialized();
 
-    // ------------------------------------------------------------------ storage
+    // ------------------------------------------------------------------ constants
 
-    address public immutable gatekeeper;
-    uint64 public immutable timelock;
-    bytes32 public immutable DOMAIN_SEPARATOR;
     bytes32 public constant ACTION_TYPEHASH = keccak256(
         "Action(uint8 kind,uint8 op,bytes data,uint256 proposalId,bool support,uint256 nonce,uint256 deadline)"
     );
+    uint64 public constant MAX_TIMELOCK = 7 days; // normal wait: 0 (a team's choice) … 7 days
+    uint64 public constant MIN_CORE_TIMELOCK = 60; // core wait: never 0
+    uint64 public constant MAX_CORE_TIMELOCK = 30 days;
+    /// ERC-1967 implementation slot: keccak256("eip1967.proxy.implementation") - 1
+    bytes32 internal constant IMPLEMENTATION_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
 
+    // ------------------------------------------------------------------ storage (append only)
+
+    bool internal _initialized;
+    address public gatekeeper;
+    uint64 public timelock; // normal wait, seconds
+    uint64 public coreTimelock; // core wait, seconds
     bool public frozen;
     uint256 public thresholdMicroUsd;
     uint256 public policyVersion; // bumps on every policy change; cheap staleness check
@@ -123,30 +146,40 @@ contract Dharma {
 
     Proposal[] internal _proposals;
     mapping(uint256 => mapping(address => bool)) public hasVoted;
+    uint256[] internal _pendingCore; // core proposals a Freeze would cancel
 
     // ------------------------------------------------------------------ setup
 
+    /// @dev The implementation itself can never be initialized: only proxies pointing at it.
+    constructor() {
+        _initialized = true;
+    }
+
+    /// @notice One-time setup, called by DharmaProxy's constructor in the same transaction.
     /// @param gatekeeper_ the org's Gatekeeper (relayer; may only tighten, anchor, and emit alerts)
-    /// @param firstMember the first human's signing address (constructor args, because a smart
-    ///        account deploys through a factory and msg.sender is not the org)
-    constructor(address gatekeeper_, address firstMember, uint64 timelock_, uint256 thresholdMicroUsd_, string[] memory domains_) {
+    /// @param firstMember the first human's signing address (passed in, because a smart account
+    ///        deploys through a factory and msg.sender is not the org)
+    function initialize(
+        address gatekeeper_,
+        address firstMember,
+        uint64 timelock_,
+        uint64 coreTimelock_,
+        uint256 thresholdMicroUsd_,
+        string[] memory domains_
+    ) external {
+        if (_initialized) revert AlreadyInitialized();
+        _initialized = true;
         if (gatekeeper_ == address(0) || firstMember == address(0)) revert Invalid("zero address");
+        if (timelock_ > MAX_TIMELOCK) revert Invalid("wait too long");
+        if (coreTimelock_ < MIN_CORE_TIMELOCK || coreTimelock_ > MAX_CORE_TIMELOCK) revert Invalid("bad core wait");
         gatekeeper = gatekeeper_;
         timelock = timelock_;
+        coreTimelock = coreTimelock_;
         thresholdMicroUsd = thresholdMicroUsd_;
-        DOMAIN_SEPARATOR = keccak256(
-            abi.encode(
-                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-                keccak256("Dharma"),
-                keccak256("1"),
-                block.chainid,
-                address(this)
-            )
-        );
         _addMember(firstMember);
         for (uint256 i; i < domains_.length; i++) _addDomain(domains_[i]);
 
-        // Karuna's default policy, in engine order. Core boundaries can never be removed.
+        // Karuna's default policy, in engine order. Core rules change only by a core (every-member) vote.
         _builtin("core-boundary", Outcome.Deny, true);
         _builtin("secrets-read", Outcome.Deny, true);
         _builtin("unknown-recipient", Outcome.Deny, true);
@@ -195,34 +228,60 @@ contract Dharma {
     function propose(Op op, bytes calldata data, address signer, uint256 deadline, bytes calldata sig) external returns (uint256 id) {
         _auth(Kind.Propose, op, data, 0, false, signer, deadline, sig);
         _validate(op, data);
+        bool core = isCoreChange(op, data);
         id = _proposals.length;
-        _proposals.push(Proposal(op, data, signer, uint64(block.timestamp), 0, 0, 0, Status.Open));
+        _proposals.push(Proposal(op, data, signer, uint64(block.timestamp), 0, 0, 0, Status.Open, core, 0));
+        if (core) _pendingCore.push(id);
         emit ProposalCreated(id, op, signer, data);
         _count(id, signer, true);
     }
 
+    /// @notice Vote on an open proposal. A normal change that already passed stays open to "yes"
+    ///         votes: once every member has voted yes, its wait is skipped (not for Unfreeze or core).
     function vote(uint256 id, bool support, address signer, uint256 deadline, bytes calldata sig) external {
         if (id >= _proposals.length) revert Invalid("no such proposal");
         Proposal storage p = _proposals[id];
         _auth(Kind.Vote, p.op, p.data, id, support, signer, deadline, sig);
-        if (p.status != Status.Open) revert Invalid("voting closed");
+        bool skipVote = p.status == Status.Queued && support && _skippable(p);
+        if (p.status != Status.Open && !skipVote) revert Invalid("voting closed");
         if (hasVoted[id][signer]) revert Invalid("already voted");
         _count(id, signer, support);
     }
 
-    /// @notice Anyone may execute a passed proposal once its timelock has elapsed.
+    /// @notice Anyone may execute a passed proposal once its wait is over.
     function execute(uint256 id) external {
         if (id >= _proposals.length) revert Invalid("no such proposal");
         Proposal storage p = _proposals[id];
-        if (p.status != Status.Queued || block.timestamp < uint256(p.queuedAt) + timelock) revert NotReady();
-        _validate(p.op, p.data); // re-check: e.g. a core boundary is still never removable
+        if (p.status != Status.Queued || block.timestamp < p.eta) revert NotReady();
+        _validate(p.op, p.data); // re-check against today's state
         p.status = Status.Executed;
         _apply(p.op, p.data, p.proposer);
         emit ProposalExecuted(id);
     }
 
+    /// @notice Yes votes a normal change needs: a majority.
     function required() public view returns (uint32) {
         return uint32(_members.length / 2 + 1);
+    }
+
+    /// @notice Yes votes this proposal needs: every member for a core change, else a majority.
+    function requiredFor(uint256 id) public view returns (uint32) {
+        return _proposals[id].core ? uint32(_members.length) : required();
+    }
+
+    /// @notice Core changes: removing a core rule, changing the core wait, upgrading this code.
+    function isCoreChange(Op op, bytes memory data) public view returns (bool) {
+        if (op == Op.SetCoreTimelock || op == Op.Upgrade) return true;
+        if (op == Op.RemoveRule) {
+            bytes32 id = abi.decode(data, (bytes32));
+            return _ruleKnown[id] && _rules[id].core;
+        }
+        return false;
+    }
+
+    /// @dev The every-member skip: normal changes only, never Unfreeze, and only in a team (2+).
+    function _skippable(Proposal storage p) private view returns (bool) {
+        return !p.core && p.op != Op.Unfreeze && _members.length >= 2;
     }
 
     function _count(uint256 id, address voter, bool support) private {
@@ -231,14 +290,24 @@ contract Dharma {
         if (support) p.yes++;
         else p.no++;
         emit VoteCast(id, voter, support, p.yes, p.no);
-        uint32 need = required();
-        if (p.yes >= need) {
-            p.status = Status.Queued;
-            p.queuedAt = uint64(block.timestamp);
-            emit ProposalQueued(id, uint64(block.timestamp) + timelock);
-        } else if (p.no > _members.length - need) {
-            p.status = Status.Defeated;
-            emit ProposalDefeated(id);
+        uint32 need = requiredFor(id);
+        if (p.status == Status.Open) {
+            if (p.yes >= need) {
+                // The wait is fixed now, from today's setting: a later change to the wait never moves it.
+                p.status = Status.Queued;
+                p.queuedAt = uint64(block.timestamp);
+                p.eta = uint64(block.timestamp) + (p.core ? coreTimelock : timelock);
+                emit ProposalQueued(id, p.eta);
+            } else if (p.no > _members.length - need) {
+                p.status = Status.Defeated;
+                emit ProposalDefeated(id);
+                return;
+            }
+        }
+        if (p.status == Status.Queued && p.yes >= _members.length && _skippable(p) && p.eta > block.timestamp) {
+            p.eta = uint64(block.timestamp);
+            emit WaitSkipped(id);
+            emit ProposalQueued(id, p.eta);
         }
     }
 
@@ -284,7 +353,8 @@ contract Dharma {
         }
         if (op == Op.SetThreshold) return abi.decode(data, (uint256)) <= thresholdMicroUsd;
         return op == Op.RemovePayee || op == Op.RemoveAgent || op == Op.RemoveDomain || op == Op.Freeze;
-        // SetPayee, AddDomain, Unfreeze, AddMember, RemoveMember are always loosenings.
+        // SetPayee, AddDomain, Unfreeze, AddMember, RemoveMember, and the waits and upgrades are
+        // never instant: they always go to a vote.
     }
 
     // ------------------------------------------------------------------ validation + effects
@@ -297,7 +367,16 @@ contract Dharma {
         } else if (op == Op.RemoveRule) {
             bytes32 id = abi.decode(data, (bytes32));
             if (!_ruleKnown[id] || !_rules[id].active) revert Invalid("no such rule");
-            if (_rules[id].core) revert CoreBoundary();
+            // A core rule can be removed, but only as a core change (every member + the core wait):
+            // propose() marks it core, and tighten() can never remove a deny rule.
+        } else if (op == Op.SetTimelock) {
+            if (abi.decode(data, (uint64)) > MAX_TIMELOCK) revert Invalid("wait too long");
+        } else if (op == Op.SetCoreTimelock) {
+            uint64 w = abi.decode(data, (uint64));
+            if (w < MIN_CORE_TIMELOCK || w > MAX_CORE_TIMELOCK) revert Invalid("bad core wait");
+        } else if (op == Op.Upgrade) {
+            address impl = abi.decode(data, (address));
+            if (impl.code.length == 0 || impl == implementation()) revert Invalid("bad implementation");
         } else if (op == Op.SetPayee) {
             (address a,) = abi.decode(data, (address, string));
             if (a == address(0)) revert Invalid("zero address");
@@ -396,6 +475,27 @@ contract Dharma {
         } else if (op == Op.Freeze) {
             frozen = true;
             emit AgentFrozen(actor);
+            // A freeze also cancels every pending core change (core rules, the core wait, upgrades).
+            for (uint256 i; i < _pendingCore.length; i++) {
+                Proposal storage p = _proposals[_pendingCore[i]];
+                if (p.status == Status.Open || p.status == Status.Queued) {
+                    p.status = Status.Cancelled;
+                    emit ProposalCancelled(_pendingCore[i]);
+                }
+            }
+            delete _pendingCore;
+        } else if (op == Op.SetTimelock) {
+            timelock = abi.decode(data, (uint64));
+            emit TimelockSet(timelock);
+        } else if (op == Op.SetCoreTimelock) {
+            coreTimelock = abi.decode(data, (uint64));
+            emit CoreTimelockSet(coreTimelock);
+        } else if (op == Op.Upgrade) {
+            address impl = abi.decode(data, (address));
+            assembly {
+                sstore(IMPLEMENTATION_SLOT, impl)
+            }
+            emit Upgraded(impl);
         } else if (op == Op.Unfreeze) {
             frozen = false;
             emit AgentsUnfrozen();
@@ -431,6 +531,20 @@ contract Dharma {
 
     // ------------------------------------------------------------------ signatures
 
+    /// @notice EIP-712 domain: bound to this org's address (the proxy) and chain, so a signature for
+    ///         one org can never be replayed on another. Stays the same across upgrades.
+    function DOMAIN_SEPARATOR() public view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256("Dharma"),
+                keccak256("1"),
+                block.chainid,
+                address(this)
+            )
+        );
+    }
+
     function actionDigest(Kind kind, Op op, bytes memory data, uint256 proposalId, bool support, uint256 nonce, uint256 deadline)
         public
         view
@@ -439,7 +553,7 @@ contract Dharma {
         bytes32 structHash = keccak256(
             abi.encode(ACTION_TYPEHASH, uint8(kind), uint8(op), keccak256(data), proposalId, support, nonce, deadline)
         );
-        return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
+        return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), structHash));
     }
 
     function _auth(Kind kind, Op op, bytes memory data, uint256 proposalId, bool support, address signer, uint256 deadline, bytes calldata sig)
@@ -465,6 +579,18 @@ contract Dharma {
     }
 
     // ------------------------------------------------------------------ views
+
+    /// @notice The code version behind this org's address.
+    function version() external pure virtual returns (uint256) {
+        return 2;
+    }
+
+    /// @notice The code this org's proxy currently runs.
+    function implementation() public view returns (address impl) {
+        assembly {
+            impl := sload(IMPLEMENTATION_SLOT)
+        }
+    }
 
     function members() external view returns (address[] memory) {
         return _members;

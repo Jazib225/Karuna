@@ -38,6 +38,8 @@ export interface Request {
 
   // message (agent-to-agent; checked like any other action — no hidden channel)
   body?: string;
+  /** The agent a message is addressed to. */
+  recipient?: AgentId;
 
   /**
    * Internal Auto-Shield flag. Set ONLY by Karuna's test generator, NEVER by an agent.

@@ -33,6 +33,7 @@ const gk = new Gatekeeper({
   client,
   writerFor: (address: Address) => new CircleChainWriter(address, client),
   timelockSeconds: Number(process.env.KARUNA_TIMELOCK_SECONDS ?? 60),
+  coreTimelockSeconds: Number(process.env.KARUNA_CORE_TIMELOCK_SECONDS ?? 86_400),
   anchorEvery: Number(process.env.KARUNA_ANCHOR_EVERY ?? 20),
   shieldTestsPerDay: Number(process.env.KARUNA_SHIELD_TESTS_PER_DAY ?? 2),
   shieldWindowMs: Number(process.env.KARUNA_SHIELD_WINDOW_MINUTES ?? 30) * 60_000,

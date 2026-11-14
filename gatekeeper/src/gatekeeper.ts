@@ -9,7 +9,7 @@ import { EventEmitter } from "node:events";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { keccak256, stringToHex, verifyTypedData, zeroAddress, type Address, type Hex, type PublicClient } from "viem";
 import {
-  SignedLog, buildContext, buildRuleset, evaluate, httpTargetMatches,
+  SignedLog, buildContext, buildRuleset, evaluate, httpTargetMatches, matchCustomRules,
   type Decision, type LogEntry, type LogEvent, type Request,
 } from "@prekaruna/engine";
 import {
@@ -31,6 +31,7 @@ import {
 import { band, bandLabel, learnedDenyRule, previewLoosening, suggestions, LOOSENING_OPS, type PastRequest, type Precedent, type Preview } from "./learn.ts";
 import { PivotTracker, findCredential, findTrap, mintTraps, targetOf, trapEnvFile, trapLeakMessage, type TrapSet } from "./swarm.ts";
 import { SecretStore } from "./secrets.ts";
+import { DRAFT_KEYS, NoDrafterError, draftRules, freshIds, type DraftResult } from "./draft.ts";
 
 // ---------------------------------------------------------------- types
 
@@ -108,6 +109,7 @@ export interface SignedDecision {
 }
 
 interface State {
+  drafts?: Record<string, DraftResult & { at: string }>; // plain-English drafts that worked, by sentence + org
   proposals: Proposal[];
   spend: Record<string, Record<string, number>>; // day -> agent -> usd
   localFreeze: { at: string; by: string } | null; // panic applied before the chain confirmed it
@@ -147,7 +149,8 @@ export interface GatekeeperDeps {
   client: PublicClient; // reads Dharma
   writerFor: (walletAddress: Address) => ChainWriter; // writes Dharma (the org's wallet)
   now?: () => Date;
-  timelockSeconds?: number; // for new Dharma deployments
+  timelockSeconds?: number; // for new Dharma deployments: the normal wait
+  coreTimelockSeconds?: number; // …and the wait for core changes (default 24 h)
   anchorEvery?: number; // anchor the log after this many new entries…
   anchorMaxAgeMs?: number; // …or when unanchored entries are this old
   shieldTestsPerDay?: number; // Auto-Shield: random tests per active agent per day (0 = off)
@@ -451,14 +454,15 @@ export class Gatekeeper extends EventEmitter {
     this.emit("change");
     try {
       const timelock = this.deps.timelockSeconds ?? 60;
+      const coreTimelock = this.deps.coreTimelockSeconds ?? 86_400;
       const d = await this.deps.writerFor(wallet as Address).deploy({
-        firstMember: member as Address, timelockSeconds: timelock, thresholdMicro: toMicro(500), domains: DEFAULT_ALLOWLISTED_DOMAINS,
+        firstMember: member as Address, timelockSeconds: timelock, coreTimelockSeconds: coreTimelock, thresholdMicro: toMicro(500), domains: DEFAULT_ALLOWLISTED_DOMAINS,
       });
       this.org.name = name;
       this.org.wallet = { address: wallet, chain: WALLET_CHAIN };
       this.org.dharma = { address: lower(d.address), chainId: await this.deps.client.getChainId(), deployedAt: this.now().toISOString(), txRef: d.txRef };
       this.org.labels.members[member] = memberName;
-      this.logEvent({ type: "setup", dharma: lower(d.address), wallet, firstMember: member, timelockSeconds: timelock, txRef: d.txRef });
+      this.logEvent({ type: "setup", dharma: lower(d.address), wallet, firstMember: member, timelockSeconds: timelock, coreTimelockSeconds: coreTimelock, implementation: lower(d.implementation), txRef: d.txRef });
       await this.sync(true).catch(() => undefined);
       return { dharma: this.org.dharma };
     } catch (e) {
@@ -561,6 +565,38 @@ export class Gatekeeper extends EventEmitter {
     return { txRef: res.txRef, proposalId };
   }
 
+  /** Plain English → draft rules for a member to review and propose (see draft.ts). Never proposes. */
+  async draftRules(text: unknown) {
+    const pol = this.requireReady();
+    const policy = requireText(text, "Policy", 2000);
+    const ctx = {
+      agents: pol.agents.map((a) => ({ id: a.id, name: this.org.labels.agents[a.id] ?? a.id })),
+      payees: pol.payees.map((p) => ({ address: lower(p.account), name: this.org.labels.payees[lower(p.account)] ?? p.account, category: p.category })),
+      domains: pol.domains,
+    };
+    // A sentence that drafted before, for the same agents and payees, comes back instantly with no
+    // model call: rehearse the demo sentence once and it can't fail on stage. New ids every time.
+    const cacheKey = sha256(`${policy.trim().replace(/\s+/g, " ").toLowerCase()}\n${JSON.stringify(ctx)}`);
+    const saved = this.state.drafts?.[cacheKey];
+    if (saved) return { rules: freshIds(saved.rules), note: saved.note, skipped: saved.skipped, model: "saved", savedFrom: saved.model };
+    // Keys marked for the drafter; a key literally named "groq"/"gemini" still works (older setups).
+    const keys = Object.fromEntries(DRAFT_KEYS.map((k) => [k, this.deps.secrets?.drafterKey(k) ?? this.deps.secrets?.reveal(k) ?? null]));
+    let out: DraftResult;
+    try {
+      out = await draftRules(policy, ctx, keys);
+    } catch (e) {
+      if (e instanceof NoDrafterError) throw new GatekeeperError(e.message, 503);
+      throw new GatekeeperError(scrub(e), 502);
+    }
+    if (out.rules.length) {
+      const drafts = { ...(this.state.drafts ?? {}), [cacheKey]: { ...out, at: this.now().toISOString() } };
+      const keep = Object.entries(drafts).sort((a, b) => b[1].at.localeCompare(a[1].at)).slice(0, 100);
+      this.state.drafts = Object.fromEntries(keep);
+      this.save();
+    }
+    return out;
+  }
+
   nonceOf(address: string) {
     return this.deps.client.readContract({ address: this.dharmaAddress(), abi: DHARMA_ABI, functionName: "nonces", args: [requireAddress(address) as Address] });
   }
@@ -657,7 +693,7 @@ export class Gatekeeper extends EventEmitter {
     if (action.type === "transfer" || action.type === "x402") {
       const test = this.state.tests.find((t) => tracesTo(t, action, reason));
       if (test) {
-        const r = this.denyEarly(base, action, "auto-shield", `Acted on Auto-Shield test ${test.id.slice(0, 8)} (${TEMPLATES[test.template]})`);
+        const r = this.denyEarly(base, action, "auto-shield", `Acted on drill ${test.id.slice(0, 8)} (${TEMPLATES[test.template]})`);
         this.onShieldFail(test, agentId, id);
         return r;
       }
@@ -1016,6 +1052,7 @@ export class Gatekeeper extends EventEmitter {
     const bindings = this.keyBindings();
     for (const k of wanted) {
       if (!this.deps.secrets?.list().some((x) => x.name === k)) return deny("key-unknown", `Placeholder for unknown key "${k}"`);
+      if (!this.deps.secrets.forAgents(k)) return deny("key-drafter-only", `Key "${k}" is for Karuna's rule drafter only`);
       if (!(bindings[k] ?? []).some((t) => httpTargetMatches(r.url, t))) return deny("key-not-bound", `Key "${k}" is not bound to ${host}`);
     }
 
@@ -1102,8 +1139,10 @@ export class Gatekeeper extends EventEmitter {
   }
 
   /** The real value for a key placeholder. Only the egress proxy calls this, per request. */
+  /** For the egress proxy: an agent key's real value. Drafter keys are never revealed to the proxy. */
   revealKey(name: string): string | null {
-    return this.deps.secrets?.reveal(name) ?? null;
+    if (!this.deps.secrets?.forAgents(name)) return null;
+    return this.deps.secrets.reveal(name);
   }
 
   /** An x402 seller answered 402 to a boxed agent: run it as a normal Karuna payment proposal. */
@@ -1196,7 +1235,8 @@ export class Gatekeeper extends EventEmitter {
     const to = String(action.to ?? "");
     const body = String(action.body ?? "").slice(0, 4000);
     const fromName = this.org.labels.agents[agentId] ?? agentId;
-    const request: Request = { agent: agentId, tool: "message", body: `to ${to}` };
+    const request: Request = { agent: agentId, tool: "message", recipient: to, body: `to ${to}` };
+    const toName = this.org.labels.agents[to] ?? to;
     const deny = (ruleId: string, reason: string) => {
       this.logDecision(request, { outcome: "deny", ruleId, reason });
       this.state.proposals.push({ ...base, request, decision: { outcome: "deny", ruleId, reason }, facts: [{ label: "Message to", value: to }], status: "denied" });
@@ -1214,13 +1254,33 @@ export class Gatekeeper extends EventEmitter {
       this.tripSwarm(`${fromName} touched a trap password, then messaged ${this.org.labels.agents[to] ?? to}`, [agentId, to]);
       return deny("swarm-tainted", "Agent that touched a trap credential tried to message another agent");
     }
-    const m: InboxMessage = { id: randomUUID(), agentId: to, from: `${fromName} (agent)`, subject: `Message from ${fromName}`, body, receivedAt: this.now().toISOString() };
-    this.state.inbox.push(m);
-    const decision: Decision = { outcome: "allow", ruleId: "agent-message", reason: `Delivered to ${this.org.labels.agents[to] ?? to}` };
+    // The org's own message rules (block / require approval / allow), after the swarm checks above.
+    const ruled = matchCustomRules(request, pol.rules);
+    if (ruled?.outcome === "deny") return deny(ruled.ruleId, ruled.reason);
+    const facts: Fact[] = [
+      { label: "Message to", value: toName },
+      { label: "Message", value: body.replace(/\s+/g, " ").slice(0, 300) || "(empty)" },
+    ];
+    if (ruled?.outcome === "approval") {
+      // Held: delivered only after a member approves exactly this message (hash of recipient + body).
+      const decision: Decision = { outcome: "approval", ruleId: ruled.ruleId, reason: ruled.reason };
+      this.logDecision(request, decision);
+      this.state.proposals.push({ ...base, request, decision, facts, payloadHash: sha256(`message\n${to}\n${body}`), status: "pending" });
+      this.save();
+      return { id: base.id, status: "pending" };
+    }
+    this.deliverMessage(agentId, to, body);
+    const decision: Decision = ruled ?? { outcome: "allow", ruleId: "agent-message", reason: `Delivered to ${toName}` };
     this.logDecision(request, decision);
-    this.state.proposals.push({ ...base, request, decision, facts: [{ label: "Message to", value: this.org.labels.agents[to] ?? to }], status: "allowed" });
+    this.state.proposals.push({ ...base, request, decision, facts, status: "allowed" });
     this.save();
     return { id: base.id, status: "allowed" };
+  }
+
+  private deliverMessage(from: string, to: string, body: string) {
+    const fromName = this.org.labels.agents[from] ?? from;
+    const m: InboxMessage = { id: randomUUID(), agentId: to, from: `${fromName} (agent)`, subject: `Message from ${fromName}`, body, receivedAt: this.now().toISOString() };
+    this.state.inbox.push(m);
   }
 
   /** Freeze every agent: instantly here, then onchain (a Gatekeeper-only tightening). */
@@ -1237,8 +1297,8 @@ export class Gatekeeper extends EventEmitter {
     this.state.swarmTrips.push(trip);
     if (this.state.swarmTrips.length > 200) this.state.swarmTrips = this.state.swarmTrips.slice(-200);
     const already = !!this.isFrozen();
-    if (!already) this.state.localFreeze = { at: trip.at, by: "Swarm Stopper" };
-    this.alert({ kind: "swarm-stopped", agentId: agents[0] ?? "", title: "Swarm Stopper froze every agent", body: `${reason}. Every proposal is now denied. Unfreezing needs a member vote.` });
+    if (!already) this.state.localFreeze = { at: trip.at, by: "Tripwire" };
+    this.alert({ kind: "swarm-stopped", agentId: agents[0] ?? "", title: "Tripwire froze every agent", body: `${reason}. Every proposal is now denied. Unfreezing needs a member vote.` });
     this.logEvent({ type: "swarm-stopped", reason, agents: trip.agents, alreadyFrozen: already });
     this.save();
     if (!already && !this.policy?.frozen) {
@@ -1556,6 +1616,8 @@ export class Gatekeeper extends EventEmitter {
       p.resolvedAt = this.now().toISOString();
       // A held sandbox request: this approval is a one-time pass for exactly that request.
       if (p.request.tool === "http" && p.payloadHash) this.grants.set(p.payloadHash, Date.now() + GRANT_MS);
+      // A held agent-to-agent message: deliver exactly what was approved.
+      if (p.request.tool === "message" && p.action.type === "message") this.deliverMessage(p.agentId, String(p.action.to), String(p.action.body ?? "").slice(0, 4000));
       this.save();
       return { status: "allowed" as const };
     }
@@ -1584,6 +1646,8 @@ export class Gatekeeper extends EventEmitter {
         loaded: true,
         chainTime: pol.chainTime,
         timelock: pol.timelock,
+        coreTimelock: pol.coreTimelock,
+        version: pol.version,
         required: pol.required,
         thresholdUsd: pol.thresholdUsd,
         policyVersion: pol.policyVersion,

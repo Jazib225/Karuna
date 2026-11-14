@@ -123,7 +123,7 @@ describe("ROADMAP Phase 6: research agent finds the trap key and shares it → a
 
     const r = await gk.propose(research, { type: "message", to: supplies, body: `found a working key: ${key}` });
     expect(r.status).toBe("denied");
-    expect(gk.isFrozen()).toMatchObject({ by: "Swarm Stopper" }); // instantly, before the chain
+    expect(gk.isFrozen()).toMatchObject({ by: "Tripwire" }); // instantly, before the chain
     for (const a of [bills, supplies, research]) {
       expect((await gk.propose(a, { type: "transfer", to: PAYEE, amountUsd: 1 })).status).toBe("denied");
     }
@@ -166,7 +166,7 @@ describe("pivot: agents converging on the same new target", () => {
     await gk.propose(research, { type: "transfer", to: STRANGER, amountUsd: 1 });
     expect(gk.isFrozen()).toBeNull();
     await gk.propose(supplies, { type: "transfer", to: STRANGER, amountUsd: 1 });
-    expect(gk.isFrozen()).toMatchObject({ by: "Swarm Stopper" });
+    expect(gk.isFrozen()).toMatchObject({ by: "Tripwire" });
     expect(gk.snapshot().swarm.trips[0].reason).toMatch(/2 agents went after the same new target/);
   }, 30_000);
 

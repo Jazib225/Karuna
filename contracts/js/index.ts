@@ -5,7 +5,7 @@ import {
   decodeAbiParameters, encodeAbiParameters, hexToString, isAddress, stringToHex, type Address, type Hex,
 } from "viem";
 
-export { DHARMA_ABI } from "./abi.ts";
+export { DHARMA_ABI, DHARMA_PROXY_ABI } from "./abi.ts";
 
 export const ARC_TESTNET_CHAIN_ID = 5042002;
 
@@ -13,6 +13,7 @@ export const ARC_TESTNET_CHAIN_ID = 5042002;
 export const Op = {
   AddRule: 0, RemoveRule: 1, SetPayee: 2, RemovePayee: 3, SetAgent: 4, RemoveAgent: 5,
   AddDomain: 6, RemoveDomain: 7, SetThreshold: 8, Freeze: 9, Unfreeze: 10, AddMember: 11, RemoveMember: 12,
+  SetTimelock: 13, SetCoreTimelock: 14, Upgrade: 15,
 } as const;
 export type OpName = keyof typeof Op;
 export const OP_NAMES = Object.keys(Op) as OpName[];
@@ -20,7 +21,7 @@ export const opName = (n: number): OpName => OP_NAMES[n];
 
 export const Outcome = { Allow: 0, Deny: 1, Approval: 2 } as const;
 export const OUTCOME_NAMES = ["allow", "deny", "approval"] as const;
-export const STATUS_NAMES = ["none", "open", "queued", "executed", "defeated"] as const;
+export const STATUS_NAMES = ["none", "open", "queued", "executed", "defeated", "cancelled"] as const;
 export const Kind = { Tighten: 0, Propose: 1, Vote: 2 } as const;
 
 // ---------------------------------------------------------------- ids & money
@@ -51,7 +52,10 @@ export type Change =
   | { op: "Freeze" }
   | { op: "Unfreeze" }
   | { op: "AddMember"; member: Address }
-  | { op: "RemoveMember"; member: Address };
+  | { op: "RemoveMember"; member: Address }
+  | { op: "SetTimelock"; seconds: number }
+  | { op: "SetCoreTimelock"; seconds: number }
+  | { op: "Upgrade"; implementation: Address };
 
 const RULE = [
   { type: "bytes32" }, { type: "uint8" }, { type: "bytes32" }, { type: "string" }, { type: "string" }, { type: "uint256" },
@@ -89,6 +93,11 @@ export function encodeChange(c: Change): { op: number; data: Hex } {
     case "AddMember":
     case "RemoveMember":
       return { op, data: encodeAbiParameters([{ type: "address" }], [c.member]) };
+    case "SetTimelock":
+    case "SetCoreTimelock":
+      return { op, data: encodeAbiParameters([{ type: "uint64" }], [BigInt(Math.round(c.seconds))]) };
+    case "Upgrade":
+      return { op, data: encodeAbiParameters([{ type: "address" }], [c.implementation]) };
   }
 }
 
@@ -127,6 +136,11 @@ export function decodeChange(op: number, data: Hex): Change {
     case "AddMember":
     case "RemoveMember":
       return { op: name, member: decodeAbiParameters([{ type: "address" }], data)[0] };
+    case "SetTimelock":
+    case "SetCoreTimelock":
+      return { op: name, seconds: Number(decodeAbiParameters([{ type: "uint64" }], data)[0]) };
+    case "Upgrade":
+      return { op: name, implementation: decodeAbiParameters([{ type: "address" }], data)[0] };
     default:
       throw new Error(`unknown op ${op}`);
   }
@@ -141,6 +155,38 @@ export interface Labels {
 const usd = (n: number) => `$${n > 0 && n < 0.01 ? String(n) : n.toFixed(2)}`;
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
+/** What a rule covers, in words: "shell commands starting with `git push`", "payments to Acme". */
+export function describeScope(scope: string, target: string, n: { agent?: (id: string) => string; payee?: (a: string) => string } = {}): string {
+  const [kind, sub] = scope.split(":");
+  const pattern = target.includes("*");
+  switch (kind) {
+    case "payment": {
+      const cat = sub ? ` for ${sub}` : "";
+      return target ? `payments${cat} to ${n.payee?.(target) ?? short(target)}` : `payments${cat}`;
+    }
+    case "http": {
+      const verb = sub ? `${sub.toUpperCase()} requests` : "web requests";
+      return target ? `${verb} to ${target}` : verb;
+    }
+    case "shell":
+      return !target ? "every shell command" : pattern ? `shell commands matching \`${target}\`` : `shell commands starting with \`${target}\``;
+    case "file": {
+      const op = sub === "write" ? "file writes" : sub === "read" ? "file reads" : "file reads and writes";
+      return !target ? op : pattern ? `${op} matching \`${target}\`` : `${op} in \`${target}\``;
+    }
+    case "message":
+      return target ? `messages to ${n.agent?.(target) ?? target}` : "messages to other agents";
+    case "key":
+      return `using the ${sub} key with ${target || "any host"}`;
+    case "mount":
+      return `mounting ${target}`;
+    case "unsandboxed":
+      return "running outside the sandbox";
+    default:
+      return `${scope}${target ? ` → ${target}` : ""}`;
+  }
+}
+
 /** Plain-English description, shown to humans before they sign and in the proposal list. */
 export function describeChange(c: Change, l: Labels = {}): string {
   const m = (a: string) => l.member?.(a.toLowerCase()) ?? short(a);
@@ -150,8 +196,7 @@ export function describeChange(c: Change, l: Labels = {}): string {
     case "AddRule": {
       if (!c.scope) return `Re-enable default rule ${c.id}`;
       const who = c.agent ? ag(c.agent) : "every agent";
-      const what = `${c.scope}${c.target ? ` → ${c.target.startsWith("0x") ? p(c.target) : c.target}` : ""}`;
-      return `${c.outcome === "Allow" ? "Allow" : c.outcome === "Deny" ? "Block" : "Require approval for"} ${what} for ${who}${c.outcome === "Allow" && c.maxUsd ? ` up to ${usd(c.maxUsd)}` : ""} (${c.id})`;
+      return `${c.outcome === "Allow" ? "Allow" : c.outcome === "Deny" ? "Block" : "Require approval for"} ${describeScope(c.scope, c.target ?? "", { agent: ag, payee: p })} for ${who}${c.outcome === "Allow" && c.maxUsd ? ` up to ${usd(c.maxUsd)}` : ""} (${c.id})`;
     }
     case "RemoveRule": return `Remove rule ${c.id}`;
     case "SetPayee": return `Allow payments to ${p(c.account)} (${c.category})`;
@@ -165,7 +210,26 @@ export function describeChange(c: Change, l: Labels = {}): string {
     case "Unfreeze": return "Unfreeze agents";
     case "AddMember": return `Add member ${m(c.member)}`;
     case "RemoveMember": return `Remove member ${m(c.member)}`;
+    case "SetTimelock": return `Set the wait for changes to ${waitText(c.seconds)}`;
+    case "SetCoreTimelock": return `Set the wait for core changes to ${waitText(c.seconds)}`;
+    case "Upgrade": return `Upgrade Dharma's code to ${short(c.implementation)}`;
   }
+}
+
+/** 90 -> "90s", 3600 -> "1h", 86400 -> "24h", 0 -> "no wait". */
+export function waitText(seconds: number | undefined): string {
+  if (seconds === undefined || !Number.isFinite(seconds)) return "—";
+  if (seconds <= 0) return "no wait";
+  if (seconds % 86400 === 0 && seconds > 2 * 86400) return `${seconds / 86400} days`;
+  if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+  if (seconds % 60 === 0 && seconds >= 120) return `${seconds / 60} min`;
+  return `${seconds}s`;
+}
+
+/** Mirrors Dharma.isCoreChange: needs every member, waits the core wait, never skipped, cancelled by a freeze. */
+export function isCoreChange(c: Change, coreRuleIds: string[]): boolean {
+  if (c.op === "SetCoreTimelock" || c.op === "Upgrade") return true;
+  return c.op === "RemoveRule" && coreRuleIds.includes(c.id);
 }
 
 // ---------------------------------------------------------------- typed data (EIP-712)

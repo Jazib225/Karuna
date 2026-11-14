@@ -203,8 +203,17 @@ export interface OnchainRule {
   builtin: boolean;
   active: boolean;
   agent?: string; // undefined = every agent
-  scope: string; // custom rules: "payment", "payment:<category>", "http"
-  target: string; // payee address or domain ("" = any)
+  /**
+   * What a custom rule is about. One per kind of agent action:
+   *   "payment" | "payment:<category>"         target: payee address
+   *   "http" | "http:<METHOD>"                 target: host, host/path prefix
+   *   "shell"                                  target: command (prefix, or a * pattern)
+   *   "file" | "file:read" | "file:write"      target: path (folder prefix, or a * pattern)
+   *   "message"                                target: the agent being messaged
+   * Capability grants (not request rules): "key:<name>", "mount", "unsandboxed".
+   */
+  scope: string;
+  target: string; // see scope ("" = any)
   maxUsd: number; // custom allow rules: upper bound (0 = none)
 }
 
@@ -228,6 +237,43 @@ export function httpTargetMatches(url: string, target: string): boolean {
   const h = u.hostname.toLowerCase();
   const hostOk = h === host || h.endsWith(`.${host}`);
   return hostOk && (!path || u.pathname.toLowerCase().startsWith(path));
+}
+
+/** A `*` pattern (anything, including nothing) as an anchored, case-insensitive regex. */
+function globRe(pattern: string): RegExp {
+  const esc = pattern.split("*").map((s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*");
+  return new RegExp(`^${esc}$`, "is");
+}
+
+/**
+ * Does a shell command fall under a rule target?
+ *   "git push"        commands starting with `git push` (whole words: not `git pushx`)
+ *   "*curl *"         a `*` pattern over the whole command: here, anything that runs curl
+ * Case and runs of spaces don't matter.
+ */
+export function commandMatches(command: string, target: string): boolean {
+  const c = command.trim().replace(/\s+/g, " ");
+  const t = target.trim().replace(/\s+/g, " ");
+  if (!t) return true;
+  if (t.includes("*")) return globRe(t).test(c);
+  const lc = c.toLowerCase();
+  const lt = t.toLowerCase();
+  return lc === lt || lc.startsWith(`${lt} `);
+}
+
+/**
+ * Does a file path fall under a rule target?
+ *   "finance"            that file or folder and everything inside it (`./finance/q3.xlsx`)
+ *   "*.pem"              a `*` pattern over the whole path
+ * Slashes either way, a leading `./`, and case don't matter.
+ */
+export function pathMatches(path: string, target: string): boolean {
+  const norm = (s: string) => s.trim().replace(/\\/g, "/").replace(/^(\.\/)+/, "").replace(/\/+$/, "").toLowerCase();
+  const p = norm(path);
+  const t = norm(target);
+  if (!t) return true;
+  if (t.includes("*")) return globRe(t).test(p) || globRe(t).test(p.split("/").pop() ?? "");
+  return p === t || p.startsWith(`${t}/`);
 }
 
 /** A custom (non-default) Dharma rule as an engine rule. Unknown scopes never match. */
@@ -257,10 +303,36 @@ export function customRule(r: OnchainRule): Rule {
         if (sub && (req.method ?? "GET").toUpperCase() !== sub.toUpperCase()) return false;
         return !target || httpTargetMatches(req.url, target);
       }
+      if (kind === "shell") {
+        return req.tool === "shell" && commandMatches(req.command ?? "", r.target);
+      }
+      if (kind === "file") {
+        if (req.tool !== "file") return false;
+        // "file:write" / "file:read" limit the rule to one; plain "file" covers both.
+        if (sub && (req.fileOp ?? "read") !== sub.toLowerCase()) return false;
+        return pathMatches(req.path ?? "", r.target);
+      }
+      if (kind === "message") {
+        return req.tool === "message" && (!target || (req.recipient ?? "").toLowerCase() === target);
+      }
       // key:<name>, mount, unsandboxed: capability grants the Gatekeeper reads, never request rules.
       return false;
     },
   };
+}
+
+/**
+ * Only the org's own (non-default) rules, in the same order buildRuleset uses (blocks, then
+ * approvals, then allows): the first that matches decides, or null if none does. For actions the
+ * default ruleset doesn't cover, like agent-to-agent messages.
+ */
+export function matchCustomRules(req: Request, onchain: OnchainRule[]): { outcome: Outcome; ruleId: string; reason: string } | null {
+  const custom = onchain.filter((r) => !r.builtin && r.active).map(customRule);
+  for (const outcome of ["deny", "approval", "allow"] as const) {
+    const hit = custom.find((r) => r.outcome === outcome && r.match(req, {} as PolicyContext));
+    if (hit) return { outcome: hit.outcome, ruleId: hit.id, reason: hit.description };
+  }
+  return null;
 }
 
 /**
@@ -269,23 +341,26 @@ export function customRule(r: OnchainRule): Rule {
  *   2. custom deny rules                     (blocks beat everything below)
  *   3. unknown-recipient                     (core, always)
  *   4. custom approval rules, then custom allow rules
- *   5. every other default rule still active (in default order; default-deny is core, always last)
- * Core rules apply even if the chain somehow reported them inactive: fail closed.
+ *   5. every other default rule still active (in default order; default-deny last)
+ * A default rule the chain doesn't mention at all is kept (fail closed). Core rules can be turned
+ * off only by a core change on Dharma (every member + the core wait); when one is, it stops applying.
+ * The final no-match denial in evaluate() still fails closed even without default-deny.
  */
 export function buildRuleset(onchain: OnchainRule[]): Rule[] {
   const byId = new Map(onchain.map((r) => [r.id, r]));
   const builtinActive = (id: string) => {
     const r = byId.get(id);
-    return !r || r.active || r.core; // unknown to the chain → keep (fail closed)
+    return !r || r.active; // unknown to the chain → keep (fail closed)
   };
   const custom = onchain.filter((r) => !r.builtin && r.active).map(customRule);
   const pick = (id: string) => defaultRules.find((r) => r.id === id)!;
-  const head = ["core-boundary", "secrets-read"].map(pick);
+  const ifActive = (id: string) => (builtinActive(id) ? [pick(id)] : []);
   const rest = defaultRules.filter((r) => !["core-boundary", "secrets-read", "unknown-recipient"].includes(r.id) && builtinActive(r.id));
   return [
-    ...head,
+    ...ifActive("core-boundary"),
+    ...ifActive("secrets-read"),
     ...custom.filter((r) => r.outcome === "deny"),
-    pick("unknown-recipient"),
+    ...ifActive("unknown-recipient"),
     ...custom.filter((r) => r.outcome === "approval"),
     ...custom.filter((r) => r.outcome === "allow"),
     ...rest,

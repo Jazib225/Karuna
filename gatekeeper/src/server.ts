@@ -192,12 +192,13 @@ export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: 
       if (method === "POST" && path === "/setup") return send(res, 200, await gk.setup(body as never));
       if (method === "PATCH" && path === "/settings") return send(res, 200, (gk.renameOrg(body.orgName), { ok: true }));
       if (method === "POST" && path === "/dharma/action") return send(res, 200, await gk.submitAction(body as unknown as SignedAction));
+      if (method === "POST" && path === "/rules/draft") return send(res, 200, await gk.draftRules(body.text));
       if (method === "POST" && path === "/agents/prepare") return send(res, 200, gk.prepareAgent(body.name));
       if (method === "POST" && (m = path.match(/^\/agents\/([\w-]+)\/rotate-token$/))) return send(res, 200, gk.rotateAgentToken(m[1]));
       if (method === "POST" && path === "/keys") {
         if (!secrets) return send(res, 501, { error: "No key store" });
         try {
-          const k = secrets.put(String(body.name ?? "").trim().toLowerCase(), String(body.envVar ?? "").trim(), String(body.value ?? ""));
+          const k = secrets.put(String(body.name ?? "").trim().toLowerCase(), String(body.envVar ?? "").trim(), String(body.value ?? ""), new Date(), body.purpose === "drafter" ? { purpose: "drafter", provider: String(body.provider ?? "") } : {});
           gk.noteKeyStored(k.name, k.envVar);
           return send(res, 200, k);
         } catch (e) {

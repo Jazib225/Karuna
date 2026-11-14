@@ -3,6 +3,14 @@ pragma solidity ^0.8.24;
 
 import {Test, Vm} from "forge-std/Test.sol";
 import {Dharma} from "../src/Dharma.sol";
+import {DharmaProxy} from "../src/DharmaProxy.sol";
+
+/// Stand-in for a future Dharma version, to test upgrades.
+contract DharmaNext is Dharma {
+    function version() external pure override returns (uint256) {
+        return 3;
+    }
+}
 
 contract DharmaTest is Test {
     Dharma dharma;
@@ -16,6 +24,7 @@ contract DharmaTest is Test {
     address carol;
 
     uint64 constant TIMELOCK = 60;
+    uint64 constant CORE = 1 days;
     bytes32 constant AGENT = bytes32("ops-agent");
     address constant PAYEE = address(0xBEEF);
 
@@ -26,7 +35,8 @@ contract DharmaTest is Test {
         string[] memory d = new string[](2);
         d[0] = "github.com";
         d[1] = "stripe.com";
-        dharma = new Dharma(gk, alice, TIMELOCK, 500e6, d);
+        Dharma impl = new Dharma();
+        dharma = Dharma(address(new DharmaProxy(address(impl), abi.encodeCall(Dharma.initialize, (gk, alice, TIMELOCK, CORE, 500e6, d)))));
     }
 
     // ------------------------------------------------------------- helpers
@@ -207,23 +217,6 @@ contract DharmaTest is Test {
 
     // ------------------------------------------------------------- ROADMAP: core boundaries
 
-    function test_removing_a_core_boundary_always_fails() public {
-        bytes32[4] memory core = [bytes32("core-boundary"), "secrets-read", "unknown-recipient", "default-deny"];
-        for (uint256 i; i < core.length; i++) {
-            bytes memory data = abi.encode(core[i]);
-            // not through the fast path...
-            bytes memory tsig = sign(aliceKey, Dharma.Kind.Tighten, Dharma.Op.RemoveRule, data, 0, false);
-            vm.prank(gk);
-            vm.expectRevert(Dharma.MembersMustPropose.selector);
-            dharma.tighten(Dharma.Op.RemoveRule, data, alice, block.timestamp + 1 hours, tsig);
-            // ...and not through a vote either
-            bytes memory psig = sign(aliceKey, Dharma.Kind.Propose, Dharma.Op.RemoveRule, data, 0, false);
-            vm.expectRevert(Dharma.CoreBoundary.selector);
-            dharma.propose(Dharma.Op.RemoveRule, data, alice, block.timestamp + 1 hours, psig);
-            assertTrue(ruleActive(core[i]));
-        }
-    }
-
     function test_non_core_default_rules_can_be_removed_by_vote() public {
         pass(Dharma.Op.RemoveRule, abi.encode(bytes32("package-install")));
         assertFalse(ruleActive("package-install"));
@@ -343,5 +336,218 @@ contract DharmaTest is Test {
         bytes memory sig = sign(aliceKey, Dharma.Kind.Propose, Dharma.Op.RemoveMember, data, 0, false);
         vm.expectRevert(abi.encodeWithSelector(Dharma.Invalid.selector, "cannot remove"));
         dharma.propose(Dharma.Op.RemoveMember, data, alice, block.timestamp + 1 hours, sig);
+    }
+
+    // ------------------------------------------------------------- v2: proxy + setup
+
+    function test_runs_behind_a_proxy_that_nobody_can_reinitialize() public {
+        assertEq(dharma.version(), 2);
+        assertEq(dharma.timelock(), TIMELOCK);
+        assertEq(dharma.coreTimelock(), CORE);
+        string[] memory d = new string[](0);
+        vm.expectRevert(Dharma.AlreadyInitialized.selector);
+        dharma.initialize(makeAddr("evil"), makeAddr("evil"), 0, CORE, 0, d);
+        // the bare implementation can't be initialized either
+        Dharma impl = Dharma(dharma.implementation());
+        vm.expectRevert(Dharma.AlreadyInitialized.selector);
+        impl.initialize(makeAddr("evil"), makeAddr("evil"), 0, CORE, 0, d);
+    }
+
+    function test_setup_rejects_bad_waits() public {
+        Dharma impl = new Dharma();
+        string[] memory d = new string[](0);
+        vm.expectRevert(abi.encodeWithSelector(Dharma.Invalid.selector, "bad core wait"));
+        new DharmaProxy(address(impl), abi.encodeCall(Dharma.initialize, (gk, alice, TIMELOCK, 0, 500e6, d)));
+        vm.expectRevert(abi.encodeWithSelector(Dharma.Invalid.selector, "wait too long"));
+        new DharmaProxy(address(impl), abi.encodeCall(Dharma.initialize, (gk, alice, 8 days, CORE, 500e6, d)));
+    }
+
+    // ------------------------------------------------------------- v2: core rules change only by everyone + the core wait
+
+    function test_core_rules_cannot_be_removed_on_the_fast_path() public {
+        bytes memory data = abi.encode(bytes32("secrets-read"));
+        bytes memory sig = sign(aliceKey, Dharma.Kind.Tighten, Dharma.Op.RemoveRule, data, 0, false);
+        vm.prank(gk);
+        vm.expectRevert(Dharma.MembersMustPropose.selector);
+        dharma.tighten(Dharma.Op.RemoveRule, data, alice, block.timestamp + 1 hours, sig);
+        vm.prank(gk);
+        vm.expectRevert(Dharma.NotTightening.selector); // and the Gatekeeper can't either
+        dharma.tighten(Dharma.Op.RemoveRule, data, address(0), 0, "");
+    }
+
+    function test_a_majority_cannot_remove_a_core_rule_but_everyone_can_after_the_core_wait() public {
+        addMembers(); // alice, bob, carol
+        bytes memory data = abi.encode(bytes32("secrets-read"));
+        assertTrue(dharma.isCoreChange(Dharma.Op.RemoveRule, data));
+        uint256 id = propose(aliceKey, Dharma.Op.RemoveRule, data);
+        assertTrue(dharma.proposal(id).core);
+        assertEq(dharma.requiredFor(id), 3);
+        vote(bobKey, id, true); // 2 of 3: a majority, not enough for a core change
+        assertEq(uint8(dharma.proposal(id).status), uint8(Dharma.Status.Open));
+        vm.warp(block.timestamp + CORE);
+        vm.expectRevert(Dharma.NotReady.selector);
+        dharma.execute(id);
+
+        vote(carolKey, id, true); // everyone: passes, and still waits the full core wait (no skip)
+        assertEq(dharma.proposal(id).eta, uint64(block.timestamp) + CORE);
+        vm.warp(block.timestamp + CORE - 1);
+        vm.expectRevert(Dharma.NotReady.selector);
+        dharma.execute(id);
+        vm.warp(block.timestamp + 1);
+        dharma.execute(id);
+        assertFalse(ruleActive("secrets-read"));
+    }
+
+    function test_one_no_vote_defeats_a_core_change() public {
+        addMembers();
+        uint256 id = propose(aliceKey, Dharma.Op.RemoveRule, abi.encode(bytes32("default-deny")));
+        vote(bobKey, id, false);
+        assertEq(uint8(dharma.proposal(id).status), uint8(Dharma.Status.Defeated));
+    }
+
+    function test_a_freeze_cancels_pending_core_changes_but_not_normal_ones() public {
+        addMembers();
+        uint256 open = propose(aliceKey, Dharma.Op.RemoveRule, abi.encode(bytes32("secrets-read"))); // core, still voting
+        uint256 queued = propose(aliceKey, Dharma.Op.SetCoreTimelock, abi.encode(uint64(2 days))); // core, passed
+        vote(bobKey, queued, true);
+        vote(carolKey, queued, true);
+        uint256 normal = propose(aliceKey, Dharma.Op.AddDomain, abi.encode("pypi.org"));
+        vote(bobKey, normal, true);
+
+        vm.expectEmit(true, false, false, false);
+        emit Dharma.ProposalCancelled(open);
+        tighten(bobKey, Dharma.Op.Freeze, "");
+        assertEq(uint8(dharma.proposal(open).status), uint8(Dharma.Status.Cancelled));
+        assertEq(uint8(dharma.proposal(queued).status), uint8(Dharma.Status.Cancelled));
+        assertEq(uint8(dharma.proposal(normal).status), uint8(Dharma.Status.Queued));
+        vm.warp(block.timestamp + CORE);
+        vm.expectRevert(Dharma.NotReady.selector);
+        dharma.execute(queued);
+        dharma.execute(normal);
+    }
+
+    // ------------------------------------------------------------- v2: every member can skip the wait (normal changes)
+
+    function test_everyone_voting_yes_skips_the_wait_for_a_normal_change() public {
+        addMembers();
+        uint256 id = propose(aliceKey, Dharma.Op.AddDomain, abi.encode("pypi.org"));
+        vote(bobKey, id, true); // majority: queued with the normal wait
+        assertEq(dharma.proposal(id).eta, uint64(block.timestamp) + TIMELOCK);
+        vm.expectRevert(Dharma.NotReady.selector);
+        dharma.execute(id);
+        vm.expectEmit(true, false, false, false);
+        emit Dharma.WaitSkipped(id);
+        vote(carolKey, id, true); // the last member: applies now
+        dharma.execute(id);
+        assertEq(dharma.domains().length, 3);
+    }
+
+    function test_the_skip_never_applies_to_unfreeze_core_changes_or_a_solo_member() public {
+        // solo: one member's yes is "everyone", but a skip needs a team
+        uint256 solo = propose(aliceKey, Dharma.Op.AddDomain, abi.encode("pypi.org"));
+        assertEq(dharma.proposal(solo).eta, uint64(block.timestamp) + TIMELOCK);
+
+        addMembers();
+        tighten(aliceKey, Dharma.Op.Freeze, "");
+        uint256 unfreeze = propose(aliceKey, Dharma.Op.Unfreeze, "");
+        vote(bobKey, unfreeze, true); // passed: waits the normal wait
+        // there is no skip for Unfreeze, so a further yes has nothing to do: refused
+        Dharma.Proposal memory p = dharma.proposal(unfreeze);
+        bytes memory sig = sign(carolKey, Dharma.Kind.Vote, p.op, p.data, unfreeze, true);
+        vm.expectRevert(abi.encodeWithSelector(Dharma.Invalid.selector, "voting closed"));
+        dharma.vote(unfreeze, true, carol, vm.getBlockTimestamp() + 1 hours, sig);
+        assertEq(dharma.proposal(unfreeze).eta, uint64(vm.getBlockTimestamp()) + TIMELOCK);
+        vm.expectRevert(Dharma.NotReady.selector);
+        dharma.execute(unfreeze);
+    }
+
+    function test_no_votes_after_a_proposal_passes_are_refused() public {
+        addMembers();
+        uint256 id = propose(aliceKey, Dharma.Op.AddDomain, abi.encode("pypi.org"));
+        vote(bobKey, id, true);
+        Dharma.Proposal memory p = dharma.proposal(id);
+        bytes memory sig = sign(carolKey, Dharma.Kind.Vote, p.op, p.data, id, false);
+        vm.expectRevert(abi.encodeWithSelector(Dharma.Invalid.selector, "voting closed"));
+        dharma.vote(id, false, carol, block.timestamp + 1 hours, sig);
+    }
+
+    // ------------------------------------------------------------- v2: the waits are settings
+
+    function test_the_normal_wait_is_a_normal_change_within_limits() public {
+        assertFalse(dharma.isCoreChange(Dharma.Op.SetTimelock, abi.encode(uint64(0))));
+        bytes memory tooLong = abi.encode(uint64(8 days));
+        bytes memory sig = sign(aliceKey, Dharma.Kind.Propose, Dharma.Op.SetTimelock, tooLong, 0, false);
+        vm.expectRevert(abi.encodeWithSelector(Dharma.Invalid.selector, "wait too long"));
+        dharma.propose(Dharma.Op.SetTimelock, tooLong, alice, block.timestamp + 1 hours, sig);
+        pass(Dharma.Op.SetTimelock, abi.encode(uint64(0))); // a team may choose no wait
+        assertEq(dharma.timelock(), 0);
+        uint256 id = propose(aliceKey, Dharma.Op.AddDomain, abi.encode("pypi.org"));
+        dharma.execute(id); // no wait now
+    }
+
+    function test_a_changed_wait_never_moves_a_proposal_already_waiting() public {
+        uint256 early = propose(aliceKey, Dharma.Op.AddDomain, abi.encode("pypi.org")); // eta: +60s
+        uint64 earlyEta = dharma.proposal(early).eta;
+        uint256 longer = propose(aliceKey, Dharma.Op.SetTimelock, abi.encode(uint64(1 hours)));
+        vm.warp(block.timestamp + TIMELOCK);
+        dharma.execute(longer);
+        assertEq(dharma.proposal(early).eta, earlyEta);
+        dharma.execute(early); // still on its old schedule
+        uint256 later = propose(aliceKey, Dharma.Op.AddDomain, abi.encode("npmjs.com"));
+        assertEq(dharma.proposal(later).eta, uint64(block.timestamp) + 1 hours);
+    }
+
+    function test_the_core_wait_is_a_core_change_within_limits() public {
+        assertTrue(dharma.isCoreChange(Dharma.Op.SetCoreTimelock, abi.encode(uint64(2 days))));
+        bytes memory tooShort = abi.encode(uint64(59));
+        bytes memory sig = sign(aliceKey, Dharma.Kind.Propose, Dharma.Op.SetCoreTimelock, tooShort, 0, false);
+        vm.expectRevert(abi.encodeWithSelector(Dharma.Invalid.selector, "bad core wait"));
+        dharma.propose(Dharma.Op.SetCoreTimelock, tooShort, alice, block.timestamp + 1 hours, sig);
+        uint256 id = propose(aliceKey, Dharma.Op.SetCoreTimelock, abi.encode(uint64(60)));
+        vm.warp(block.timestamp + TIMELOCK); // the normal wait isn't enough: lowering it waits the current core wait
+        vm.expectRevert(Dharma.NotReady.selector);
+        dharma.execute(id);
+        vm.warp(block.timestamp + CORE);
+        dharma.execute(id);
+        assertEq(dharma.coreTimelock(), 60);
+    }
+
+    // ------------------------------------------------------------- v2: upgrades
+
+    function test_an_upgrade_needs_everyone_and_the_core_wait_and_keeps_the_org() public {
+        addMembers();
+        pass3(Dharma.Op.SetPayee, abi.encode(PAYEE, "data"));
+        address next = address(new DharmaNext());
+        bytes32 domainBefore = dharma.DOMAIN_SEPARATOR();
+        uint256 id = propose(aliceKey, Dharma.Op.Upgrade, abi.encode(next));
+        assertTrue(dharma.proposal(id).core);
+        vote(bobKey, id, true);
+        assertEq(uint8(dharma.proposal(id).status), uint8(Dharma.Status.Open)); // a majority can't upgrade
+        vote(carolKey, id, true);
+        vm.warp(block.timestamp + CORE);
+        dharma.execute(id);
+
+        assertEq(dharma.implementation(), next);
+        assertEq(dharma.version(), 3);
+        // same address, same org: members, rules, payees and signatures all carry over
+        assertEq(dharma.members().length, 3);
+        assertEq(dharma.rules().length, 13);
+        assertEq(dharma.payees().length, 1);
+        assertEq(dharma.DOMAIN_SEPARATOR(), domainBefore);
+    }
+
+    function test_an_upgrade_must_point_at_real_code() public {
+        bytes memory data = abi.encode(makeAddr("not-a-contract"));
+        bytes memory sig = sign(aliceKey, Dharma.Kind.Propose, Dharma.Op.Upgrade, data, 0, false);
+        vm.expectRevert(abi.encodeWithSelector(Dharma.Invalid.selector, "bad implementation"));
+        dharma.propose(Dharma.Op.Upgrade, data, alice, block.timestamp + 1 hours, sig);
+    }
+
+    /// Pass a normal change with alice, bob and carol all voting yes (applies now).
+    function pass3(Dharma.Op op, bytes memory data) internal {
+        uint256 id = propose(aliceKey, op, data);
+        vote(bobKey, id, true);
+        vote(carolKey, id, true);
+        dharma.execute(id);
     }
 }

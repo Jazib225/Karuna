@@ -477,6 +477,21 @@ hint.className = "dock-hint";
 document.body.append(hint);
 const inDock = (x: number, y: number) => Math.abs(x + 28 - window.innerWidth / 2) < DOCK.halfWidth && y < DOCK.maxY;
 
+// The lotus is a drag handle first: a single press never opens the console (it's too easy to do
+// by accident while dragging). A double-click on it does. Clicks right after a drag are ignored.
+const DOUBLE_MS = 400;
+let lastTap = { at: 0, x: 0, y: 0 };
+let dragEndedAt = 0;
+function lotusTap(x: number, y: number) {
+  const now = Date.now();
+  if (now - lastTap.at < DOUBLE_MS && Math.hypot(x - lastTap.x, y - lastTap.y) < 12) {
+    lastTap = { at: 0, x: 0, y: 0 };
+    void invoke("island_open_main");
+  } else {
+    lastTap = { at: now, x, y };
+  }
+}
+
 function startDrag(e: PointerEvent) {
   if (e.button !== 0) return;
   const target = e.currentTarget as HTMLElement;
@@ -496,16 +511,17 @@ function startDrag(e: PointerEvent) {
     hint.classList.toggle("on", inDock(mode.x, mode.y));
     render();
   };
-  const up = () => {
+  const up = (ev: PointerEvent) => {
     target.removeEventListener("pointermove", move);
     target.removeEventListener("pointerup", up);
     target.removeEventListener("pointercancel", up);
     hint.classList.remove("on");
     if (!moved) {
-      // A click (no drag) on the lotus, docked or floating, opens the console.
-      void invoke("island_open_main");
+      if (ev.type === "pointerup") lotusTap(ev.clientX, ev.clientY);
       return;
     }
+    dragEndedAt = Date.now();
+    lastTap = { at: 0, x: 0, y: 0 };
     dragging = false;
     void invoke("island_drag", { active: false });
     if (mode.mode === "floating") {
@@ -522,7 +538,9 @@ function startDrag(e: PointerEvent) {
 sprite.addEventListener("pointerdown", (e) => startDrag(e));
 floater.addEventListener("pointerdown", (e) => startDrag(e));
 pill.addEventListener("click", (e) => {
-  if (e.target !== sprite) void invoke("island_open_main");
+  // The text part of the pill opens the console on one click; the lotus needs a double-click.
+  if (e.target === sprite || Date.now() - dragEndedAt < DOUBLE_MS) return;
+  void invoke("island_open_main");
 });
 
 // ------------------------------------------------------------------ decisions

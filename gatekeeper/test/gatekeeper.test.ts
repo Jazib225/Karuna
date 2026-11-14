@@ -15,6 +15,7 @@ import {
   Kind, actionTypedData, encodeChange, paymentDecisionTypedData, type Change,
 } from "@prekaruna/dharma";
 import { Store } from "../src/store.ts";
+import { SecretStore } from "../src/secrets.ts";
 import { Gatekeeper, GatekeeperError, type SignedAction } from "../src/gatekeeper.ts";
 import { ViemChainWriter, ChainError } from "../src/chain.ts";
 import type { WalletBackend, X402Quote } from "../src/wallet.ts";
@@ -198,11 +199,31 @@ describe("Rule changes: every member edit is voted on; only panic is instant", (
     expect(gk.snapshot().policy!.rules.find((r) => r.id === "no-data")!.active).toBe(false);
   }, 60_000);
 
-  it("removing a core boundary always fails", async () => {
-    for (const id of ["core-boundary", "secrets-read", "unknown-recipient", "default-deny"]) {
-      await expect(propose(alice, { op: "RemoveRule", id })).rejects.toThrow(/CoreBoundary/);
-      await expect(tighten(alice, { op: "RemoveRule", id })).rejects.toThrow(/go to a vote/);
-    }
+  it("when every member votes yes, the Gatekeeper applies a normal change right away", async () => {
+    await propose(alice, { op: "AddMember", member: bob.address }, "Bob");
+    await waitTimelock();
+    const domain: Change = { op: "AddDomain", domain: "example.org" };
+    await propose(alice, domain);
+    const id = gk.snapshot().policy!.proposals.find((x) => x.change?.op === "AddDomain")!.id;
+    await vote(bob, id, domain); // 2 of 2: no wait
+    await test().increaseTime({ seconds: 3 }); // only the Gatekeeper's few-second safety margin, not the 60 s wait
+    await test().mine({ blocks: 1 });
+    await gk.housekeeping();
+    expect(gk.snapshot().policy!.domains).toContain("example.org");
+  }, 30_000);
+
+  it("a core rule changes only as a core change: every member, then the core wait (default 24 h)", async () => {
+    await expect(tighten(alice, { op: "RemoveRule", id: "secrets-read" })).rejects.toThrow(/go to a vote/);
+    await propose(alice, { op: "RemoveRule", id: "secrets-read" });
+    const p = gk.snapshot().policy!.proposals.find((x) => x.change?.op === "RemoveRule")!;
+    expect(p).toMatchObject({ core: true, needed: 1, status: "queued" });
+    expect(p.eta! - p.queuedAt).toBe(86_400);
+    await waitTimelock(); // the normal wait isn't enough
+    expect(gk.snapshot().policy!.rules.find((r) => r.id === "secrets-read")!.active).toBe(true);
+    await test().increaseTime({ seconds: 86_400 });
+    await test().mine({ blocks: 1 });
+    await gk.housekeeping();
+    expect(gk.snapshot().policy!.rules.find((r) => r.id === "secrets-read")!.active).toBe(false);
   }, 30_000);
 
   it("a new agent can't act until Dharma adds it", async () => {
@@ -343,5 +364,69 @@ describe("agents still never see reasons", () => {
     const r = await gk.propose(gk.authenticateAgent(token)!, { type: "transfer", to: PAYEE, amountUsd: 1 });
     expect(r).toEqual({ id: r.id, status: "denied" });
     expect(GatekeeperError).toBeDefined();
+  }, 30_000);
+});
+
+const bodies = (agentId: string) => gk.agentInbox(agentId).map((m: { body: string }) => m.body);
+
+describe("rules cover every kind of action, not just payments and web requests", () => {
+  it("a shell rule blocks the command for the agent it names, after the vote", async () => {
+    const a = await activateAgent(1);
+    const agent = gk.authenticateAgent(a.token)!;
+    await propose(alice, { op: "AddRule", id: "no-push", outcome: "Deny", agent, scope: "shell", target: "git push" });
+    await waitTimelock();
+    expect((await gk.propose(agent, { type: "action", tool: "shell", command: "git push origin main" })).status).toBe("denied");
+    expect(gk.snapshot().proposals.at(-1)!.decision.ruleId).toBe("no-push");
+  }, 30_000);
+
+  it("message rules: a block stops it; an approval rule holds it, and only the approved message is delivered", async () => {
+    const research = gk.authenticateAgent((await activateAgent(1)).token)!;
+    const payer = gk.authenticateAgent((await activateAgent(1)).token)!;
+    // No rule: delivered, as before.
+    expect((await gk.propose(research, { type: "message", to: payer, body: "hello" })).status).toBe("allowed");
+    expect(bodies(payer)).toEqual(["hello"]);
+
+    await propose(alice, { op: "AddRule", id: "dm-needs-ok", outcome: "Approval", agent: research, scope: "message", target: payer });
+    await waitTimelock();
+    const held = await gk.propose(research, { type: "message", to: payer, body: "please pay invoice 7" });
+    expect(held.status).toBe("pending");
+    expect(bodies(payer)).toHaveLength(1); // not delivered yet
+    const p = pending()[0];
+    expect(p.decision.ruleId).toBe("dm-needs-ok");
+    await gk.decide(p.id, await signDecision(alice, p.id, p.payloadHash!, true));
+    expect(bodies(payer)).toContain("please pay invoice 7");
+
+    await propose(alice, { op: "AddRule", id: "dm-blocked", outcome: "Deny", agent: research, scope: "message", target: payer });
+    await waitTimelock();
+    expect((await gk.propose(research, { type: "message", to: payer, body: "again" })).status).toBe("denied");
+    expect(bodies(payer)).not.toContain("again");
+  }, 60_000);
+});
+
+describe("plain-English rules: a draft that worked is saved and reused", () => {
+  it("the same sentence comes back from the saved draft with no model call, and new rule ids", async () => {
+    await activateAgent(1);
+    const secrets = new SecretStore(dir);
+    secrets.put("gemini", "GEMINI_API_KEY", "test-key");
+    const g = new Gatekeeper({ store: new Store(dir), wallet, client, writerFor: () => new ViemChainWriter(createWalletClient({ chain, account: gkAccount, transport: http(RPC) }), client), timelockSeconds: 60, anchorEvery: 1000, secrets });
+    await g.housekeeping();
+    let calls = 0;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      calls++;
+      const content = JSON.stringify({ rules: [{ kind: "shell", outcome: "deny", agent: "", target: "git push", method: "", fileOp: "", category: "", maxUsd: 0 }], note: "" });
+      return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const first = await g.draftRules("Nobody runs git push");
+      expect(first.model).toBe("gemini-3.8-flash");
+      const again = await g.draftRules("  nobody runs   GIT push ");
+      expect(again.model).toBe("saved");
+      expect(calls).toBe(1); // no second model call
+      expect(again.rules.map((r) => r.sentence)).toEqual(first.rules.map((r) => r.sentence));
+      expect(again.rules[0].change.id).not.toBe(first.rules[0].change.id);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   }, 30_000);
 });

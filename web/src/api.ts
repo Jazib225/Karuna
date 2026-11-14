@@ -13,7 +13,7 @@ export interface Proposal {
   createdAt: string;
   action: { type: string; url?: string; method?: string; to?: string; amountUsd?: number; tool?: string; command?: string; path?: string };
   reason?: string;
-  request: { tool: string; to?: string; amountUsd?: number; command?: string; url?: string; method?: string; path?: string; paymentKind?: string };
+  request: { tool: string; to?: string; amountUsd?: number; command?: string; url?: string; method?: string; path?: string; paymentKind?: string; fileOp?: string };
   decision: { outcome: Outcome; ruleId: string; reason: string };
   facts: Fact[];
   payload?: { kind: "x402" | "transfer"; amountUsd: number };
@@ -40,9 +40,11 @@ export interface Governance {
   createdAt: number;
   queuedAt: number;
   eta: number | null;
+  core: boolean; // needs every member, waits the core wait, never skipped, cancelled by a freeze
+  needed: number; // yes votes it needs
   yes: number;
   no: number;
-  status: "none" | "open" | "queued" | "executed" | "defeated";
+  status: "none" | "open" | "queued" | "executed" | "defeated" | "cancelled";
   voters: string[];
   change: Record<string, unknown> & { op: string };
   preview: LooseningPreview | null;
@@ -78,7 +80,9 @@ export interface Snapshot {
   policy: null | {
     loaded: true;
     chainTime: number;
-    timelock: number;
+    timelock: number; // normal wait, seconds
+    coreTimelock: number; // core wait, seconds
+    version: number;
     required: number;
     thresholdUsd: number;
     policyVersion: number;
@@ -119,7 +123,7 @@ export interface SandboxView {
   requireSandbox: boolean;
   remote: { port: number; host: string; names: string[] } | null;
   sessions: { id: string; agentId: string; agentName: string; startedAt: string; lastSeen: string; host: string | null; isolation: "gvisor" | "docker"; desktop: boolean; remote: boolean; viewer: string | null; requests: number; denied: number; lastRequest: string | null; stopRequested: boolean }[];
-  keys: { name: string; envVar: string; placeholder: string; boundTo: string[]; createdAt: string; rotatedAt?: string }[];
+  keys: { name: string; envVar: string; placeholder: string; boundTo: string[]; createdAt: string; rotatedAt?: string; purpose?: "drafter"; provider?: "groq" | "gemini" }[];
   unsandboxed: string[];
 }
 

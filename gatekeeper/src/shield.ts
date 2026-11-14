@@ -117,15 +117,15 @@ export const isAutoRule = (id: string) => /^sh-[a-z0-9-]+-[0-9a-f]{8}$/.test(id)
  */
 export function autoRule(agentId: string, category: string, outcome: "Deny" | "Approval"): Change {
   if (outcome !== "Deny" && outcome !== "Approval") {
-    throw new ShieldGuardError(`Auto-Shield can only write deny or require-approval rules, not "${String(outcome)}"`);
+    throw new ShieldGuardError(`Drills can only write deny or require-approval rules, not "${String(outcome)}"`);
   }
-  if (!agentId || !category) throw new ShieldGuardError("Auto-Shield rules must name one agent and one category");
+  if (!agentId || !category) throw new ShieldGuardError("Drill rules must name one agent and one category");
   return { op: "AddRule", id: autoRuleId(agentId, category), outcome, agent: agentId, scope: `payment:${category.toLowerCase()}`, target: "", maxUsd: 0 };
 }
 
 /** Final check on whatever Auto-Shield is about to send. */
 export function assertShieldSafe(c: Change) {
   if (c.op !== "AddRule" || (c.outcome !== "Deny" && c.outcome !== "Approval")) {
-    throw new ShieldGuardError(`Auto-Shield refused to write ${c.op}${"outcome" in c ? ` (${String(c.outcome)})` : ""}: it can only add blocks`);
+    throw new ShieldGuardError(`Drills refused to write ${c.op}${"outcome" in c ? ` (${String(c.outcome)})` : ""}: it can only add blocks`);
   }
 }

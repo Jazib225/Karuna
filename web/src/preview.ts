@@ -37,6 +37,8 @@ export const previewSnapshot: Snapshot = {
     loaded: true,
     chainTime: unix(0),
     timelock: 60,
+    coreTimelock: 86400,
+    version: 2,
     required: 2,
     thresholdUsd: 500,
     policyVersion: 14,
@@ -66,7 +68,7 @@ export const previewSnapshot: Snapshot = {
     proposals: [
       {
         id: 31, op: 3, description: "Add payee Oven Repair Ltd (maintenance)", proposer: sam, createdAt: unix(420), queuedAt: 0, eta: null,
-        yes: 1, no: 0, status: "open", voters: [sam], change: { op: "SetPayee" },
+        yes: 1, no: 0, core: false, needed: 2, status: "open", voters: [sam], change: { op: "SetPayee" },
         preview: {
           replayed: 214, days: 7, newlyBlocked: 0, flaggedAllowed: 1,
           newlyAllowed: [
@@ -76,11 +78,15 @@ export const previewSnapshot: Snapshot = {
         },
       },
       {
-        id: 30, op: 5, description: "Raise Supplies agent allowance to $40/day", proposer: me, createdAt: unix(900), queuedAt: unix(40), eta: unix(-20),
-        yes: 2, no: 0, status: "queued", voters: [me, sam], change: { op: "SetAgent" }, preview: null,
+        id: 32, op: 1, description: "Remove rule secrets-read (core)", proposer: sam, createdAt: unix(300), queuedAt: 0, eta: null,
+        core: true, needed: 2, yes: 1, no: 0, status: "open", voters: [sam], change: { op: "RemoveRule" }, preview: null,
       },
-      { id: 29, op: 9, description: "Add member Sam", proposer: me, createdAt: unix(86400), queuedAt: unix(86000), eta: unix(85940), yes: 1, no: 0, status: "executed", voters: [me], change: { op: "AddMember" }, preview: null },
-      { id: 28, op: 6, description: "Allow domain pastebin.com", proposer: sam, createdAt: unix(90000), queuedAt: 0, eta: null, yes: 1, no: 1, status: "defeated", voters: [me, sam], change: { op: "AddDomain" }, preview: null },
+      {
+        id: 30, op: 5, description: "Raise Supplies agent allowance to $40/day", proposer: me, createdAt: unix(900), queuedAt: unix(40), eta: unix(-20),
+        yes: 2, no: 0, core: false, needed: 2, status: "queued", voters: [me, sam], change: { op: "SetAgent" }, preview: null,
+      },
+      { id: 29, op: 9, description: "Add member Sam", proposer: me, createdAt: unix(86400), queuedAt: unix(86000), eta: unix(85940), yes: 1, no: 0, core: false, needed: 2, status: "executed", voters: [me], change: { op: "AddMember" }, preview: null },
+      { id: 28, op: 6, description: "Allow domain pastebin.com", proposer: sam, createdAt: unix(90000), queuedAt: 0, eta: null, yes: 1, no: 1, core: false, needed: 2, status: "defeated", voters: [me, sam], change: { op: "AddDomain" }, preview: null },
     ],
   },
   frozen: false,

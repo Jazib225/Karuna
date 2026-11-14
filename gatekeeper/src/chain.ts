@@ -12,12 +12,12 @@ import { fileURLToPath } from "node:url";
 
 const ARGV_WRAPPER = fileURLToPath(new URL("./circle-argv.mjs", import.meta.url));
 import {
-  BaseError, ContractFunctionRevertedError, createPublicClient, encodeDeployData, http,
+  BaseError, ContractFunctionRevertedError, createPublicClient, encodeDeployData, encodeFunctionData, http,
   type Address, type Chain, type Hex, type PublicClient, type WalletClient,
 } from "viem";
 import { arcTestnet } from "viem/chains";
-import { DHARMA_ABI, OUTCOME_NAMES, STATUS_NAMES, decodeChange, fromBytes32, fromMicro, type Change } from "@prekaruna/dharma";
-import { DHARMA_BYTECODE } from "@prekaruna/dharma/bytecode";
+import { DHARMA_ABI, DHARMA_PROXY_ABI, OUTCOME_NAMES, STATUS_NAMES, decodeChange, fromBytes32, fromMicro, type Change } from "@prekaruna/dharma";
+import { DHARMA_BYTECODE, DHARMA_PROXY_BYTECODE } from "@prekaruna/dharma/bytecode";
 import type { OnchainRule } from "@prekaruna/engine";
 import { WALLET_CHAIN } from "./config.ts";
 
@@ -26,16 +26,27 @@ export type WriteFn =
 
 export interface DeployArgs {
   firstMember: Address;
-  timelockSeconds: number;
+  timelockSeconds: number; // the normal wait
+  coreTimelockSeconds: number; // the wait for core changes
   thresholdMicro: bigint;
   domains: string[];
 }
 
 export interface ChainWriter {
   readonly from: Address; // the Gatekeeper's address (Dharma.gatekeeper)
-  deploy(args: DeployArgs): Promise<{ address: Address; txRef: string }>;
+  deploy(args: DeployArgs): Promise<{ address: Address; txRef: string; implementation: Address }>;
   write(contract: Address, fn: WriteFn, args: readonly unknown[]): Promise<{ txRef: string }>;
 }
+
+/** The org's setup call, run inside the proxy as it's created (so nobody can set the org up first). */
+function initCall(gatekeeper: Address, a: DeployArgs): Hex {
+  return encodeFunctionData({
+    abi: DHARMA_ABI, functionName: "initialize",
+    args: [gatekeeper, a.firstMember, BigInt(a.timelockSeconds), BigInt(a.coreTimelockSeconds), a.thresholdMicro, a.domains],
+  });
+}
+const proxyDeployData = (implementation: Address, gatekeeper: Address, a: DeployArgs) =>
+  encodeDeployData({ abi: DHARMA_PROXY_ABI, bytecode: DHARMA_PROXY_BYTECODE, args: [implementation, initCall(gatekeeper, a)] });
 
 export class ChainError extends Error {
   constructor(message: string, readonly reason?: string) {
@@ -109,14 +120,14 @@ export class CircleChainWriter implements ChainWriter {
     });
   }
 
+  /** Two transactions: the Dharma code, then the org's proxy (its permanent address) pointing at it. */
   async deploy(a: DeployArgs) {
-    const bytecode = encodeDeployData({
-      abi: DHARMA_ABI, bytecode: DHARMA_BYTECODE,
-      args: [this.from, a.firstMember, BigInt(a.timelockSeconds), a.thresholdMicro, a.domains],
-    });
-    const d = await this.run(["contract", "deploy", "--bytecode", bytecode, "--address", this.from, "--chain", WALLET_CHAIN], 300_000);
-    if (!d.contractAddress) throw new ChainError("Deploy finished without a contract address");
-    return { address: String(d.contractAddress) as Address, txRef: String(d.txHash ?? d.id) };
+    const code = await this.run(["contract", "deploy", "--bytecode", DHARMA_BYTECODE, "--address", this.from, "--chain", WALLET_CHAIN], 300_000);
+    if (!code.contractAddress) throw new ChainError("Deploying the Dharma code finished without an address");
+    const impl = String(code.contractAddress) as Address;
+    const d = await this.run(["contract", "deploy", "--bytecode", proxyDeployData(impl, this.from, a), "--address", this.from, "--chain", WALLET_CHAIN], 300_000);
+    if (!d.contractAddress) throw new ChainError("Deploying the org's Dharma finished without an address");
+    return { address: String(d.contractAddress) as Address, txRef: String(d.txHash ?? d.id), implementation: impl };
   }
 
   async write(contract: Address, fn: WriteFn, args: readonly unknown[]) {
@@ -144,13 +155,13 @@ export class ViemChainWriter implements ChainWriter {
   }
 
   async deploy(a: DeployArgs) {
-    const hash = await this.wallet.deployContract({
-      abi: DHARMA_ABI, bytecode: DHARMA_BYTECODE, account: this.wallet.account!, chain: this.wallet.chain,
-      args: [this.from, a.firstMember, BigInt(a.timelockSeconds), a.thresholdMicro, a.domains],
-    });
+    const codeHash = await this.wallet.deployContract({ abi: DHARMA_ABI, bytecode: DHARMA_BYTECODE, account: this.wallet.account!, chain: this.wallet.chain });
+    const code = await this.client.waitForTransactionReceipt({ hash: codeHash });
+    if (!code.contractAddress) throw new ChainError("deploying the Dharma code failed");
+    const hash = await this.wallet.sendTransaction({ data: proxyDeployData(code.contractAddress, this.from, a), account: this.wallet.account!, chain: this.wallet.chain });
     const r = await this.client.waitForTransactionReceipt({ hash });
-    if (!r.contractAddress) throw new ChainError("deploy failed");
-    return { address: r.contractAddress, txRef: hash };
+    if (!r.contractAddress) throw new ChainError("deploying the org's Dharma failed");
+    return { address: r.contractAddress, txRef: hash, implementation: code.contractAddress };
   }
 
   async write(contract: Address, fn: WriteFn, args: readonly unknown[]) {
@@ -175,6 +186,8 @@ export interface OnchainProposal {
   createdAt: number;
   queuedAt: number;
   eta: number | null;
+  core: boolean; // needs every member, waits the core wait, never skipped, cancelled by a freeze
+  needed: number; // yes votes it needs
   yes: number;
   no: number;
   status: (typeof STATUS_NAMES)[number];
@@ -185,8 +198,11 @@ export interface OnchainPolicy {
   address: Address;
   chainId: number;
   gatekeeper: Address;
-  timelock: number;
-  required: number;
+  timelock: number; // normal wait, seconds
+  coreTimelock: number; // core wait, seconds
+  version: number; // Dharma code version
+  implementation: Address;
+  required: number; // yes votes a normal change needs (a core change needs every member)
   frozen: boolean;
   thresholdUsd: number;
   policyVersion: number;
@@ -220,24 +236,26 @@ export async function readFingerprint(client: PublicClient, address: Address) {
 }
 
 export async function readPolicy(client: PublicClient, address: Address, maxProposals = 200): Promise<OnchainPolicy> {
-  const [[gatekeeper, timelock, required, frozen, threshold, version, logHead, logLength, members, rules, payees, agents, domains, count], block, chainId] =
+  const [[gatekeeper, timelock, required, frozen, threshold, version, logHead, logLength, members, rules, payees, agents, domains, count, coreTimelock, codeVersion, implementation], block, chainId] =
     await Promise.all([
       readMany<readonly [
         Address, bigint, number, boolean, bigint, bigint, Hex, bigint, readonly Address[],
         readonly { id: Hex; outcome: number; core: boolean; builtin: boolean; active: boolean; agent: Hex; scope: string; target: string; maxMicroUsd: bigint }[],
         readonly { account: Address; category: string }[], readonly [readonly Hex[], readonly bigint[]], readonly string[], bigint,
+        bigint, bigint, Address,
       ]>(client, [
         { functionName: "gatekeeper" }, { functionName: "timelock" }, { functionName: "required" }, { functionName: "frozen" },
         { functionName: "thresholdMicroUsd" }, { functionName: "policyVersion" }, { functionName: "logHead" }, { functionName: "logLength" },
         { functionName: "members" }, { functionName: "rules" }, { functionName: "payees" }, { functionName: "agents" },
         { functionName: "domains" }, { functionName: "proposalCount" },
+        { functionName: "coreTimelock" }, { functionName: "version" }, { functionName: "implementation" },
       ], address),
       client.getBlock(),
       client.chain?.id ?? client.getChainId(),
     ]);
   const n = Number(count);
   const ids = Array.from({ length: Math.min(n, maxProposals) }, (_, i) => n - 1 - i);
-  type RawProposal = { op: number; data: Hex; proposer: Address; createdAt: bigint; queuedAt: bigint; yes: number; no: number; status: number };
+  type RawProposal = { op: number; data: Hex; proposer: Address; createdAt: bigint; queuedAt: bigint; yes: number; no: number; status: number; core: boolean; eta: bigint };
   const raw = ids.length ? await readMany<RawProposal[]>(client, ids.map((id) => ({ functionName: "proposal", args: [BigInt(id)] })), address) : [];
   const liveIds = ids.filter((_, i) => raw[i].status === 1 || raw[i].status === 2);
   const pairs = liveIds.flatMap((id) => members.map((m) => ({ id, m })));
@@ -246,12 +264,14 @@ export async function readPolicy(client: PublicClient, address: Address, maxProp
   pairs.forEach(({ id, m }, k) => {
     if (votedFlat[k]) voters.set(id, [...(voters.get(id) ?? []), m]);
   });
-  const tl = Number(timelock);
   return {
     address,
     chainId,
     gatekeeper,
-    timelock: tl,
+    timelock: Number(timelock),
+    coreTimelock: Number(coreTimelock),
+    version: Number(codeVersion),
+    implementation,
     required: Number(required),
     frozen,
     thresholdUsd: fromMicro(threshold),
@@ -284,7 +304,8 @@ export async function readPolicy(client: PublicClient, address: Address, maxProp
       return {
         id: ids[i], op: p.op, data: p.data, change, proposer: p.proposer,
         createdAt: Number(p.createdAt), queuedAt: Number(p.queuedAt),
-        eta: status === "queued" || status === "executed" ? Number(p.queuedAt) + tl : null,
+        eta: status === "queued" || status === "executed" ? Number(p.eta) : null,
+        core: p.core, needed: p.core ? members.length : Number(required),
         yes: p.yes, no: p.no, status, voters: (voters.get(ids[i]) ?? []).map((v) => v.toLowerCase() as Address),
       };
     }),
