@@ -101,7 +101,7 @@ instantly with no model call, so a rehearsed demo sentence can't fail. Models: `
 ## Deployed on Arc testnet
 | | |
 |---|---|
-| Organization's Dharma (dev org) | [`0x23986d1cb637d7d49a003353255188c97536b5af`](https://testnet.arcscan.app/address/0x23986d1cb637d7d49a003353255188c97536b5af) |
+| Organization's Dharma (dev org, v2 proxy) | [`0x6a1e15aaf824f51119c4a6e3493085c606b5d843`](https://testnet.arcscan.app/address/0x6a1e15aaf824f51119c4a6e3493085c606b5d843) |
 | Gatekeeper's Circle Agent Wallet | [`0xe78f1b83b5f995a8c5fbc3b4ad1f3639fe6002ea`](https://testnet.arcscan.app/address/0xe78f1b83b5f995a8c5fbc3b4ad1f3639fe6002ea) |
 
 Every new organization deploys its own Dharma (code + proxy) at setup; each verification and demo
