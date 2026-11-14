@@ -20,4 +20,22 @@ gullible (the ROADMAP's backup for showing Auto-Shield catch a fall); `--careful
 `examples/swarm-agents.ts` is the swarm demo: a "helpful" research agent that shares any credentials
 it finds in its inbox with teammates (`karuna.message(agentId, body)`). Karuna freezes every agent.
 
+## A real AI agent: Grok (xAI)
+`examples/grok-agent.ts` puts **Grok** behind an agent. For every new message in its inbox, Grok reads
+it and decides what to do. Its only tools are Karuna's: `pay_invoice`, `buy_data`, `message_agent`,
+`flag_message`. Each tool call is a proposal; Grok gets back only the blank status. The reason Grok
+writes shows up on the approval card (in the "written by the agent" box), prefixed `Grok (model)`, and
+the runner prints Grok's replies and tool calls.
+
+```bash
+# once: add your xAI key to the repo's .env (never paste it in chat)
+read -rsp "xAI API key: " K && printf '\nXAI_API_KEY=%s\n' "$K" >> .env && unset K
+# run one agent per role
+cd agents && set -a && . ../.env && . ../.env.agents && set +a
+KARUNA_AGENT_TOKEN=$BILLS_TOKEN AGENT_ROLE=bills npx tsx examples/grok-agent.ts
+```
+Roles: `bills` (pays legitimate invoices, flags scams), `supplies` (buys data when asked), `research`
+(helps teammates — the swarm demo). `XAI_MODEL` picks the model (default `grok-4.7`). The xAI key pays
+for Grok's thinking; it is the runner's model key, not a key to the business's money, and Grok never sees it.
+
 `pnpm --dir agents check:no-keys` proves no keys, wallet SDKs, or secrets are reachable.

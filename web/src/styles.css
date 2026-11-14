@@ -357,3 +357,8 @@ textarea { resize: vertical; }
 .learn-tr { grid-template-columns: auto 1fr auto; }
 .preview { margin: 0 1.1rem 1rem; padding: .6rem .8rem; border: 1px dashed var(--line); border-radius: var(--radius-md); display: flex; flex-direction: column; gap: .25rem; }
 .preview-bad { border-color: var(--deny); background: var(--deny-bg); }
+
+/* simplified pages */
+.page-split { margin-top: 1.4rem; }
+.txlink { font-family: var(--font-mono); font-size: .74rem; white-space: nowrap; }
+.count.info { background: var(--n100, #eee); color: inherit; }

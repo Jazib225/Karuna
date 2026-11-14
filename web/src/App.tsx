@@ -7,12 +7,23 @@ import { Kind, SignerUnavailable, decidePayment, loadSigner, submitChange } from
 import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
 import { keccak256, stringToHex } from "viem";
 
-type View = "overview" | "approvals" | "dharma" | "shield" | "swarm" | "agents" | "payees" | "policy" | "activity" | "team";
-const TITLES: Record<View, string> = {
-  overview: "Overview", approvals: "Approvals", dharma: "Dharma", shield: "Auto-Shield", swarm: "Swarm & traps", agents: "Agents", payees: "Payees & services",
-  policy: "Policy", activity: "Signed log", team: "Team",
+// Six pages. Older names (from pop-ups, links, saved state) still resolve to the page that holds them.
+type Page = "overview" | "approvals" | "agents" | "safety" | "rules" | "activity";
+type View = Page | "dharma" | "shield" | "swarm" | "payees" | "policy" | "team";
+const PAGE_OF: Record<View, Page> = {
+  overview: "overview", approvals: "approvals", agents: "agents", safety: "safety", rules: "rules", activity: "activity",
+  dharma: "approvals", shield: "safety", swarm: "safety", payees: "rules", policy: "rules", team: "rules",
 };
-const ICON: Record<View, string> = { overview: "▦", approvals: "◷", dharma: "⚖", shield: "⛨", swarm: "⌬", agents: "◉", payees: "⇄", policy: "☰", activity: "≋", team: "☺" };
+const TITLES: Record<Page, string> = {
+  overview: "Home", approvals: "Approvals & votes", agents: "Agents", safety: "Safety", rules: "Rules & team", activity: "Activity",
+};
+const ICON: Record<Page, string> = { overview: "▦", approvals: "◷", agents: "◉", safety: "⛨", rules: "☰", activity: "≋" };
+/** Arc explorer link for a transaction hash (payments, Dharma writes, freezes, anchors). */
+const isTx = (v: unknown): v is string => typeof v === "string" && /^0x[0-9a-fA-F]{64}$/.test(v);
+function TxLink({ tx, s }: { tx: unknown; s: Snapshot }) {
+  if (!isTx(tx) || !s.org.dharma) return null;
+  return <a className="txlink" href={`${s.org.dharma.explorer.replace(/\/address\/.*$/, "")}/tx/${tx}`} target="_blank" rel="noreferrer" title={tx}>Arc tx ↗</a>;
+}
 const AGENT_API = "http://127.0.0.1:8787";
 
 const usd = (n: number) => `$${n > 0 && n < 0.01 ? n.toFixed(4).replace(/0+$/, "") : n.toFixed(2)}`;
@@ -225,13 +236,14 @@ interface Ctx {
 }
 
 function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snapshot; log: LogEntry[]; wallet: WalletInfo | null; run: Run; busy: boolean; me: PrivateKeyAccount; offline: string | null; refresh: () => Promise<void> }) {
-  const [view, setView] = useState<View>(() => {
+  const [view, setPage] = useState<Page>(() => {
     try {
-      return (localStorage.getItem("karuna.view") as View) || "overview";
+      return PAGE_OF[localStorage.getItem("karuna.view") as View] ?? "overview";
     } catch {
       return "overview";
     }
   });
+  const setView = (v: View) => setPage(PAGE_OF[v] ?? "overview");
   useEffect(() => {
     try {
       localStorage.setItem("karuna.view", view);
@@ -293,7 +305,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
           return {
             id: a.id, title: a.title, body: a.body, source: "rpc", at: Date.now(), sticky: bad,
             tone: bad ? "bad" : a.kind === "shield-passed" ? "ok" : "warn",
-            go: swarm ? "swarm" : "shield", cta: swarm ? "Swarm & traps" : "Auto-Shield",
+            go: swarm ? "swarm" : "shield", cta: "Safety",
           };
         }),
         ...prev,
@@ -312,14 +324,13 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
         <div className="brand"><span className="mark">⬡</span> Karuna</div>
         <div className="biz">{s.org.name}</div>
         <nav className="nav">
-          {(Object.keys(TITLES) as View[]).map((v) => (
+          {(Object.keys(TITLES) as Page[]).map((v) => (
             <a key={v} className={view === v ? "sel" : ""} onClick={() => setView(v)}>
               <span className="ic">{ICON[v]}</span> {TITLES[v]}
               {v === "approvals" && pending.length > 0 && <span className="count warn">{pending.length}</span>}
-              {v === "dharma" && ballots.length > 0 && <span className="count warn">{ballots.length}</span>}
-              {v === "team" && s.enrollments.length > 0 && <span className="count">{s.enrollments.length}</span>}
-              {v === "swarm" && s.swarm.tainted.length > 0 && <span className="count warn">{s.swarm.tainted.length}</span>}
-              {v === "shield" && s.shield.autoRules.some((r) => r.active) && <span className="count warn">{s.shield.autoRules.filter((r) => r.active).length}</span>}
+              {v === "approvals" && ballots.length > 0 && <span className="count info">{ballots.length} vote{ballots.length > 1 ? "s" : ""}</span>}
+              {v === "rules" && s.enrollments.length > 0 && <span className="count">{s.enrollments.length}</span>}
+              {v === "safety" && (s.shield.autoRules.some((r) => r.active) || s.swarm.tainted.length > 0) && <span className="count warn">{s.shield.autoRules.filter((r) => r.active).length + s.swarm.tainted.length}</span>}
             </a>
           ))}
         </nav>
@@ -363,7 +374,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
             <div key={a.id} className={`alert ${a.tone}`}>
               <div className="alert-top">
                 <b>{a.title}</b>
-                <span className="via">{a.source === "quicknode" ? "via QuickNode" : a.source === "rpc" && a.go === "shield" ? "Gatekeeper" : "via Arc RPC"}</span>
+                <span className="via">{a.source === "quicknode" ? "via QuickNode" : a.source === "rpc" && (a.go === "shield" || a.go === "swarm") ? "Gatekeeper" : "via Arc RPC"}</span>
                 <button className="alert-x" aria-label="Dismiss" onClick={() => dismiss(a.id)}>×</button>
               </div>
               <div className="alert-body">{a.body}</div>
@@ -380,15 +391,38 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
             </div>
           )}
           {view === "overview" && <Overview ctx={ctx} wallet={wallet} go={setView} />}
-          {view === "approvals" && <Approvals ctx={ctx} dharma={dharma} />}
-          {view === "dharma" && <Dharma ctx={ctx} />}
-          {view === "shield" && <Shield ctx={ctx} />}
-          {view === "swarm" && <Swarm ctx={ctx} />}
-          {view === "agents" && <Agents ctx={ctx} />}
-          {view === "payees" && <Payees ctx={ctx} />}
-          {view === "policy" && <Policy ctx={ctx} />}
+          {view === "approvals" && (
+            <div className="stack">
+              <Approvals ctx={ctx} dharma={dharma} />
+              <p className="section-title page-split">Votes on rule changes — anything that loosens the rules waits here for members' votes and a timelock</p>
+              <Dharma ctx={ctx} />
+            </div>
+          )}
+          {view === "agents" && (
+            <div className="stack">
+              <Agents ctx={ctx} />
+              <Shield ctx={ctx} part="messages" />
+            </div>
+          )}
+          {view === "safety" && (
+            <div className="stack">
+              <p className="section-title">Scam tests — Karuna sends fake scams; an agent that falls for one loses that category until you restore it</p>
+              <Shield ctx={ctx} part="tests" />
+              <p className="section-title page-split">Trap passwords &amp; swarm — fake keys as bait; sharing one, or agents ganging up, freezes every agent</p>
+              <Swarm ctx={ctx} />
+            </div>
+          )}
+          {view === "rules" && (
+            <div className="stack">
+              <p className="section-title">Who agents may pay</p>
+              <Payees ctx={ctx} />
+              <p className="section-title page-split">Rules on Dharma</p>
+              <Policy ctx={ctx} />
+              <p className="section-title page-split">Team</p>
+              <Team ctx={ctx} />
+            </div>
+          )}
           {view === "activity" && <Activity ctx={ctx} log={log} />}
-          {view === "team" && <Team ctx={ctx} />}
         </div>
       </main>
     </div>
@@ -478,7 +512,7 @@ function Rows({ ctx, items }: { ctx: Ctx; items: Proposal[] }) {
             <span className={`act ${o === "deny" ? "denied" : ""}`}><span className="ag">{ctx.s.policy!.agents.find((a) => a.id === p.agentId)?.name ?? p.agentId} ·</span> {describe(p, ctx)}</span>
             <span className={`chip ${cls}`}><span className="g">{GLYPH[cls]}</span>{label}</span>
             <span className="pol">{p.decision.ruleId}</span>
-            <span className="t">{ago(p.createdAt)}</span>
+            <span className="t">{isTx(p.txRef) ? <TxLink tx={p.txRef} s={ctx.s} /> : ago(p.createdAt)}</span>
           </div>
         );
       })}
@@ -891,8 +925,9 @@ function Policy({ ctx }: { ctx: Ctx }) {
 
 function Activity({ ctx, log }: { ctx: Ctx; log: LogEntry[] }) {
   const { s } = ctx;
-  const [filter, setFilter] = useState<"all" | "decisions" | "events">("all");
-  const shown = useMemo(() => log.filter((e) => filter === "all" || (filter === "decisions" ? !!e.decision : !!e.event)), [log, filter]);
+  const [filter, setFilter] = useState<"all" | "decisions" | "events" | "on Arc">("all");
+  const onArc = (e: LogEntry) => !!e.event && isTx((e.event as Record<string, unknown>).txRef);
+  const shown = useMemo(() => log.filter((e) => filter === "all" || (filter === "on Arc" ? onArc(e) : filter === "decisions" ? !!e.decision : !!e.event)), [log, filter]);
   const who = (id: unknown) => {
     const v = String(id ?? "");
     return v.startsWith("0x") ? ctx.name(v) : s.policy!.agents.find((a) => a.id === v)?.name ?? v;
@@ -901,8 +936,8 @@ function Activity({ ctx, log }: { ctx: Ctx; log: LogEntry[] }) {
   return (
     <div className="card">
       <div className="hd">
-        <h2>Signed decision log</h2>
-        <span className="sub filters">{(["all", "decisions", "events"] as const).map((k) => <span key={k} className={filter === k ? "on" : ""} onClick={() => setFilter(k)}>{k}</span>)}</span>
+        <h2>Everything that happened</h2>
+        <span className="sub filters">{(["all", "decisions", "events", "on Arc"] as const).map((k) => <span key={k} className={filter === k ? "on" : ""} onClick={() => setFilter(k)}>{k}</span>)}</span>
       </div>
       {shown.length === 0 ? (
         <div className="empty">The log is empty.</div>
@@ -926,13 +961,13 @@ function Activity({ ctx, log }: { ctx: Ctx; log: LogEntry[] }) {
               );
             }
             const ev = e.event!;
-            const detail = Object.entries(ev).filter(([k]) => k !== "type").map(([k, v]) => `${k}=${k === "by" ? who(v) : typeof v === "object" ? JSON.stringify(v) : String(v)}`).join("  ");
+            const detail = Object.entries(ev).filter(([k]) => k !== "type" && k !== "txRef").map(([k, v]) => `${k}=${k === "by" ? who(v) : typeof v === "object" ? JSON.stringify(v) : String(v)}`).join("  ");
             return (
               <div className="item event" key={e.seq}>
                 <span className="caret">{e.seq}</span>
                 <span className="tool">event</span>
                 <span className="act"><b>{ev.type}</b> <span className="ag">{detail}</span></span>
-                <span />
+                <span><TxLink tx={(ev as Record<string, unknown>).txRef} s={s} /></span>
                 <span className="pol">{ago(e.timestamp)}</span>
                 <span className="log">{anchoredMark} {e.hash.slice(0, 4)}…{e.hash.slice(-4)}</span>
               </div>
@@ -1028,7 +1063,7 @@ function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string
     }
     case "AgentFrozen":
       if (s.frozen && s.frozen.by === "Swarm Stopper")
-        return { ...base, tone: "bad", sticky: true, go: "swarm", cta: "Swarm & traps", title: "Swarm freeze recorded on Dharma", body: "Swarm Stopper froze every agent. Unfreezing needs a member vote." };
+        return { ...base, tone: "bad", sticky: true, go: "swarm", cta: "Safety", title: "Swarm freeze recorded on Dharma", body: "Swarm Stopper froze every agent. Unfreezing needs a member vote." };
       return { ...base, tone: "bad", sticky: true, title: "All agents frozen", body: `${name(String(a.by))} hit the panic button. Recorded on Dharma.` };
     case "AgentsUnfrozen":
       return { ...base, tone: "ok", sticky: false, title: "Agents unfrozen", body: "The vote passed and the timelock ended." };
@@ -1072,7 +1107,7 @@ function LiveBadge({ mode }: { mode: LiveMode }) {
 
 // ============================================================== Auto-Shield
 
-function Shield({ ctx }: { ctx: Ctx }) {
+function Shield({ ctx, part }: { ctx: Ctx; part: "tests" | "messages" }) {
   const { s, busy, run } = ctx;
   const pol = s.policy!;
   const active = pol.agents.filter((a) => a.active);
@@ -1095,6 +1130,42 @@ function Shield({ ctx }: { ctx: Ctx }) {
     e.preventDefault();
     run(() => api("/inbox", { ...msg, agentId: msg.agentId || active[0]?.id }), "Message delivered to the agent's inbox").then((ok) => ok && setMsg({ ...msg, subject: "", body: "" }));
   };
+
+  if (part === "messages") {
+    return (
+      <div className="stack">
+          <form className="card" onSubmit={send}>
+            <div className="hd"><h2>Send a message to an agent</h2></div>
+            <div className="pad stack">
+              <p className="muted small">Give an agent work, the way a supplier or teammate would: an invoice for the Bills agent, a data request for the Supplies agent.</p>
+              <div className="row-form">
+                <select value={msg.agentId} onChange={(e) => setMsg({ ...msg, agentId: e.target.value })}>
+                  {active.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
+                <input required value={msg.from} onChange={(e) => setMsg({ ...msg, from: e.target.value })} placeholder="From (e.g. a supplier)" />
+              </div>
+              <input className="plain-input" required value={msg.subject} onChange={(e) => setMsg({ ...msg, subject: e.target.value })} placeholder="Subject" />
+              <textarea required rows={3} value={msg.body} onChange={(e) => setMsg({ ...msg, body: e.target.value })} placeholder="Invoice text, payment details…" />
+              <button className="btn btn-ghost" disabled={busy || !active.length}>Deliver</button>
+            </div>
+          </form>
+      <div className="card">
+        <div className="hd"><h2>Inboxes</h2><span className="sub">what agents received</span></div>
+        {s.inbox.length === 0 ? <div className="empty">No messages yet.</div> : (
+          <div className="resolved">
+            {s.inbox.slice(0, 20).map((m) => (
+              <div className="res" key={m.id}>
+                <span className={`chip ${m.test ? (m.test.status === "failed" ? "deny" : m.test.status === "passed" ? "allow" : "approval") : ""}`}>{m.test ? "test" : "real"}</span>
+                <span className="small"><b>{m.subject}</b> <span className="muted">from {m.from} → {agentName(m.agentId)}</span></span>
+                <span className="muted small">{m.reportedAt ? "flagged by agent · " : ""}{ago(m.receivedAt)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      </div>
+    );
+  }
 
   return (
     <div className="stack">
@@ -1160,7 +1231,7 @@ function Shield({ ctx }: { ctx: Ctx }) {
         <div className="log-foot"><span>lifting a block is a loosening: {pol.required} vote{pol.required > 1 ? "s" : ""} + {pol.timelock}s</span><span>tightening it further applies at once</span></div>
       </div>
 
-      <div className="grid2">
+      <div>
         <form className="card" onSubmit={runTest}>
           <div className="hd"><h2>Run a scam test now</h2></div>
           <div className="pad stack">
@@ -1183,20 +1254,7 @@ function Shield({ ctx }: { ctx: Ctx }) {
           </div>
         </form>
 
-        <form className="card" onSubmit={send}>
-          <div className="hd"><h2>Send a real message to an agent</h2></div>
-          <div className="pad stack">
-            <div className="row-form">
-              <select value={msg.agentId} onChange={(e) => setMsg({ ...msg, agentId: e.target.value })}>
-                {active.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-              </select>
-              <input required value={msg.from} onChange={(e) => setMsg({ ...msg, from: e.target.value })} placeholder="From (e.g. a supplier)" />
-            </div>
-            <input className="plain-input" required value={msg.subject} onChange={(e) => setMsg({ ...msg, subject: e.target.value })} placeholder="Subject" />
-            <textarea required rows={3} value={msg.body} onChange={(e) => setMsg({ ...msg, body: e.target.value })} placeholder="Invoice text, payment details…" />
-            <button className="btn btn-ghost" disabled={busy || !active.length}>Deliver</button>
-          </div>
-        </form>
+
       </div>
 
       <div className="card">
@@ -1214,20 +1272,6 @@ function Shield({ ctx }: { ctx: Ctx }) {
         )}
       </div>
 
-      <div className="card">
-        <div className="hd"><h2>Inboxes</h2><span className="sub">what agents received</span></div>
-        {s.inbox.length === 0 ? <div className="empty">No messages yet.</div> : (
-          <div className="resolved">
-            {s.inbox.slice(0, 20).map((m) => (
-              <div className="res" key={m.id}>
-                <span className={`chip ${m.test ? (m.test.status === "failed" ? "deny" : m.test.status === "passed" ? "allow" : "approval") : ""}`}>{m.test ? "test" : "real"}</span>
-                <span className="small"><b>{m.subject}</b> <span className="muted">from {m.from} → {agentName(m.agentId)}</span></span>
-                <span className="muted small">{m.reportedAt ? "flagged by agent · " : ""}{ago(m.receivedAt)}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
     </div>
   );
 }
