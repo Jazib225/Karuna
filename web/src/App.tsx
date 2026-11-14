@@ -10,6 +10,7 @@ import { keccak256, stringToHex } from "viem";
 import { PREVIEW, previewLog, previewSigner, previewSnapshot, previewWallet } from "./preview.ts";
 import { Badge, Icon, type IconName } from "./icons.tsx";
 import { setDesktopSigner } from "./desktop.ts";
+import { eventName, NAMED_KEYS } from "./eventNames.ts";
 
 // One job per page. The menu groups them: everyday work first, then the automatic safety systems,
 // settings, and a testing tool. Older names (pop-ups, saved state) still resolve.
@@ -1444,12 +1445,12 @@ function Activity({ ctx, log }: { ctx: Ctx; log: LogEntry[] }) {
               );
             }
             const ev = e.event!;
-            const detail = Object.entries(ev).filter(([k]) => k !== "type" && k !== "txRef").map(([k, v]) => `${k}=${k === "by" ? who(v) : typeof v === "object" ? JSON.stringify(v) : String(v)}`).join("  ");
+            const detail = Object.entries(ev).filter(([k]) => !NAMED_KEYS.has(k)).map(([k, v]) => `${k}=${k === "by" ? who(v) : typeof v === "object" ? JSON.stringify(v) : String(v)}`).join("  ");
             return (
               <div className="item event" key={e.seq}>
                 <span className="caret">{e.seq}</span>
                 <span className="tool">event</span>
-                <span className="act" title={detail}><b>{ev.type}</b> <span className="ag">{detail}</span></span>
+                <span className="act" title={`${ev.type}: ${detail}`}><b>{eventName(ev as Record<string, unknown>)}</b> <span className="ag">{detail}</span></span>
                 <span><TxLink tx={(ev as Record<string, unknown>).txRef} s={s} /></span>
                 <span className="pol">{ago(e.timestamp)}</span>
                 <span className="log">{anchoredMark} {e.hash.slice(0, 4)}…{e.hash.slice(-4)}</span>

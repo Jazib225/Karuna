@@ -387,7 +387,7 @@ export class Gatekeeper extends EventEmitter {
       this.executeTried.set(prop.id, Date.now());
       try {
         const { txRef } = await this.send("execute", [BigInt(prop.id)]);
-        this.logEvent({ type: "dharma-executed", proposalId: prop.id, change: prop.change ? describeChange(prop.change, this.labels()) : `op ${prop.op}`, txRef });
+        this.logEvent({ type: "dharma-executed", proposalId: prop.id, op: prop.change?.op ?? null, change: prop.change ? describeChange(prop.change, this.labels()) : `op ${prop.op}`, txRef });
         await this.sync(true).catch(() => undefined);
         this.save();
       } catch (e) {
@@ -541,7 +541,7 @@ export class Gatekeeper extends EventEmitter {
       else res = await this.send("vote", [BigInt(a.proposalId!), !!a.support, signer, deadline, a.signature]);
     } catch (e) {
       const msg = e instanceof ChainError ? e.message : `Chain write failed: ${scrub(e)}`;
-      this.logEvent({ type: "dharma-rejected", action: KIND_NAMES[a.kind], change: description, by: lower(signer), detail: msg });
+      this.logEvent({ type: "dharma-rejected", action: KIND_NAMES[a.kind], op: change.op, change: description, by: lower(signer), detail: msg });
       this.save();
       throw new GatekeeperError(msg, e instanceof ChainError && e.reason ? 409 : 502);
     }
@@ -557,7 +557,7 @@ export class Gatekeeper extends EventEmitter {
       }
     }
     this.logEvent({
-      type: "dharma", action: KIND_NAMES[a.kind], change: description, by: lower(signer), txRef: res.txRef,
+      type: "dharma", action: KIND_NAMES[a.kind], op: change.op, change: description, by: lower(signer), txRef: res.txRef,
       ...(proposalId !== undefined ? { proposalId } : {}), ...(a.kind === Kind.Vote ? { support: !!a.support } : {}),
     });
     await this.sync(true).catch(() => undefined);
