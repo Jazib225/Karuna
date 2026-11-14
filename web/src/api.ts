@@ -67,7 +67,24 @@ export interface Learned {
   suggestAfter: number;
 }
 
-export interface AgentView { id: string; name: string; capUsd: number; spentTodayUsd: number; active: boolean; hasToken: boolean }
+export interface AgentView {
+  id: string; name: string; capUsd: number; spentTodayUsd: number; active: boolean; hasToken: boolean;
+  /** Trust level (Dharma v3); null on an older Dharma or for an agent not added yet. */
+  level?: number | null;
+  /** The agent's record, rebuilt by the relay from Dharma's events (QuickNode Stream). */
+  record?: AgentRecord | null;
+  eligibility?: { eligible: boolean; target: number | null; needed: number; have: number } | null;
+}
+
+export interface AgentRecord {
+  agent: string; level: number; completed: number; denied: number; approvalsRequested: number; drillsFailed: number; tripwires: number;
+  cleanStreak: number; levelChanges: { level: number; reason: string; block: number | null; txHash: string | null }[]; lastBlock: number | null;
+}
+
+export interface WatchdogEvent {
+  key: string; at: string; txHash: string; to: string; amountUsd: number; block: number | null; source: string;
+  verdict: "matched" | "gateway-deposit" | "unapproved"; proposalId?: string; txRef?: string;
+}
 
 export interface Snapshot {
   setUp: boolean;
@@ -93,7 +110,13 @@ export interface Snapshot {
     domains: string[];
     rules: OnchainRule[];
     proposals: Governance[];
+    /** Dharma v3: each level's payment limits (index = level), the grants, and the record's source. */
+    levelLimits?: { perPaymentUsd: number; dailyUsd: number }[] | null;
+    levelGrants?: { id: string; min: number; what: string }[];
+    levelUpStreak?: number[];
+    records?: { at: string; source: string } | null;
   };
+  watchdog?: { wallet: string | null; gateway: string; events: WatchdogEvent[] };
   frozen: null | false | { by: string | null; at: string; confirmed: boolean };
   enrollments: { address: string; name: string; requestedAt: string }[];
   shield: {
@@ -134,7 +157,7 @@ export interface ShieldTest {
   sentAt: string; status: "pending" | "passed" | "failed"; resolvedAt?: string; resolution?: string; proposalIds: string[]; ruleId?: string;
 }
 export interface TrapSet { id: string; agentId: string | null; createdAt: string; secrets: { name: string; value: string }[] }
-export interface ShieldAlert { id: string; kind: "shield-failed" | "shield-passed" | "changed-bank-account" | "agent-reported" | "trap-touched" | "swarm-stopped"; agentId: string; title: string; body: string; at: string }
+export interface ShieldAlert { id: string; kind: "shield-failed" | "shield-passed" | "changed-bank-account" | "agent-reported" | "trap-touched" | "swarm-stopped" | "watchdog" | "level-lowered"; agentId: string; title: string; body: string; at: string }
 
 export interface LogEntry {
   seq: number;

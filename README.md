@@ -42,7 +42,7 @@ Karuna makes sure no agent, and no group of agents, can be tricked into misusing
    the agent's spend so far today. These come from the request, never from the agent's explanation.
 3. **The rules decide.** The policy engine reads the org's rules from Dharma on Arc and the first
    matching rule gives one of three answers:
-   - **allow**: the action goes ahead now;
+   - **allow**: the action goes ahead now (within the agent's trust level);
    - **ask**: an approval card appears on every member's screen through the QuickNode Stream, with
      Karuna's facts on top and the agent's reason boxed as "may not be true";
    - **deny**: the agent gets a blank `denied`, with no reason to learn from.
@@ -105,6 +105,34 @@ on the Keys page named `gemini` (aistudio.google.com, service `generativelanguag
 instantly with no model call, so a rehearsed demo sentence can't fail. Models: `KARUNA_DRAFT_MODEL`,
 `KARUNA_DRAFT_FALLBACK_MODEL`, `KARUNA_DRAFT_GROQ_MODEL`. Without a key the form works by hand.
 
+## Trust levels
+An agent earns autonomy the way a new hire does: a little at first, more as its record earns it,
+and all of it pulled back the moment something goes wrong. Each agent's level lives on Dharma (v3).
+
+| Level | Pays without asking (per payment / per day) | Also without asking | To get here |
+|---|---|---|---|
+| 0 Restricted | $0.10 / $1 | nothing else | every new agent |
+| 1 Limited | $0.50 / $5 | messages to other agents, file writes in `./workspace` | 10 clean actions, then a vote |
+| 2 Standard | $2 / $20 | POST/PUT/DELETE to allowlisted domains, package installs | 25 clean actions, then a vote |
+| 3 Extended | $5 / $50 | file writes anywhere in the sandbox | 50 clean actions, then a vote |
+
+- **What a level never changes.** Core rules, and the org's own block and approval rules, always come
+  first (rule order: core → blocks → approvals → **level** → allows → defaults). `rm -rf`, unknown
+  payees, secrets and unlisted domains stay off at every level. The payment limits per level are
+  changed by vote; the ladder of other permissions is the same for every org.
+- **Raising is slow, lowering is instant.** A level goes up one step at a time, by majority vote and the
+  wait, and only once the agent has enough *clean* actions: completed since its last level change,
+  failed Drill or Tripwire. Any member can lower a level at once. A Tripwire drops the agent to
+  Level 0 and a failed Drill drops it one level, automatically, recorded on Dharma.
+- **The record is onchain, and read through QuickNode.** With every log anchor the Gatekeeper
+  publishes each agent's running totals (`ActionsRecorded`); Dharma itself emits level changes,
+  failed Drills and Tripwires. The relay rebuilds every agent's record from these events, delivered
+  by the QuickNode Stream backfilled from Dharma's deploy block, and the Gatekeeper refuses to relay
+  a level-up proposal the record doesn't support. Members still vote on it.
+- **Upgrading an older org.** On the Votes page, *Propose upgrade to v3* deploys the new code and
+  proposes the upgrade. It's a core change: every member signs and the core wait passes. The org
+  keeps its address, members, agents, payees and rules, and every agent starts at Level 0.
+
 ## Safety features
 - **Drills:** Karuna sends agents fake scam messages. An agent that falls for one is blocked from
   what the scam asked for, onchain, until members restore it by vote. Only people can see which
@@ -114,6 +142,13 @@ instantly with no model call, so a rehearsed demo sentence can't fail. Models: `
 - **Changed bank account alert:** a known supplier's name with a different account is blocked and
   flagged.
 - **Exact Match:** what a member approved (payload hash, re-quoted price) is exactly what executes.
+- **Wallet watchdog:** a second QuickNode Stream watches every USDC transfer leaving the org's wallet.
+  Each one must match a payment Karuna made (same payee, same amount); deposits into Circle Gateway
+  stay the org's money. Anything else means the wallet was used outside Karuna, so every agent
+  freezes and the transfer is recorded on Dharma (`UnapprovedTransfer`). Limits: x402 purchases are
+  paid from the Gateway balance and settled by Circle in batches, so they don't show up one by one;
+  the watchdog covers the wallet itself. The automatic freeze runs in the Gatekeeper, so a fully
+  compromised Gatekeeper could skip it, but the relay still pushes the alert to every member's screen.
 - **Learns from your choices:** a "no" becomes a block at once; a "yes" becomes a suggested rule only
   after repeated approvals and a vote. **Preview before loosening** replays recent requests under a
   proposed change.
@@ -124,13 +159,17 @@ instantly with no model call, so a rehearsed demo sentence can't fail. Models: `
 | Payment to an address that isn't a known payee | always denied (core rule) | every member + 24 h wait |
 | Reading secrets, catastrophic shell commands (`rm -rf /`, etc.) | always denied (core rule) | every member + 24 h wait |
 | Anything no rule covers | denied (core rule) | every member + 24 h wait |
-| Payment to a known payee | allowed up to the agent's **daily allowance** | majority vote + wait |
-| Payment over the allowance or with no allowance | needs a member's approval | majority vote + wait |
+| Payment to a known payee | allowed within the agent's **trust level**: per payment and per day (Level 0: $0.10 / $1) | majority vote + wait (the level's limits) |
+| Payment over the level's limits | needs a member's approval | majority vote + wait |
 | Payment above the two-person threshold | needs **two** members' approval | majority vote + wait |
-| `rm -rf <path>`, package installs, file writes, POST/PUT/DELETE | needs a member's approval | majority vote + wait |
+| `rm -rf <path>` | needs a member's approval at every level | majority vote + wait |
+| File writes, package installs, POST/PUT/DELETE, messages to other agents | need approval until the agent's level allows them (see Trust levels) | majority vote + wait |
+| Raising an agent's level | needs a clean record (10 / 25 / 50 actions) from the Stream, one level at a time | majority vote + wait |
+| Lowering an agent's level | instant: any one member, or automatically (Tripwire → Level 0, failed Drill → one level down) | — |
+| USDC leaving the wallet that Karuna didn't pay | **every agent frozen**, recorded on Dharma (wallet watchdog) | majority vote + wait to unfreeze |
 | Web requests | GET only to allowlisted domains; everything else denied | majority vote + wait |
 | Approved payment | executes only if the payload hash and price still match | can't be changed |
-| Agent falls for a Drill | blocked from that kind of action until a vote restores it | majority vote + wait |
+| Agent falls for a Drill | blocked from that kind of action until a vote restores it, and one level lower | majority vote + wait |
 | Agent uses a trap password, or 2 agents go after the same new target within 60 s | **every agent frozen** | majority vote + wait to unfreeze |
 | Panic button | any one member freezes every agent at once | majority vote + wait to unfreeze |
 | Agent keys and the wallet | never inside the sandbox; the Gatekeeper swaps placeholders on the way out | can't be changed |
@@ -144,19 +183,41 @@ instantly with no model call, so a rehearsed demo sentence can't fail. Models: `
 Every new organization deploys its own Dharma (code + proxy) at setup; each verification and demo
 run deploys a fresh one and prints its explorer link.
 
-## QuickNode Stream (core data source for live alerts)
+## QuickNode Streams (live alerts, the wallet watchdog, and each agent's record)
+Two Streams feed the relay. Both are created by `pnpm --dir relay stream:create`.
+
+**1. `karuna-dharma-events`: everything Dharma does, backfilled from its deploy block**
+
 | Setting | Value | Why |
 |---|---|---|
 | Network | `arc-testnet` | Dharma lives on Arc |
-| Dataset | `logs` | Dharma's events are all we need: approvals requested, proposals, votes, freezes, failed drills |
+| Dataset | `logs` | Dharma's state changes are all events |
+| Range | `start_range` = the block Dharma was deployed in, no `end_range` | replays the org's whole history, then follows the chain: that history is each agent's record |
 | Filter | JavaScript (`quickNodeFilterSource()` in `relay/src/events.ts`): keeps only logs whose `topics[0]` is one of Dharma's event signatures | ships a few events instead of every Arc log |
-| Destination | webhook → `https://<tunnel>/quicknode/webhook` (relay :8791), `security_token` set, batch size 1 | one event per delivery = lowest latency |
-| Verification | relay checks `HMAC-SHA256(token, nonce + timestamp + body)` and rejects replays | an unsigned POST can't fake an alert (returns 401) |
+| Destination | webhook → `https://<tunnel>/quicknode/webhook` (relay :8791), `security_token` set, batch size 1 | one event per delivery = lowest latency for approval pop-ups |
 
-The relay keeps only this organization's Dharma, decodes the event, and pushes it over WebSocket to
-every member's console and to the Gatekeeper. If the stream goes quiet, the console reads Arc
-directly and switches back on its own; the top bar shows which source is live (`QuickNode` or `Arc`).
-Setup: [`docs/QUICKNODE.md`](docs/QUICKNODE.md) · `pnpm --dir relay stream:create`.
+Uses: approval pop-ups, votes, freezes and level changes on every member's screen; and agents'
+records for trust levels (`ActionsRecorded`, `LevelSet`, `TestFailed`, `TripwireFired`), rebuilt by
+the relay in chain order and sent to the Gatekeeper.
+
+**2. `karuna-wallet-watchdog`: USDC leaving the org's wallet**
+
+| Setting | Value | Why |
+|---|---|---|
+| Network | `arc-testnet` | the wallet is on Arc |
+| Dataset | `logs` | a USDC transfer is a `Transfer` log |
+| Range | from the chain tip | older transfers predate Karuna's own payment records |
+| Filter | JavaScript (`quickNodeWatchdogFilterSource(wallet)`): `Transfer` logs from Arc's USDC (the ERC-20 interface `0x3600…0000`, 6 decimals, and the native USDC system address `0xffff…fffe`, 18 decimals) whose `from` topic is the org's wallet | only money leaving this wallet, nothing else on Arc |
+| Destination | the same signed webhook | one verified entry point |
+
+Uses: the wallet watchdog (see Safety features). Each transfer is matched to a Karuna payment or
+freezes every agent.
+
+**Both:** the relay checks `HMAC-SHA256(token, nonce + timestamp + body)` and rejects replays, so an
+unsigned POST can't fake an alert (401). If a Stream goes quiet the relay reads Arc directly and
+de-duplicates; the top bar shows which source is live (`QuickNode` or `Arc`).
+Setup: [`docs/QUICKNODE.md`](docs/QUICKNODE.md) · `pnpm --dir relay stream:create` (add
+`--backfill` to recreate the Dharma Stream from the deploy block).
 
 ## Circle tools used
 | Tool | How |
@@ -232,9 +293,9 @@ Every pull request runs these on GitHub (CI) and needs the owner's review before
 
 ```bash
 pnpm --dir engine test       # policy engine, every rule kind, Dharma rule ordering, signed log
-pnpm --dir contracts test    # Dharma + proxy (forge): tiers, waits, skip, freeze-cancel, upgrades
-pnpm --dir gatekeeper test   # gatekeeper against the real Dharma on anvil, egress proxy, rule drafter
-pnpm --dir relay test        # QuickNode signature, replay, decoding, filter
+pnpm --dir contracts test    # Dharma + proxy (forge): tiers, waits, skip, freeze-cancel, upgrades, trust levels
+pnpm --dir gatekeeper test   # gatekeeper on the real Dharma (anvil): levels, watchdog, v2→v3 upgrade, proxy, drafter
+pnpm --dir relay test        # QuickNode signature, replay, decoding, both filters, agent records
 pnpm --dir agents check:no-keys
 # live, on Arc testnet (needs the test seller running):
 VERIFY_WALLET=0x… pnpm --dir gatekeeper verify:phase2   # payments

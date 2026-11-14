@@ -467,10 +467,12 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
   const ctx: Ctx = {
     s, me, run, busy, name,
     change: (c, label) => {
-      const now = c.op === "Freeze";
+      // Instant: the panic button, and a member lowering an agent's level. Everything else is voted on.
+      const lowering = c.op === "SetLevel" && c.reason === "member";
+      const now = c.op === "Freeze" || lowering;
       return run(
         () => submitChange(me, dharma, { kind: now ? Kind.Tighten : Kind.Propose, change: c, label }),
-        now ? "All agents frozen — recorded on Dharma" : `Proposed — goes to Votes: needs ${pol.required} vote${pol.required > 1 ? "s" : ""}, then ${pol.timelock}s`,
+        lowering ? "Level lowered — recorded on Dharma" : now ? "All agents frozen — recorded on Dharma" : `Proposed — goes to Votes: needs ${pol.required} vote${pol.required > 1 ? "s" : ""}, then ${pol.timelock}s`,
       );
     },
     vote: (g, support) => run(() => submitChange(me, dharma, { kind: Kind.Vote, change: g.change as Change, proposalId: g.id, support }), support ? "Vote recorded" : "Voted against"),
@@ -892,6 +894,8 @@ function Dharma({ ctx }: { ctx: Ctx }) {
         </div>
       </div>
 
+      <UpgradeCard ctx={ctx} />
+
       <Waits ctx={ctx} />
 
       <p className="section-title">In progress</p>
@@ -1042,15 +1046,18 @@ function Agents({ ctx }: { ctx: Ctx }) {
   const [form, setForm] = useState({ name: "", cap: "1" });
   const [reveal, setReveal] = useState<{ token: string; agent: string; agentId: string } | null>(null);
   const [editing, setEditing] = useState<Record<string, string>>({});
+  const levels = hasLevels(s);
+  // On Dharma v3 a level sets what an agent may spend; the meter shows that level's daily limit.
+  const limited = (a: AgentView): AgentView => (levels && a.level != null ? { ...a, capUsd: pol.levelLimits![a.level]?.dailyUsd ?? 0 } : a);
 
   const add = (e: FormEvent) => {
     e.preventDefault();
     run(async () => {
       const r = await api<{ id: string; token: string }>("/agents/prepare", { name: form.name });
-      await submitChange(ctx.me, s.org.dharma!.address as Address, { kind: Kind.Propose, change: { op: "SetAgent", id: r.id, capUsd: Number(form.cap) } });
+      await submitChange(ctx.me, s.org.dharma!.address as Address, { kind: Kind.Propose, change: { op: "SetAgent", id: r.id, capUsd: levels ? 0 : Number(form.cap) } });
       setReveal({ token: r.token, agent: form.name, agentId: r.id });
       setForm({ name: "", cap: "1" });
-    }, `Proposed on Dharma — the agent works after ${pol.required} vote${pol.required > 1 ? "s" : ""} and ${pol.timelock}s`);
+    }, `Proposed on Dharma — the agent works after ${pol.required} vote${pol.required > 1 ? "s" : ""} and ${pol.timelock}s${levels ? ", starting at Level 0" : ""}`);
   };
 
   return (
@@ -1058,7 +1065,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
       {reveal && <TokenReveal {...reveal} onDone={() => setReveal(null)} />}
       <form className="card inline-form" onSubmit={add}>
         <label className="field grow"><span>Agent name</span><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Accounts payable agent" /></label>
-        <label className="field"><span>Daily allowance (USD)</span><input required type="number" min="0" step="0.000001" value={form.cap} onChange={(e) => setForm({ ...form, cap: e.target.value })} /></label>
+        {!levels && <label className="field"><span>Daily allowance (USD)</span><input required type="number" min="0" step="0.000001" value={form.cap} onChange={(e) => setForm({ ...form, cap: e.target.value })} /></label>}
         <button className="btn btn-dark" type="submit" disabled={busy}><Icon name="plus" /> Propose agent</button>
       </form>
       <SandboxRuns ctx={ctx} />
@@ -1078,10 +1085,11 @@ function Agents({ ctx }: { ctx: Ctx }) {
                     {!a.active ? <Badge v="approval">awaiting vote</Badge> : s.frozen ? <span className="badge badge-danger"><Icon name="stop" size={12} />frozen</span> : <Badge v="allow">active</Badge>}
                   </span>
                 </div>
-                {a.active && <Meter a={a} frozen={!!s.frozen} />}
+                {a.active && <Meter a={limited(a)} frozen={!!s.frozen} />}
+                {a.active && levels && <AgentLevel a={a} ctx={ctx} />}
                 {a.active && (
                   <div className="meta">
-                    {ed === undefined ? (
+                    {levels ? null : ed === undefined ? (
                       <button className="tag link" title="Propose a new daily allowance" onClick={() => setEditing({ ...editing, [a.id]: String(a.capUsd) })}>cap {usd(a.capUsd)}/day <Icon name="pen" size={11} /></button>
                     ) : (
                       <form className="cap-edit" onSubmit={(e) => { e.preventDefault(); ctx.change({ op: "SetAgent", id: a.id, capUsd: Number(ed) }).then((ok) => ok && setEditing(({ [a.id]: _, ...rest }) => rest)); }}>
@@ -1393,6 +1401,8 @@ function Policy({ ctx }: { ctx: Ctx }) {
         <div className="rule-preview">{"error" in built ? built.error : <>Will be voted on as: <strong>{describeRule(built.change, names)}</strong></>}</div>
       </form>
 
+      {hasLevels(s) && <LevelsCard ctx={ctx} />}
+
       <div className="grid2">
         <div className="card">
           <div className="hd"><h2>Allowlisted domains</h2><span className="sub">{pol.domains.length}</span></div>
@@ -1595,6 +1605,18 @@ function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string
       return { ...base, tone: "info", sticky: false, title: "Rule added", body: `${String(a.id)} — in effect now` };
     case "TestFailed":
       return { ...base, tone: "bad", sticky: true, title: "Agent fell for a drill", body: `${agentName(a.agent)} · ${String(a.category)} payments are now blocked for it.` };
+    case "LevelSet": {
+      const n = Number(a.level);
+      const why = String(a.reason);
+      const lowered = why !== "vote";
+      return {
+        ...base, tone: lowered ? "bad" : "ok", sticky: lowered, go: "agents",
+        title: `${agentName(a.agent)}: Level ${n} · ${LEVEL_NAMES[n] ?? ""}`,
+        body: why === "tripwire" ? "Lowered by a Tripwire. Recorded on Dharma." : why === "drill" ? "Lowered after a failed Drill. Recorded on Dharma." : why === "member" ? `Lowered by ${name(String(a.by))}.` : "Raised by a member vote.",
+      };
+    }
+    case "UnapprovedTransfer":
+      return { ...base, tone: "bad", sticky: true, go: "swarm", cta: "Watchdog", title: "USDC left the wallet without approval", body: `$${Number(a.amountUsd).toFixed(2)} to ${short(String(a.to))}. Every agent is frozen.` };
     default:
       return null; // anchors, payee/domain changes etc. update the screen without a pop-up
   }
@@ -1785,6 +1807,8 @@ function Swarm({ ctx }: { ctx: Ctx }) {
       <InfoBox id="swarm" icon="swarm">
           <p>Agents never get real passwords, so any password an agent uses is bait. If an agent shares one, or {sw.agentsToTrip} agents go after the same new target within {sw.windowSeconds}s, every agent freezes. Unfreeze from the top bar (needs a vote).</p>
       </InfoBox>
+
+      <WatchdogCard ctx={ctx} />
 
       <div className="grid2">
         <div className="card">
@@ -2072,6 +2096,148 @@ function Appearance() {
               <input type="checkbox" role="switch" checked={island} onChange={(e) => { setIsland(e.target.checked); setIslandEnabled(e.target.checked); }} />
             </label>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ============================================================== trust levels (Dharma v3)
+
+const LEVEL_NAMES = ["Restricted", "Limited", "Standard", "Extended"];
+const levelText = (n: number) => `Level ${n} · ${LEVEL_NAMES[n] ?? ""}`;
+const hasLevels = (s: Snapshot) => (s.policy?.version ?? 0) >= 3 && !!s.policy?.levelLimits;
+
+/** An agent card's level, record and next step. */
+function AgentLevel({ a, ctx }: { a: AgentView; ctx: Ctx }) {
+  const { s, busy } = ctx;
+  if (a.level === null || a.level === undefined) return null;
+  const level = a.level;
+  const rec = a.record;
+  const e = a.eligibility;
+  const pending = s.policy!.proposals.some((g) => (g.status === "open" || g.status === "queued") && g.change.op === "SetLevel" && g.change.agent === a.id);
+  const lower = () =>
+    confirm(`Lower ${a.name} to ${levelText(level - 1)} now? This applies immediately. Raising it again needs a clean record and a vote.`) &&
+    ctx.change({ op: "SetLevel", agent: a.id, level: level - 1, reason: "member" });
+  return (
+    <div className="agent-level">
+      <div className="level-row">
+        <span className="tag level-tag" title="What this agent may do without asking">{levelText(level)}</span>
+        <span className="muted small tnum">
+          {rec ? `${rec.completed} completed · ${rec.denied} denied${rec.drillsFailed ? ` · ${rec.drillsFailed} failed Drill${rec.drillsFailed > 1 ? "s" : ""}` : ""}${rec.tripwires ? ` · ${rec.tripwires} Tripwire${rec.tripwires > 1 ? "s" : ""}` : ""}` : "Record not loaded yet"}
+        </span>
+      </div>
+      {e && e.target !== null && (
+        e.eligible ? (
+          <div className="level-row">
+            <span className="small"><b>Eligible for Level {e.target}</b></span>
+            <button className="btn btn-ghost btn-sm" disabled={busy || pending} onClick={() => ctx.change({ op: "SetLevel", agent: a.id, level: e.target!, reason: "vote" })}>
+              {pending ? "Proposal open" : `Propose Level ${e.target}`}
+            </button>
+          </div>
+        ) : (
+          <div className="meter level-meter" title="Completed actions since its last level change, failed Drill or Tripwire">
+            <div className="row"><span>toward Level {e.target}</span><span><b>{e.have}</b> / {e.needed} clean actions</span></div>
+            <div className="track"><div className="fill" style={{ width: `${Math.min(100, (e.have / Math.max(1, e.needed)) * 100)}%` }} /></div>
+          </div>
+        )
+      )}
+      {level > 0 && <button className="btn btn-ghost btn-sm level-lower" disabled={busy} onClick={lower}>Lower to Level {level - 1}</button>}
+    </div>
+  );
+}
+
+/** Rules page: what each level may do without asking, and its payment limits (changed by vote). */
+function LevelsCard({ ctx }: { ctx: Ctx }) {
+  const { s, busy } = ctx;
+  const pol = s.policy!;
+  const limits = pol.levelLimits!;
+  const grants = pol.levelGrants ?? [];
+  const streak = pol.levelUpStreak ?? [0, 10, 25, 50];
+  const [edit, setEdit] = useState<{ level: number; per: string; daily: string } | null>(null);
+  return (
+    <div className="card">
+      <div className="hd"><h2>Trust levels</h2><span className="sub">{pol.agents.length} agent{pol.agents.length === 1 ? "" : "s"}</span></div>
+      <div className="levels">
+        {limits.map((l, n) => {
+          const adds = grants.filter((g) => g.min === n).map((g) => g.what);
+          const editing = edit?.level === n;
+          return (
+            <div className="level-line" key={n}>
+              <span className="level-name"><b>{levelText(n)}</b><small>{n === 0 ? "Every new agent" : `${streak[n]} clean actions, then a vote`}</small></span>
+              {editing ? (
+                <form className="level-edit" onSubmit={(e) => { e.preventDefault(); ctx.change({ op: "SetLevelLimits", level: n, perPaymentUsd: Number(edit.per), dailyUsd: Number(edit.daily) }).then((ok) => ok && setEdit(null)); }}>
+                  <span className="prefix"><span>$</span><input aria-label="Per payment" type="number" min="0" step="0.01" value={edit.per} onChange={(e) => setEdit({ ...edit, per: e.target.value })} /></span>
+                  <span className="prefix"><span>$</span><input aria-label="Per day" type="number" min="0" step="0.01" value={edit.daily} onChange={(e) => setEdit({ ...edit, daily: e.target.value })} /></span>
+                  <button className="btn btn-ghost btn-sm" disabled={busy || Number(edit.per) > Number(edit.daily)}>Propose</button>
+                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => setEdit(null)}>Cancel</button>
+                </form>
+              ) : (
+                <button className="tag link tnum" title="Propose new payment limits for this level" onClick={() => setEdit({ level: n, per: String(l.perPaymentUsd), daily: String(l.dailyUsd) })}>
+                  {usd(l.perPaymentUsd)} per payment · {usd(l.dailyUsd)} per day <Icon name="pen" size={11} />
+                </button>
+              )}
+              <span className="level-adds small">{adds.length ? `Also: ${adds.map((w) => (/^[A-Z]{2}/.test(w) ? w : w.charAt(0).toLowerCase() + w.slice(1))).join(", ")}` : n === 0 ? "Payments within the limits only" : ""}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="log-foot"><span>core rules and your own block and approval rules always come first</span><span>a Tripwire drops an agent to Level 0, a failed Drill one level</span></div>
+    </div>
+  );
+}
+
+/** Votes page: move an older org to the Dharma code this Karuna ships (a core change). */
+function UpgradeCard({ ctx }: { ctx: Ctx }) {
+  const { s, busy, run, me } = ctx;
+  const pol = s.policy!;
+  if (pol.version >= 3) return null;
+  const open = pol.proposals.find((g) => (g.status === "open" || g.status === "queued") && g.change.op === "Upgrade");
+  const propose = () =>
+    run(async () => {
+      const code = await api<{ implementation: string; version: number }>("/dharma/code", {});
+      await submitChange(me, s.org.dharma!.address as Address, { kind: Kind.Propose, change: { op: "Upgrade", implementation: code.implementation as Address } });
+    }, `Upgrade proposed: needs every member's signature, then ${waitText(pol.coreTimelock)}`);
+  return (
+    <div className="card upgrade-card rise">
+      <div className="hd"><h2>Dharma v{pol.version} → v3</h2>{open && <span className="sub">proposal #{open.id}</span>}</div>
+      <div className="pad stack-sm">
+        <p>Version 3 adds trust levels and publishes each agent's record onchain. The address stays the same, and members, agents, payees and rules carry over.</p>
+        <p className="muted small">An upgrade is a core change: every member signs, then it waits {waitText(pol.coreTimelock)}. Any freeze cancels it.</p>
+        {!open && <button className="btn btn-dark" disabled={busy} onClick={propose}><Icon name="pen" size={14} /> Propose upgrade to v3</button>}
+      </div>
+    </div>
+  );
+}
+
+/** Tripwire page: every USDC transfer out of the wallet, checked against Karuna's own payments. */
+function WatchdogCard({ ctx }: { ctx: Ctx }) {
+  const { s } = ctx;
+  const w = s.watchdog;
+  if (!w) return null;
+  const VERDICT: Record<string, { v: "allow" | "deny" | "approval"; text: string }> = {
+    matched: { v: "allow", text: "Karuna payment" },
+    "gateway-deposit": { v: "approval", text: "Gateway deposit" },
+    unapproved: { v: "deny", text: "Not approved" },
+  };
+  return (
+    <div className="card">
+      <div className="hd"><h2>Wallet watchdog</h2><span className="sub">QuickNode Stream</span></div>
+      <div className="pad stack-sm">
+        <p className="muted">Every USDC transfer out of {w.wallet ? <span className="mono">{short(w.wallet)}</span> : "the wallet"} must match a payment Karuna made. Anything else freezes every agent and is recorded on Dharma.</p>
+      </div>
+      {w.events.length === 0 ? (
+        <Empty icon="swarm">No transfers out of the wallet yet.</Empty>
+      ) : (
+        <div className="resolved">
+          {w.events.map((e) => (
+            <div className="res" key={e.key}>
+              <Badge v={VERDICT[e.verdict].v}>{VERDICT[e.verdict].text}</Badge>
+              <span className="small tnum">{usd(e.amountUsd)} to <span className="mono">{short(e.to)}</span></span>
+              <span className="muted small"><TxLink tx={e.txHash} s={s} /> · {ago(e.at)}</span>
+            </div>
+          ))}
         </div>
       )}
     </div>

@@ -6,6 +6,12 @@ import { privateKeyToAccount } from "viem/accounts";
 import type { LogEntry, Snapshot, WalletInfo } from "./api.ts";
 
 export const PREVIEW = import.meta.env.DEV && new URLSearchParams(location.search).has("preview");
+/** ?preview&v2 shows an org still on Dharma v2 (no trust levels; the upgrade card on Votes). */
+const V2 = new URLSearchParams(location.search).has("v2");
+const rec = (agent: string, level: number, completed: number, denied: number, cleanStreak: number, extra: { drillsFailed?: number; tripwires?: number } = {}) => ({
+  agent, level, completed, denied, approvalsRequested: 3, drillsFailed: extra.drillsFailed ?? 0, tripwires: extra.tripwires ?? 0, cleanStreak,
+  levelChanges: level ? [{ level, reason: "vote", block: 7100000, txHash: null }] : [], lastBlock: 7190000,
+});
 
 // Anvil's well-known test key #0. Public, worthless, never used on a real chain here.
 export const previewSigner = privateKeyToAccount("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80");
@@ -38,16 +44,16 @@ export const previewSnapshot: Snapshot = {
     chainTime: unix(0),
     timelock: 60,
     coreTimelock: 86400,
-    version: 2,
+    version: V2 ? 2 : 3,
     required: 2,
     thresholdUsd: 500,
     policyVersion: 14,
     anchor: { head: hash(9), length: 40 },
     members: [{ address: me, name: "Adi" }, { address: sam, name: "Sam" }],
     agents: [
-      { id: "supplies", name: "Supplies agent", capUsd: 25, spentTodayUsd: 6.4, active: true, hasToken: true },
-      { id: "payables", name: "Bills agent", capUsd: 800, spentTodayUsd: 612, active: true, hasToken: true },
-      { id: "research", name: "Research agent", capUsd: 2, spentTodayUsd: 1.92, active: true, hasToken: true },
+      { id: "supplies", name: "Supplies agent", capUsd: 25, spentTodayUsd: 6.4, active: true, hasToken: true, ...(V2 ? {} : { level: 2, record: rec("supplies", 2, 61, 4, 31), eligibility: { eligible: true, target: 3, needed: 50, have: 51 } }) },
+      { id: "payables", name: "Bills agent", capUsd: 800, spentTodayUsd: 3.1, active: true, hasToken: true, ...(V2 ? {} : { level: 1, record: rec("payables", 1, 22, 2, 14, { drillsFailed: 1 }), eligibility: { eligible: false, target: 2, needed: 25, have: 14 } }) },
+      { id: "research", name: "Research agent", capUsd: 2, spentTodayUsd: 0.4, active: true, hasToken: true, ...(V2 ? {} : { level: 0, record: rec("research", 0, 9, 6, 3, { tripwires: 1 }), eligibility: { eligible: false, target: 1, needed: 10, have: 3 } }) },
       { id: "marketing", name: "Marketing agent", capUsd: 50, spentTodayUsd: 0, active: false, hasToken: false },
     ],
     payees: [
@@ -56,6 +62,18 @@ export const previewSnapshot: Snapshot = {
       { account: feed, category: "data", name: "Grain price feed" },
     ],
     domains: ["api.grainfeed.dev", "weather.gov", "api.github.com"],
+    ...(V2 ? {} : {
+      levelLimits: [{ perPaymentUsd: 0.1, dailyUsd: 1 }, { perPaymentUsd: 0.5, dailyUsd: 5 }, { perPaymentUsd: 2, dailyUsd: 20 }, { perPaymentUsd: 5, dailyUsd: 50 }],
+      levelGrants: [
+        { id: "level-messages", min: 1, what: "Messages to other agents" },
+        { id: "level-workspace-writes", min: 1, what: "File writes in ./workspace" },
+        { id: "level-http-mutations", min: 2, what: "POST/PUT/DELETE to allowlisted domains" },
+        { id: "level-package-install", min: 2, what: "Package installs" },
+        { id: "level-file-writes", min: 3, what: "File writes anywhere in the sandbox" },
+      ],
+      levelUpStreak: [0, 10, 25, 50],
+      records: { at: iso(40), source: "quicknode" },
+    }),
     rules: [
       { id: "core-no-unknown-payee", outcome: "deny", core: true, builtin: true, active: true, scope: "payment", target: "", maxUsd: 0 },
       { id: "core-no-secrets", outcome: "deny", core: true, builtin: true, active: true, scope: "file", target: "", maxUsd: 0 },
@@ -186,6 +204,15 @@ export const previewSnapshot: Snapshot = {
     },
   ],
   log: { length: 46, head: hash(46), verified: true, brokenAt: null, publicKeyPem: "" },
+  watchdog: {
+    wallet: "0xe78f1b83b5f995a8c5fbc3b4ad1f3639fe6002ea",
+    gateway: "0x0077777d7eba4688bdef3e311b846f25870a19b9",
+    events: [
+      { key: "a", at: iso(300), txHash: tx(21), to: flour, amountUsd: 3.1, block: 7190100, source: "quicknode", verdict: "matched", proposalId: "p-1" },
+      { key: "b", at: iso(7200), txHash: tx(22), to: "0x0077777d7eba4688bdef3e311b846f25870a19b9", amountUsd: 5, block: 7180000, source: "quicknode", verdict: "gateway-deposit" },
+      { key: "c", at: iso(86400 * 2), txHash: tx(23), to: "0x4f1e3a6c8b0d2f4e6a8c0b2d4f6a815e7a0c2b9d", amountUsd: 40, block: 7000000, source: "quicknode", verdict: "unapproved", txRef: tx(24) },
+    ],
+  },
   sandbox: {
     requireSandbox: true,
     remote: { port: 8443, host: "0.0.0.0", names: ["localhost", "127.0.0.1", "bakery-mini"] },

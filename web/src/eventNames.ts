@@ -19,6 +19,8 @@ const CHANGE: Record<string, { noun: string; done: string }> = {
   SetTimelock: { noun: "Wait change", done: "Wait changed" },
   SetCoreTimelock: { noun: "Core wait change", done: "Core wait changed" },
   Upgrade: { noun: "Upgrade", done: "Code upgraded" },
+  SetLevel: { noun: "Level change", done: "Level changed" },
+  SetLevelLimits: { noun: "Level limits", done: "Level limits set" },
 };
 
 /** Older log entries only kept the sentence (describeChange); map its opening words back to the op. */
@@ -36,6 +38,8 @@ const FROM_TEXT: [RegExp, string][] = [
   [/^Require two approvers/, "SetThreshold"],
   [/^Add member/, "AddMember"],
   [/^Remove member/, "RemoveMember"],
+  [/^Set Level \d .*payment limits/, "SetLevelLimits"],
+  [/^Set .+ to Level \d/, "SetLevel"],
   [/^Set the wait for core changes/, "SetCoreTimelock"],
   [/^Set the wait for changes/, "SetTimelock"],
   [/^Upgrade Dharma/, "Upgrade"],
@@ -85,6 +89,14 @@ const FIXED: Record<string, string> = {
   "key-removed": "Key removed",
   paused: "Paused",
   resumed: "Resumed",
+  "level-lowered": "Level lowered",
+  "level-lower-failed": "Level drop failed",
+  "tripwire-report-failed": "Tripwire report failed",
+  "watchdog-transfer": "Wallet transfer checked",
+  "watchdog-freeze-onchain": "Watchdog freeze on Arc",
+  "watchdog-freeze-onchain-failed": "Watchdog freeze failed",
+  "watchdog-report-failed": "Watchdog report failed",
+  "dharma-code-deployed": "Upgrade code deployed",
 };
 
 /** The short name shown in bold for one log event. */

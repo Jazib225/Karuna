@@ -802,3 +802,21 @@ html, body, * { scrollbar-width: none; }
   .topbar[data-search="icon"] .top-search span, .topbar[data-search="icon"] .top-search kbd { display: none; }
   .topbar[data-search="none"] .top-search { display: none; }
 }
+
+/* Trust levels (Dharma v3): agent cards, the Rules page table, the upgrade card */
+.agent-level { display: grid; gap: 8px; padding-top: 2px; }
+.level-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+.level-tag { color: var(--ink); border-color: var(--line-strong); font-weight: 500; }
+.level-meter .row { font-size: 12px; }
+.level-lower { justify-self: start; }
+.levels { display: grid; }
+.level-line { display: grid; grid-template-columns: minmax(150px, 1fr) auto minmax(0, 1.4fr); gap: 14px; align-items: center; padding: 12px 20px; border-top: 1px solid var(--n100); }
+.level-name { display: grid; gap: 2px; font-size: 14px; }
+.level-name small { font-family: var(--font-mono); font-size: 11.5px; color: var(--n500); }
+.level-adds { color: var(--n500); }
+.level-edit { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.level-edit .prefix { flex: 0 1 110px; }
+.upgrade-card p { margin: 0; }
+@media (max-width: 760px) {
+  .level-line { grid-template-columns: 1fr; gap: 6px; }
+}
