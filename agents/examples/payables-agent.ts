@@ -1,6 +1,6 @@
 // EXAMPLE agent (not product code): pays invoices from its inbox through Karuna.
 //
-//   KARUNA_AGENT_TOKEN=kag_… npx tsx examples/payables-agent.ts [--careful] [--once]
+//   KARUNA_AGENT_TOKEN=kag_… npx tsx examples/payables-agent.ts [--careful] [--once] [--all]
 //
 // Default ("gullible") mode pays every invoice it finds: the ROADMAP's demo backup for showing
 // Auto-Shield catching an agent that falls for a fake. --careful flags anything that looks like a
@@ -42,8 +42,16 @@ if (process.argv[1]?.endsWith("payables-agent.ts")) {
     gatekeeperUrl: process.env.KARUNA_GATEKEEPER_URL ?? "http://127.0.0.1:8787",
     token: process.env.KARUNA_AGENT_TOKEN ?? "",
   });
+  // A restart must never pay old invoices again: skip whatever is already in the inbox
+  // (pass --all to process it, e.g. for a one-off --once run).
+  if (!process.argv.includes("--all")) for (const m of await karuna.inbox()) handled.add(m.id);
+  console.log(`watching inbox (${handled.size} old messages skipped)`);
   do {
-    await tick(karuna);
+    try {
+      await tick(karuna);
+    } catch (e) {
+      console.log(`gatekeeper unreachable: ${e instanceof Error ? e.message : e}`);
+    }
     if (!once) await new Promise((r) => setTimeout(r, 3000));
   } while (!once);
 }
