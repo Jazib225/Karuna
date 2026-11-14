@@ -190,6 +190,9 @@ agents frozen → the freeze on the Arc explorer, (6) a proposal to add the scam
 scaled for testnet; only fake targets are used.
 
 ## Tests
+Every pull request runs these on GitHub (CI) and needs the owner's review before merging: see
+[CONTRIBUTING.md](CONTRIBUTING.md). Locally, `pnpm ci:check` runs the same checks.
+
 ```bash
 pnpm --dir engine test       # policy engine, every rule kind, Dharma rule ordering, signed log
 pnpm --dir contracts test    # Dharma + proxy (forge): tiers, waits, skip, freeze-cancel, upgrades

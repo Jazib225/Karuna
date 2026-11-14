@@ -1,6 +1,7 @@
 // Starts a throwaway anvil (Foundry's local chain) for the chain-backed tests.
 //
-// Looks for it in $ANVIL, then ~/.foundry/bin (anvil.exe on Windows), then on PATH. If it isn't
+// Looks for it in $ANVIL or $ANVIL_BIN, then ~/.foundry/bin (anvil.exe on Windows), then on PATH
+// (GitHub Actions: foundry-rs/foundry-toolchain). If it isn't
 // installed, or doesn't answer, the suite fails right away with a message saying so, instead of
 // timing out on a chain that never started.
 import { spawn, type ChildProcess } from "node:child_process";
@@ -11,7 +12,8 @@ import { join } from "node:path";
 const EXE = process.platform === "win32" ? "anvil.exe" : "anvil";
 
 function anvilPath(): string {
-  if (process.env.ANVIL) return process.env.ANVIL;
+  const explicit = process.env.ANVIL ?? process.env.ANVIL_BIN;
+  if (explicit) return explicit;
   const home = join(homedir(), ".foundry", "bin", EXE);
   return existsSync(home) ? home : EXE; // fall back to PATH
 }

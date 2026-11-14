@@ -5,7 +5,10 @@
   "scripts": {
     "check:arc": "tsx gatekeeper/scripts/check-arc.ts",
     "balance": "tsx gatekeeper/scripts/balance.ts",
-    "karuna": "tsx runner/src/cli.ts"
+    "karuna": "tsx runner/src/cli.ts",
+    "typecheck": "pnpm -r --if-present run typecheck",
+    "test": "pnpm --dir engine test && pnpm --dir relay test && pnpm --dir gatekeeper test && pnpm --dir contracts test",
+    "ci:check": "pnpm typecheck && pnpm test && pnpm --dir agents check:no-keys && pnpm --dir web build"
   },
   "dependencies": {
     "dotenv": "^18.0.10",
@@ -15,5 +18,9 @@
     "@types/node": "^26.6.6",
     "tsx": "4.23.15",
     "typescript": "^7.0.2"
+  },
+  "packageManager": "pnpm@10.34.3",
+  "engines": {
+    "node": ">=22"
   }
 }

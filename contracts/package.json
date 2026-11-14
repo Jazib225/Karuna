@@ -9,7 +9,8 @@
   },
   "scripts": {
     "build": "forge build && node scripts/export-abi.mjs",
-    "test": "forge test"
+    "test": "forge test",
+    "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {
     "viem": "2.57.17"

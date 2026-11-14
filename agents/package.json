@@ -8,7 +8,8 @@
     ".": "./src/client.ts"
   },
   "scripts": {
-    "check:no-keys": "tsx scripts/check-no-keys.ts"
+    "check:no-keys": "tsx scripts/check-no-keys.ts",
+    "typecheck": "tsc --noEmit -p ."
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
