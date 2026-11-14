@@ -2,7 +2,8 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
+import { anvilBin } from "./anvil.ts";
 import { join } from "node:path";
 import { createPublicClient, createTestClient, createWalletClient, defineChain, http, type Address, type PublicClient } from "viem";
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
@@ -23,7 +24,7 @@ const STRANGER = "0x00000000000000000000000000000000000000e7";
 let anvil: ChildProcess;
 let client: PublicClient;
 beforeAll(async () => {
-  anvil = spawn(join(homedir(), ".foundry/bin/anvil"), ["--port", String(PORT), "--chain-id", "5042002", "--silent"], { stdio: "ignore" });
+  anvil = spawn(anvilBin(), ["--port", String(PORT), "--chain-id", "5042002", "--silent"], { stdio: "ignore" });
   client = createPublicClient({ chain, transport: http(RPC) }) as PublicClient;
   for (let i = 0; i < 50; i++) {
     try {

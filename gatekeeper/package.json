@@ -10,7 +10,8 @@
     "verify:phase3": "tsx scripts/verify-phase3.ts",
     "verify:phase5": "tsx scripts/verify-phase5.ts",
     "verify:phase6": "tsx scripts/verify-phase6.ts",
-    "demo": "tsx scripts/demo.ts"
+    "demo": "tsx scripts/demo.ts",
+    "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {
     "@prekaruna/dharma": "workspace:*",

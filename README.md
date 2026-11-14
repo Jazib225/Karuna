@@ -138,6 +138,9 @@ For x402 services the wallet also needs a Gateway balance:
 `circle gateway deposit --amount 1 --address 0x… --chain ARC-TESTNET --method direct`.
 
 ## Tests
+Every pull request runs these on GitHub (CI) and needs the owner's review before merging: see
+[CONTRIBUTING.md](CONTRIBUTING.md). Locally, `pnpm ci:check` runs the same checks.
+
 ```bash
 pnpm --dir engine test       # policy engine + signed log + Dharma rule ordering
 pnpm --dir contracts test    # Dharma (forge)

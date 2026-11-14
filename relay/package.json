@@ -6,7 +6,8 @@
   "scripts": {
     "start": "tsx src/main.ts",
     "test": "vitest run",
-    "stream:create": "tsx scripts/create-stream.ts"
+    "stream:create": "tsx scripts/create-stream.ts",
+    "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {
     "@prekaruna/dharma": "workspace:*",
