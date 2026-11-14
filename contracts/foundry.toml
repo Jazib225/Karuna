@@ -5,6 +5,8 @@ libs = ["lib"]
 optimizer = true
 optimizer_runs = 200
 via_ir = true
+bytecode_hash = "none"   # no source fingerprint in the bytecode: identical builds on Windows, macOS and Linux
+cbor_metadata = false
 
 [lint]
 lint_on_build = false

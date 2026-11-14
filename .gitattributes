@@ -1,0 +1,3 @@
+# Solidity sources and generated contract artifacts always use LF, so builds are identical everywhere.
+*.sol text eol=lf
+contracts/js/*.ts text eol=lf

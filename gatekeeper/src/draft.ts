@@ -143,7 +143,7 @@ export function toDraftRule(raw: Record<string, unknown>, ctx: DraftContext, n: 
   if (outcome === "allow" && (kind === "shell" || kind === "file") && (!target || target === "*")) {
     throw new Error(`an allow rule for every ${kind === "shell" ? "command" : "file"} is too broad; name what to allow`);
   }
-  const id = `r-${kind}-${Date.now().toString(36)}${n}`;
+  const id = ruleId(kind, n);
   const change = { op: "AddRule" as const, id, outcome: OUT[outcome], ...(agent ? { agent } : {}), scope, target, ...(maxUsd ? { maxUsd } : {}) };
   const names = { agent: (id: string) => ctx.agents.find((a) => a.id === id)?.name ?? id, payee: (a: string) => ctx.payees.find((p) => p.address.toLowerCase() === a.toLowerCase())?.name ?? a };
   const verb = outcome === "allow" ? "Allow" : outcome === "deny" ? "Block" : "Require approval for";
@@ -225,8 +225,13 @@ async function draftOnce(policy: string, ctx: DraftContext, key: string, fetchIm
   return { rules, note: text(parsed.note, 600), skipped };
 }
 
+/** A rule id that's never reused: time plus randomness (two drafts can land in the same millisecond).
+ *  Always well under Dharma's 32-byte limit, e.g. "r-message-mwbu66r3k7q2x1". */
+export function ruleId(kind: string, i: number): string {
+  return `r-${kind}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}${i}`;
+}
+
 /** Same rules with new ids, for reusing a saved draft (a rule id can only be added once). */
 export function freshIds(rules: DraftRule[]): DraftRule[] {
-  const stamp = Date.now().toString(36);
-  return rules.map((r, i) => ({ ...r, change: { ...r.change, id: `r-${r.kind}-${stamp}${i}` } }));
+  return rules.map((r, i) => ({ ...r, change: { ...r.change, id: ruleId(r.kind, i) } }));
 }
