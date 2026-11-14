@@ -2,7 +2,18 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "console",
   "description": "The console (loaded from the local dev server) may only exchange events with the app: it signs the island's approval decisions with its member key.",
-  "windows": ["main"],
-  "remote": { "urls": ["http://127.0.0.1:5173/*", "http://localhost:5173/*"] },
-  "permissions": ["core:event:default"]
+  "windows": [
+    "main"
+  ],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:5173/*",
+      "http://localhost:5173/*",
+      "http://127.0.0.1:4173/*",
+      "http://localhost:4173/*"
+    ]
+  },
+  "permissions": [
+    "core:event:default"
+  ]
 }

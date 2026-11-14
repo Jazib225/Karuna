@@ -36,6 +36,16 @@ const card = $("card");
 const cardBody = $("card-body");
 const sprite = $<HTMLCanvasElement>("sprite");
 const fsprite = $<HTMLCanvasElement>("fsprite");
+// Canvas backing stores at device pixels, so Windows display scaling never stretches the lotus.
+const fitCanvas = (c: HTMLCanvasElement, css: number) => {
+  c.width = c.height = Math.round(css * (window.devicePixelRatio || 1));
+};
+fitCanvas(sprite, 28);
+fitCanvas(fsprite, 40);
+matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener("change", () => {
+  fitCanvas(sprite, 28);
+  fitCanvas(fsprite, 40);
+});
 
 const LABELS: Record<State, string> = {
   idle: "Watching", working: "Working", pending: "Needs you", approved: "Approved", denied: "Denied", paused: "Paused", offline: "Offline",
@@ -89,8 +99,11 @@ const flash = (state: State, ms: number) => {
 
 // ------------------------------------------------------------------ lotus: sprite sheet + live
 const FRAMES = 60;
-const SPR = 40; // backing px per frame: chunky, like the site's dither
+// Rendered big (the site's dither at a fine grain), then drawn at the screen's real pixel density.
+const SPR = 144; // backing px per frame
 let sheet: HTMLCanvasElement | null = null;
+/** Square crop (in sprite px) centered on the flower itself: the site's camera frames it off-center. */
+let crop = { x: 0, y: 0, s: 40 };
 /** Render the site's lotus shader once into a sprite sheet of one slow turn (20 s per turn on the site). */
 function buildSprites() {
   const glc = document.createElement("canvas");
@@ -111,6 +124,25 @@ function buildSprites() {
   }
   r.destroy();
   gl.getExtension("WEBGL_lose_context")?.loseContext();
+  // Union of the lotus' pixels over every frame of the turn, then a square around its center.
+  const px = ctx.getImageData(0, 0, sheet.width, SPR).data;
+  let x0 = SPR, y0 = SPR, x1 = -1, y1 = -1;
+  for (let f = 0; f < FRAMES; f++)
+    for (let y = 0; y < SPR; y++)
+      for (let x = 0; x < SPR; x++)
+        if (px[(y * sheet.width + f * SPR + x) * 4 + 3] > 8) {
+          if (x < x0) x0 = x;
+          if (x > x1) x1 = x;
+          if (y < y0) y0 = y;
+          if (y > y1) y1 = y;
+        }
+  if (x1 >= x0) {
+    const side = Math.min(SPR, Math.max(x1 - x0 + 1, y1 - y0 + 1) + 2);
+    const cx = (x0 + x1 + 1) / 2;
+    const cy = (y0 + y1 + 1) / 2;
+    // Kept inside the frame so a crop never bleeds into the neighbouring frame of the sheet.
+    crop = { x: Math.max(0, Math.min(SPR - side, cx - side / 2)), y: Math.max(0, Math.min(SPR - side, cy - side / 2)), s: side };
+  }
 }
 
 const SPEED: Record<State, number> = { idle: 1, working: 3.2, pending: 0.55, approved: 0, denied: 0, paused: 0, offline: 0 };
@@ -130,9 +162,10 @@ function drawSprite(now: number) {
   // The same sprite sheet drives the pill and the floating lotus.
   for (const c of [sprite, fsprite]) {
     const ctx = c.getContext("2d")!;
-    ctx.imageSmoothingEnabled = false;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
     ctx.clearRect(0, 0, c.width, c.height);
-    ctx.drawImage(sheet, Math.floor(phase) * SPR, 0, SPR, SPR, 0, 0, c.width, c.height);
+    ctx.drawImage(sheet, Math.floor(phase) * SPR + crop.x, crop.y, crop.s, crop.s, 0, 0, c.width, c.height);
   }
 }
 

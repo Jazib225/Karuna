@@ -58,7 +58,12 @@ export function startDesktopBridge() {
       await tauri.event.emit("karuna://sign-error", { id: req.id, error: err instanceof Error ? err.message : String(err) });
     }
   });
-  // The site's marbled background (Governance section: marble variant at 10% over #0a0a0a).
+}
+
+/** The site's marbled background (Governance section: marble variant at 10% over #0a0a0a), behind
+ *  the console in the browser and in the desktop app. Paused while the tab or window is hidden. */
+export function startMarbleBackground() {
+  document.documentElement.classList.add("marbled");
   const bg = document.createElement("div");
   bg.className = "app-marble";
   bg.setAttribute("aria-hidden", "true");

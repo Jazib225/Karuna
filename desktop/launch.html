@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Karuna</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <style>
+      html, body { margin: 0; height: 100%; background: #0a0a0a; color: #fafafa; font-family: "Inter", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+      .marble { position: fixed; inset: 0; }
+      .marble > canvas, .marble > img { opacity: .1 !important; }
+      main { position: relative; min-height: 100%; display: grid; place-items: center; padding: 24px; box-sizing: border-box; }
+      .box { width: min(520px, 100%); border: 1px solid rgba(255,255,255,.12); border-radius: 18px; background: rgba(10,10,10,.82); padding: 28px; display: grid; gap: 16px; }
+      .eyebrow { display: flex; align-items: center; gap: 10px; font: 500 10.5px "Geist Mono", monospace; letter-spacing: .14em; text-transform: uppercase; color: #737373; }
+      .eyebrow::before { content: ""; width: 18px; height: 1px; background: #404040; }
+      h1 { margin: 0; font-size: 26px; font-weight: 500; letter-spacing: -.03em; }
+      p { margin: 0; color: #a3a3a3; font-size: 14px; line-height: 1.6; }
+      pre { margin: 0; padding: 14px 16px; border-radius: 12px; background: #050505; border: 1px solid rgba(255,255,255,.08); font: 12.5px/1.7 "Geist Mono", monospace; color: #e5e5e5; overflow-x: auto; }
+      .status { font: 12px "Geist Mono", monospace; color: #737373; }
+      [hidden] { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <div class="marble" id="marble" aria-hidden="true"></div>
+    <main>
+      <div class="box">
+        <div class="eyebrow">Karuna</div>
+        <h1 id="title">Opening the console…</h1>
+        <div id="help" hidden>
+          <p>The console isn't running yet. From the Karuna folder, start the Gatekeeper and the console, and this window opens it on its own:</p>
+        </div>
+        <pre id="cmds" hidden></pre>
+        <div class="status" id="status"></div>
+      </div>
+    </main>
+    <script type="module" src="/src/launch.ts"></script>
+  </body>
+</html>

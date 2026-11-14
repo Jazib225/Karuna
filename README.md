@@ -185,7 +185,9 @@ Needs: Node 22+, Rust (MSVC toolchain), Visual Studio Build Tools with the C++ w
 ```bash
 cd desktop && npm run tauri dev     # starts the console dev server if needed, then the app
 ```
-- **`main`**: the console, 1280×800, with the site's marbled background behind it.
+- **`main`**: the console, 1280×800, with the site's marbled background behind it (the browser
+  console has it too). Closing it hides Karuna to the tray and the island takes over; **Quit** in
+  the tray menu exits.
 - **island**: appears when `main` is minimized and hides when it's restored. A black notch at the
   top center of that monitor retracts to a thin strip; hover the strip to slide it down; empty
   areas are click-through. Click the pill to restore the console. Drag the lotus out to float it
@@ -193,6 +195,18 @@ cd desktop && npm run tauri dev     # starts the console dev server if needed, t
   pending the island stays open. Tray: Open Karuna, Pause/Resume agents, Quit.
 - **States**: idle, working, pending approval, approved, denied, paused (plus offline when the
   Gatekeeper isn't running; it retries quietly).
+
+### Installer (Windows)
+```bash
+cd desktop && npm run tauri build     # -> src-tauri/target/release/bundle/nsis/Karuna_0.1.0_x64-setup.exe
+```
+The installed app doesn't bundle the Gatekeeper or the console: it opens a launch page that waits
+for the console, then switches to it. Run them from the Karuna folder:
+```bash
+pnpm --dir gatekeeper start
+pnpm --dir web build && pnpm --dir web preview    # the built console on 127.0.0.1:4173
+```
+(`vite preview` uses the same proxy as dev, so the console token stays server-side.)
 
 ### Pipe protocol: `\.\pipe\karuna`
 Newline-delimited JSON, served by the Gatekeeper (`gatekeeper/src/pipe.ts`).

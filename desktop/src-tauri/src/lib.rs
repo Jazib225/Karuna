@@ -29,11 +29,20 @@ const SIGN_TIMEOUT: Duration = Duration::from_secs(12);
 
 pub fn open_main(app: &AppHandle) {
     if let Some(main) = app.get_webview_window("main") {
-        let _ = main.unminimize();
         let _ = main.show();
+        let _ = main.unminimize();
         let _ = main.set_focus();
     }
     island::hide(app);
+}
+
+/// The console's close button: Karuna keeps running (the island takes over, the tray stays).
+fn hide_main(app: &AppHandle) {
+    if let Some(main) = app.get_webview_window("main") {
+        // Place the island on the console's monitor before the console disappears.
+        island::show(app);
+        let _ = main.hide();
+    }
 }
 
 fn island_error(app: &AppHandle, id: &str, error: &str) {
@@ -97,6 +106,7 @@ fn approval_decision(app: AppHandle, gk: tauri::State<'_, Gatekeeper>, signing: 
 pub fn run() {
     tauri::Builder::default()
         .manage(Gatekeeper::default())
+        .manage(tray::TrayItems::default())
         .manage(Signing::default())
         .manage(Arc::new(IslandState::default()))
         .invoke_handler(tauri::generate_handler![island_rects, island_drag, island_open_main, gk_status, approval_decision])
@@ -151,6 +161,11 @@ pub fn run() {
                         }
                     }
                     WindowEvent::Focused(true) => island::hide(&h),
+                    WindowEvent::CloseRequested { api, .. } => {
+                        // X hides to the tray instead of quitting. Quit is in the tray menu.
+                        api.prevent_close();
+                        hide_main(&h);
+                    }
                     _ => {}
                 });
             }

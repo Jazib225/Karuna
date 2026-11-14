@@ -7,5 +7,5 @@ export default defineConfig({
   clearScreen: false,
   publicDir: resolve(__dirname, "../web/public"),
   server: { host: "127.0.0.1", port: 1420, strictPort: true, fs: { allow: [resolve(__dirname, "..")] } },
-  build: { outDir: "dist", emptyOutDir: true, rollupOptions: { input: { island: resolve(__dirname, "island.html") } } },
+  build: { outDir: "dist", emptyOutDir: true, rollupOptions: { input: { island: resolve(__dirname, "island.html"), launch: resolve(__dirname, "launch.html") } } },
 });

@@ -652,19 +652,19 @@ select {
 .run-tags .tag { height: 20px; font-size: 11px; }
 .run-tr { grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr) auto; }
 
-/* ---------------------------------------------------------------- inside the desktop app */
+/* ---------------------------------------------------------------- dark marbled background (browser and desktop app) */
 /* The site's marbled background (marble contours at 10% over #0a0a0a) behind the console. */
 .app-marble { position: fixed; inset: 0; z-index: -1; background: #0a0a0a; opacity: 1; pointer-events: none; }
 .app-marble > canvas, .app-marble > img { opacity: .1 !important; }
-.in-app body { background: transparent; }
-.in-app .main { background: transparent; }
-.in-app .topbar { background: rgba(10,10,10,.72); border-bottom-color: rgba(255,255,255,.08); }
-.in-app .topbar h1 { color: #fafafa; }
-.in-app .topbar .eyebrow { color: #a3a3a3; }
-.in-app .topbar .eyebrow::before { background: #525252; }
-.in-app .topbar .status, .in-app .topbar .live { background: rgba(255,255,255,.04); border-color: rgba(255,255,255,.12); color: #d4d4d4; box-shadow: none; }
-.in-app .topbar .status .d, .in-app .topbar .live .d { background: #fafafa; }
-.in-app .content > .lede, .in-app .section-title { color: #a3a3a3; }
-.in-app .section-title::before { background: #525252; }
-.in-app .menu-btn { color: #fafafa; }
-.in-app .center .backdrop { display: none; }
+.marbled body { background: transparent; }
+.marbled .main { background: transparent; }
+.marbled .topbar { background: rgba(10,10,10,.72); border-bottom-color: rgba(255,255,255,.08); }
+.marbled .topbar h1 { color: #fafafa; }
+.marbled .topbar .eyebrow { color: #a3a3a3; }
+.marbled .topbar .eyebrow::before { background: #525252; }
+.marbled .topbar .status, .marbled .topbar .live { background: rgba(255,255,255,.04); border-color: rgba(255,255,255,.12); color: #d4d4d4; box-shadow: none; }
+.marbled .topbar .status .d, .marbled .topbar .live .d { background: #fafafa; }
+.marbled .content > .lede, .marbled .section-title { color: #a3a3a3; }
+.marbled .section-title::before { background: #525252; }
+.marbled .menu-btn { color: #fafafa; }
+.marbled .center .backdrop { display: none; }
