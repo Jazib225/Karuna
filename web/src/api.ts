@@ -45,6 +45,24 @@ export interface Governance {
   status: "none" | "open" | "queued" | "executed" | "defeated";
   voters: string[];
   change: Record<string, unknown> & { op: string };
+  preview: LooseningPreview | null;
+}
+
+/** Preview Before Loosening: the last 7 days of requests replayed under the proposed rules. */
+export interface LooseningPreview {
+  replayed: number;
+  days: number;
+  newlyAllowed: { proposalId: string; at: string; agent: string; to: string | null; amountUsd: number | null; was: string; now: string; flagged: string | null }[];
+  newlyBlocked: number;
+  flaggedAllowed: number;
+}
+
+export interface Learned {
+  precedents: { id: string; at: string; agentId: string; agentName: string; counterparty: string; counterpartyName: string | null; amountUsd: number; bandLabel: string; outcome: "approve" | "deny"; byName: string }[];
+  suggestions: { id: string; agentId: string; agentName: string; counterparty: string; counterpartyName: string | null; band: number; bandLabel: string; approvals: number; change: Record<string, unknown> & { op: string } }[];
+  blocks: { id: string; agent: string | null; agentName: string | null; target: string; targetName: string | null }[];
+  allows: { id: string; agent: string | null; agentName: string | null; target: string; targetName: string | null; maxUsd: number }[];
+  suggestAfter: number;
 }
 
 export interface AgentView { id: string; name: string; capUsd: number; spentTodayUsd: number; active: boolean; hasToken: boolean }
@@ -82,6 +100,7 @@ export interface Snapshot {
     testsPerDay: number;
     windowMinutes: number;
   };
+  learned: Learned;
   swarm: {
     traps: (TrapSet & { agentName: string | null; envFile: string })[];
     tainted: { agentId: string; agentName: string; at: string; secret: string }[];

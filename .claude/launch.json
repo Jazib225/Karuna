@@ -33,6 +33,18 @@
       "url": "http://127.0.0.1:5173"
     },
     {
+      "name": "test-seller",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "TEST_SELLER_ADDRESS=0xc55a1499aab6747e1edf23e930b6e92c60a18fdb",
+        "pnpm",
+        "--dir",
+        "services/test-seller",
+        "start"
+      ],
+      "port": 4021
+    },
+    {
       "name": "e2e-gatekeeper",
       "runtimeExecutable": "env",
       "runtimeArgs": [

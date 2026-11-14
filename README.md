@@ -3,6 +3,92 @@
 Hackathon build of the Karuna **Organizations layer** (Dharma on Arc, Auto-Shield, Swarm Stopper, live approvals) for UBC 2026.
 Read [`CLAUDE.md`](CLAUDE.md) for the product and [`ROADMAP.md`](ROADMAP.md) for the plan.
 
+> *An agent's competence should never be its permission.*
+
+AI agents can now handle a business's money. Karuna makes sure no agent, and no group of agents,
+can be tricked into misusing it. **The agent proposes. Karuna decides. People set the rules.**
+
+## Architecture
+```
+ agents (sandbox: no keys, no wallet)                    members (each browser holds its own key)
+   │  propose · read inbox · message                         │  sign votes, rule changes, payment approvals
+   ▼  agent API :8787 (agent token)                          ▼  console API :8788 (localhost) ◄── console :5173
+┌──────────────────────────── Gatekeeper ─────────────────────────────┐
+│ policy engine (first match) ← rules read from Dharma                │
+│ Auto-Shield · Swarm Stopper · Trap Passwords · Changed-account alert │
+│ Exact Match: executes only the payload hash humans approved          │
+│ signed, hash-chained log (ed25519), anchored to Dharma               │
+│ holds the Circle Agent Wallet ──► Circle CLI ──► Arc (x402 / USDC)   │
+└───────────────┬──────────────────────────────────────────────────────┘
+                │ relays member-signed actions; may only TIGHTEN on its own
+                ▼
+        Dharma contract on Arc ──events──► QuickNode Stream ──webhook (HMAC)──► relay ──WS──► every console
+```
+- **Three locks:** the Gatekeeper's policy engine, the Dharma contract (rules, allowances, payees,
+  freeze, core boundaries), and the wallet itself, which only the Gatekeeper holds. Circle's wallet
+  spending limits are mainnet only, so on testnet Dharma + the Gatekeeper enforce limits.
+- **Dharma** (`contracts/src/Dharma.sol`): one contract per organization. Tightening is instant
+  (any member, or the Gatekeeper on its own for Auto-Shield / Swarm Stopper). Loosening is a
+  proposal → majority vote → 60s timelock. Core boundaries (`core-boundary`, `secrets-read`,
+  `unknown-recipient`, `default-deny`) can't be removed. Every action is an EIP-712 signature from
+  a member's own key; the Gatekeeper only relays it.
+
+## Deployed on Arc testnet
+| | |
+|---|---|
+| Organization's Dharma (live console) | [`0xfa5ea10c5cec0f56b350ce41074f01e9618b7c17`](https://testnet.arcscan.app/address/0xfa5ea10c5cec0f56b350ce41074f01e9618b7c17) |
+| Gatekeeper's Circle Agent Wallet | [`0x185ea7a520be17f4e5c4504b3581bf6af5018328`](https://testnet.arcscan.app/address/0x185ea7a520be17f4e5c4504b3581bf6af5018328) |
+
+Every new organization deploys its own Dharma at setup; each verification and demo run deploys a
+fresh one and prints its explorer link.
+
+## QuickNode Stream (core data source for live alerts)
+| Setting | Value | Why |
+|---|---|---|
+| Network | `arc-testnet` | Dharma lives on Arc |
+| Dataset | `logs` | Dharma's events are all we need: approvals requested, proposals, votes, freezes, failed tests |
+| Filter | JavaScript (`quickNodeFilterSource()` in `relay/src/events.ts`): keeps only logs whose `topics[0]` is one of Dharma's event signatures | ships a few events instead of every Arc log |
+| Destination | webhook → `https://<tunnel>/quicknode/webhook` (relay :8791), `security_token` set, batch size 1 | one event per delivery = lowest latency |
+| Verification | relay checks `HMAC-SHA256(token, nonce + timestamp + body)` and rejects replays | an unsigned POST can't fake an alert (returns 401) |
+
+The relay keeps only this organization's Dharma, decodes the event, and pushes it over WebSocket to
+every member's console (approval pop-ups, freezes, failed tests) and to the Gatekeeper (instant
+policy refresh). A lagged direct-RPC safety net catches anything missed; the console badge shows
+which source delivered each alert. Setup: [`docs/QUICKNODE.md`](docs/QUICKNODE.md) ·
+`pnpm --dir relay stream:create`.
+
+## Circle tools used
+| Tool | How |
+|---|---|
+| **Circle Agent Wallet** (SCA on `ARC-TESTNET`) | the organization's wallet, held **only** by the Gatekeeper; agents never see it |
+| **Circle CLI** | `circle wallet transfer` (USDC bills), `circle services pay` (x402 purchases, with `--estimate` first for Exact Match), `circle wallet execute` (Dharma writes from the wallet), `circle contract deploy` (each org's Dharma), `circle gateway balance`, `circle wallet list` |
+| **x402 + Gateway Nanopayments** | agents buy data per request (e.g. $0.001); the Gatekeeper pays from the wallet's Gateway balance and hands the agent only the response |
+
+## Safety rules enforced in code
+1. Agents hold no keys, wallet or money (`pnpm --dir agents check:no-keys`).
+2. Agents only propose; denials are blank (`denied`), never the reason.
+3. Tightening is instant; loosening is vote + timelock; core boundaries can't be removed (contract).
+4. Auto-Shield and Swarm Stopper can only add blocks or freeze (`assertShieldSafe`, Dharma's `NotTightening`).
+5. What a human approved is exactly what executes (payload hash + re-quote, else refused).
+6. Every decision, test, block, trip and approval is in the signed log and anchored on Arc.
+
+## The demo, end to end
+```bash
+pnpm --dir services/test-seller start   # TEST_SELLER_ADDRESS=0x… ; fake data feed (x402)
+VERIFY_WALLET=0x… pnpm --dir gatekeeper demo --runs 3
+```
+Runs CLAUDE.md's demo script live on Arc, three times in a row, each on a fresh organization:
+(1) small x402 purchase paid by the Gatekeeper, (2) a bill over the threshold → approval card →
+two members sign → paid, (3) Auto-Shield: fake invoice → $0 moves → category blocked → vote
+restores with approval required, (4) changed bank account blocked, (5) trap key shared → all agents
+frozen → freeze on the Arc explorer, (6) a proposal to add the scammer's account as a payee →
+Preview Before Loosening shows it would have let the scam through → vote fails. Amounts are scaled
+for testnet; only fake targets are used.
+
+## What existed before the hackathon
+Karuna's website (karunaprotocol.dev) and SDK preview. This repository was started on Nov 9, 2026;
+its git history shows what was built when. <!-- TODO before submitting: confirm the prior-work rule with the organizers and state it here. -->
+
 ## Layout
 | Folder | What |
 |---|---|

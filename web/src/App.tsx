@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEven
 import type { Address } from "viem";
 import type { PrivateKeyAccount } from "viem/accounts";
 import { isTightening, isAddr, decodeChange, describeChange, type Change } from "@prekaruna/dharma";
-import { api, useGatekeeper, type AgentView, type Governance, type LogEntry, type Proposal, type Rule, type Snapshot, type WalletInfo } from "./api.ts";
+import { api, useGatekeeper, type LooseningPreview, type AgentView, type Governance, type LogEntry, type Proposal, type Rule, type Snapshot, type WalletInfo } from "./api.ts";
 import { Kind, SignerUnavailable, decidePayment, loadSigner, submitChange } from "./signer.ts";
 import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
 import { keccak256, stringToHex } from "viem";
@@ -497,6 +497,7 @@ function Approvals({ ctx, dharma }: { ctx: Ctx; dharma: Address }) {
       <p className="section-title">Facts first — Karuna verified everything in the grey box. Your approval is signed by your key and bound to the payload hash.</p>
       {pending.length === 0 && <div className="card"><div className="empty">Nothing is waiting for a human.</div></div>}
       {pending.map((p, i) => <div className="rise" style={st(i)} key={p.id}><ApprovalCard p={p} ctx={ctx} dharma={dharma} /></div>)}
+      <Learned ctx={ctx} />
       {resolved.length > 0 && (
         <div className="card">
           <div className="hd"><h2>Recently resolved</h2></div>
@@ -613,6 +614,7 @@ function Dharma({ ctx }: { ctx: Ctx }) {
                 </span>
               )}
             </div>
+            {g.preview && <PreviewBox p={g.preview} ctx={ctx} />}
           </div>
         );
       })}
@@ -1336,6 +1338,81 @@ function Swarm({ ctx }: { ctx: Ctx }) {
         )}
         <div className="log-foot"><span>drop the .env into the agent's workspace, or leak it by email</span><span>real keys stay with the Gatekeeper</span></div>
       </div>
+    </div>
+  );
+}
+
+// ============================================================== Learns From Your Choices + Preview
+
+function Learned({ ctx }: { ctx: Ctx }) {
+  const { s, busy } = ctx;
+  const L = s.learned;
+  const proposing = (id: string) => s.policy!.proposals.some((g) => g.change?.id === id && (g.status === "open" || g.status === "queued"));
+  const who = (name: string | null, addr: string) => name ?? short(addr);
+  if (!L.precedents.length && !L.blocks.length && !L.allows.length) return null;
+  return (
+    <div className="card">
+      <div className="hd"><h2>Learned from your choices</h2><span className="sub">a "no" is learned at once · a "yes" only after {L.suggestAfter} approvals and a vote</span></div>
+      {L.suggestions.map((x) => (
+        <div className="tr learn-tr" key={x.id}>
+          <span className="chip approval">suggestion</span>
+          <span className="small">You approved <b>{x.agentName}</b> → <b>{who(x.counterpartyName, x.counterparty)}</b> {x.approvals} times. Auto-approve it {x.bandLabel} from now on?</span>
+          {proposing(x.id) ? <span className="tag">proposed → vote on Dharma</span> : (
+            <button className="btn btn-dark btn-sm" disabled={busy} onClick={() => ctx.change(x.change as unknown as Change)}>Propose rule</button>
+          )}
+        </div>
+      ))}
+      {L.blocks.map((b) => (
+        <div className="tr learn-tr" key={b.id}>
+          <span className="chip deny">learned block</span>
+          <span className="small"><b>{b.agentName ?? "Every agent"}</b> can't pay <b>{who(b.targetName, b.target)}</b> <span className="muted">(a member said no)</span></span>
+          {proposing(b.id) ? <span className="tag">lift proposed → vote</span> : (
+            <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => ctx.change({ op: "RemoveRule", id: b.id })}>Propose lifting</button>
+          )}
+        </div>
+      ))}
+      {L.allows.map((b) => (
+        <div className="tr learn-tr" key={b.id}>
+          <span className="chip allow">learned rule</span>
+          <span className="small"><b>{b.agentName ?? "Every agent"}</b> pays <b>{who(b.targetName, b.target)}</b> up to {usd(b.maxUsd)} without asking</span>
+          <button className="btn btn-ghost btn-sm" disabled={busy} title="Revoking is a tightening: it applies at once" onClick={() => ctx.change({ op: "RemoveRule", id: b.id })}>Revoke</button>
+        </div>
+      ))}
+      {L.precedents.length > 0 && (
+        <div className="resolved">
+          {L.precedents.slice(0, 8).map((x) => (
+            <div className="res" key={x.id}>
+              <span className={`chip ${x.outcome === "approve" ? "allow" : "deny"}`}>{x.outcome === "approve" ? "yes" : "no"}</span>
+              <span className="small">{x.agentName} → {who(x.counterpartyName, x.counterparty)} · {usd(x.amountUsd)} ({x.bandLabel})</span>
+              <span className="muted small">{x.byName} · {ago(x.at)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PreviewBox({ p, ctx }: { p: LooseningPreview; ctx: Ctx }) {
+  const pol = ctx.s.policy!;
+  const agentName = (id: string) => pol.agents.find((a) => a.id === id)?.name ?? id;
+  const payee = (a: string | null) => (a ? pol.payees.find((x) => x.account === a.toLowerCase())?.name ?? short(a) : "—");
+  const bad = p.flaggedAllowed > 0;
+  return (
+    <div className={`preview ${bad ? "preview-bad" : ""}`}>
+      <div className="small">
+        <b>Preview:</b> replaying the last {p.days} days ({p.replayed} requests) under this change,{" "}
+        {p.newlyAllowed.length === 0 ? "nothing more would have got through." : <>
+          <b>{p.newlyAllowed.length} more</b> would have got through
+          {" "}({p.newlyAllowed.filter((x) => x.now === "allow").length} automatically, {p.newlyAllowed.filter((x) => x.now === "approval").length} to an approval card instead of a block)
+          {bad ? <>, including <b className="bad-text">{p.flaggedAllowed} Karuna flagged as a scam</b></> : null}.</>}
+        {p.newlyBlocked > 0 ? ` ${p.newlyBlocked} would now be blocked.` : ""}
+      </div>
+      {p.newlyAllowed.slice(0, 5).map((x) => (
+        <div className="small mono muted" key={x.proposalId}>
+          {agentName(x.agent)} → {payee(x.to)}{x.amountUsd != null ? ` ${usd(x.amountUsd)}` : ""} · {x.was} → {x.now}{x.flagged ? <span className="bad-text"> · flagged: {x.flagged}</span> : null} · {ago(x.at)}
+        </div>
+      ))}
     </div>
   );
 }

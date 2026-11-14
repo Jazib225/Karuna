@@ -89,6 +89,19 @@ The agent gets back only `done` (with the service's response), `allowed`, `pendi
   Gatekeeper records the freeze on Dharma (`AgentFrozen`, gatekeeper-only tightening). Unfreezing is
   a loosening: member vote + timelock.
 
+## Learns From Your Choices + Preview Before Loosening (Phase 7)
+- Every member approve / deny of a payment is a **precedent** (agent, counterparty, amount band, outcome, who).
+- A **no** becomes a block at once: `lc-…` = this agent can't pay this counterparty, written to
+  Dharma by the Gatekeeper through the same block-only path as Auto-Shield. Lifting it is a vote.
+- A **yes** is learned slowly: after 3 approvals for the same agent → counterparty in the same
+  amount band (below the two-person threshold, never after a denial), the console *suggests*
+  `la-…` ("auto-approve up to $10"). Members must propose it and pass the vote + timelock; the
+  Gatekeeper can't write it (Dharma refuses a loosening from it). Revoking it is a tightening: instant.
+- Every open loosening proposal carries a **preview**: the last 7 days of requests replayed under
+  the proposed rules (tracking daily spend), with what would newly be allowed, and how many of those
+  Karuna had flagged (scam test, changed bank account, trap password, swarm).
+- **Two-Person Approval**: payments at or above Dharma's threshold need two members' signatures.
+
 ## Data (`gatekeeper/data/`, gitignored)
 `org.json` (Dharma + wallet pointers, private names, agent token hashes, access requests — no
 policy) · `state.json` (payment proposals, spend, local freeze) · `log.jsonl` (signed log) ·

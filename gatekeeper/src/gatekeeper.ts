@@ -28,6 +28,7 @@ import {
   TEMPLATES, assertShieldSafe, autoRule, isAutoRule, makeTest, tracesTo,
   type InboxMessage, type ShieldTest, type TestTemplate,
 } from "./shield.ts";
+import { band, bandLabel, learnedDenyRule, previewLoosening, suggestions, LOOSENING_OPS, type PastRequest, type Precedent, type Preview } from "./learn.ts";
 import { PivotTracker, findCredential, findTrap, mintTraps, targetOf, trapEnvFile, trapLeakMessage, type TrapSet } from "./swarm.ts";
 
 // ---------------------------------------------------------------- types
@@ -116,6 +117,7 @@ interface State {
   traps: TrapSet[]; // fake credentials planted in agents' sandboxes
   tainted: Record<string, { at: string; secret: string }>; // agents that touched a trap
   swarmTrips: { id: string; at: string; reason: string; agents: string[]; txRef?: string }[];
+  precedents: Precedent[]; // every human approve / deny on a payment (Learns From Your Choices)
 }
 
 export interface ShieldAlert {
@@ -127,7 +129,7 @@ export interface ShieldAlert {
   at: string;
 }
 
-const emptyState = (): State => ({ proposals: [], spend: {}, localFreeze: null, inbox: [], tests: [], alerts: [], traps: [], tainted: {}, swarmTrips: [] });
+const emptyState = (): State => ({ proposals: [], spend: {}, localFreeze: null, inbox: [], tests: [], alerts: [], traps: [], tainted: {}, swarmTrips: [], precedents: [] });
 
 export class GatekeeperError extends Error {
   constructor(message: string, readonly status = 400) {
@@ -156,6 +158,8 @@ const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 const usd = (n: number) => `$${n > 0 && n < 0.01 ? n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "") : n.toFixed(2)}`;
 const lower = (a: string) => a.toLowerCase();
+/** Seconds past a timelock before the Gatekeeper executes (the wallet provider's node can trail our RPC). */
+const EXECUTE_MARGIN_S = 3;
 const MAX_PROPOSALS_KEPT = 5000;
 const KIND_NAMES = ["tighten", "propose", "vote"] as const;
 
@@ -326,8 +330,10 @@ export class Gatekeeper extends EventEmitter {
   private async executeReady() {
     const p = this.policy;
     if (!p) return;
-    for (const prop of p.proposals) {
-      if (prop.status !== "queued" || prop.eta === null || prop.eta > p.chainTime) continue;
+    // Oldest first, a few seconds past the timelock: the wallet provider's node can trail the RPC
+    // we read the chain clock from, and executing "too early" just burns a round-trip (NotReady).
+    const ready = p.proposals.filter((x) => x.status === "queued" && x.eta !== null && x.eta + EXECUTE_MARGIN_S <= p.chainTime).sort((a, b) => a.eta! - b.eta!);
+    for (const prop of ready) {
       const last = this.executeTried.get(prop.id) ?? 0;
       if (Date.now() - last < 30_000) continue;
       this.executeTried.set(prop.id, Date.now());
@@ -339,6 +345,11 @@ export class Gatekeeper extends EventEmitter {
       } catch (e) {
         this.logEvent({ type: "dharma-execute-failed", proposalId: prop.id, detail: scrub(e) });
         this.save();
+        if (/NotReady/.test(String(e))) {
+          // The chain isn't there yet: retry soon, and don't spend calls on later proposals now.
+          this.executeTried.set(prop.id, Date.now() - 25_000);
+          break;
+        }
       }
     }
   }
@@ -938,16 +949,63 @@ export class Gatekeeper extends EventEmitter {
    * The single path by which Auto-Shield changes policy. It refuses anything but adding a deny or
    * require-approval rule (and Dharma separately refuses any loosening from the Gatekeeper).
    */
-  async writeAutoRule(change: Change) {
+  async writeAutoRule(change: Change, logType = "shield-rule-added") {
     assertShieldSafe(change);
     const id = (change as { id: string }).id;
     if (this.policy?.rules.some((r) => r.id === id && r.active)) return { alreadyActive: true };
     const { op, data } = encodeChange(change);
     const { txRef } = await this.send("tighten", [op, data, zeroAddress, 0n, "0x"]);
-    this.logEvent({ type: "shield-rule-added", rule: id, change: describeChange(change, this.labels()), txRef });
+    this.logEvent({ type: logType, rule: id, change: describeChange(change, this.labels()), txRef });
     await this.sync(true).catch(() => undefined);
     this.save();
     return { alreadyActive: false, txRef };
+  }
+
+  // ================================================================ Learns From Your Choices
+
+  /** Record a human's payment decision as a precedent. A "no" becomes a narrow block at once. */
+  private learn(p: Proposal, outcome: Precedent["outcome"], by: string) {
+    const to = p.request.tool === "payment" ? p.request.to?.toLowerCase() : undefined;
+    if (!to) return;
+    const amountUsd = p.payload?.amountUsd ?? p.request.amountUsd ?? 0;
+    const prec: Precedent = {
+      id: randomUUID(), at: this.now().toISOString(), proposalId: p.id, agentId: p.agentId, counterparty: to,
+      category: p.request.category ?? null, amountUsd, band: band(amountUsd), outcome, by,
+    };
+    this.state.precedents.push(prec);
+    if (this.state.precedents.length > 2000) this.state.precedents = this.state.precedents.slice(-2000);
+    this.logEvent({ type: "precedent", outcome, agent: p.agentId, counterparty: to, band: bandLabel(prec.band), by, proposalId: p.id });
+    if (outcome === "deny") {
+      // Tightening, so it applies now — through the same block-only writer as Auto-Shield.
+      this.background(this.writeAutoRule(learnedDenyRule(p.agentId, to), "learned-block-added").catch((e) => {
+        this.logEvent({ type: "learned-block-failed", proposalId: p.id, detail: scrub(e) });
+        this.save();
+      }));
+    }
+  }
+
+  /** Every logged request, for Preview Before Loosening. */
+  private history(): PastRequest[] {
+    const FLAGS: Record<string, string> = {
+      "auto-shield": "acted on a scam test", "changed-bank-account": "changed bank account", "trap-password": "used a trap password",
+      "swarm-credential": "shared a credential", "swarm-tainted": "swarm",
+    };
+    return this.state.proposals.map((p) => ({ proposalId: p.id, at: p.createdAt, request: p.request, decision: p.decision, flagged: FLAGS[p.decision.ruleId] ?? null }));
+  }
+
+  private previewCache = new Map<string, Preview>();
+  /** What an open loosening proposal would have allowed over the last 7 days. */
+  previewFor(govId: number): Preview | null {
+    const pol = this.policy;
+    const g = pol?.proposals.find((x) => x.id === govId);
+    if (!pol || !g?.change || !LOOSENING_OPS.has(g.change.op)) return null;
+    const key = `${govId}:${pol.policyVersion}:${this.state.proposals.length}`;
+    const hit = this.previewCache.get(key);
+    if (hit) return hit;
+    const r = previewLoosening(pol, g.change, this.history(), (a) => this.org.labels.payees[lower(a)] ?? a, 7, this.now().getTime());
+    if (this.previewCache.size > 100) this.previewCache.clear();
+    this.previewCache.set(key, r);
+    return r;
   }
 
   /** What an agent sees in its inbox. Tests are indistinguishable: no flag, same shape. */
@@ -1094,6 +1152,7 @@ export class Gatekeeper extends EventEmitter {
       p.resolvedBy = memberId;
       p.resolvedAt = this.now().toISOString();
       this.logEvent({ type: "denied-by-human", proposalId: id, by: memberId });
+      this.learn(p, "deny", memberId);
       this.save();
       return { status: "denied" as const };
     }
@@ -1112,6 +1171,7 @@ export class Gatekeeper extends EventEmitter {
       return { status: "needs-another-approval" as const };
     }
     p.resolvedBy = memberId;
+    this.learn(p, "approve", memberId);
     if (!p.payload) {
       p.status = "allowed";
       p.resolvedAt = this.now().toISOString();
@@ -1161,6 +1221,7 @@ export class Gatekeeper extends EventEmitter {
           ...p,
           proposer: lower(p.proposer),
           description: p.change ? describeChange(p.change, L) : `op ${opName(p.op)}`,
+          preview: p.status === "open" || p.status === "queued" ? this.previewFor(p.id) : null,
         })),
       },
       frozen: frozen && { ...frozen, by: frozen.by ? (L.member(frozen.by) ?? frozen.by) : null },
@@ -1176,6 +1237,18 @@ export class Gatekeeper extends EventEmitter {
         templates: TEMPLATES,
         testsPerDay: this.deps.shieldTestsPerDay ?? 0,
         windowMinutes: Math.round((this.deps.shieldWindowMs ?? 30 * 60_000) / 60_000),
+      },
+      learned: {
+        precedents: this.state.precedents.slice(-40).reverse().map((x) => ({
+          ...x, bandLabel: bandLabel(x.band),
+          agentName: L.agent(x.agentId) ?? x.agentId, counterpartyName: this.org.labels.payees[x.counterparty] ?? null, byName: L.member(x.by) ?? x.by,
+        })),
+        suggestions: pol ? suggestions(this.state.precedents, pol.rules, pol.thresholdUsd).map((x) => ({
+          ...x, bandLabel: bandLabel(x.band), agentName: L.agent(x.agentId) ?? x.agentId, counterpartyName: this.org.labels.payees[x.counterparty] ?? null,
+        })) : [],
+        blocks: (pol?.rules ?? []).filter((r) => r.active && r.id.startsWith("lc-")).map((r) => ({ id: r.id, agent: r.agent ?? null, agentName: r.agent ? (L.agent(r.agent) ?? r.agent) : null, target: r.target, targetName: this.org.labels.payees[r.target] ?? null })),
+        allows: (pol?.rules ?? []).filter((r) => r.active && r.id.startsWith("la-")).map((r) => ({ id: r.id, agent: r.agent ?? null, agentName: r.agent ? (L.agent(r.agent) ?? r.agent) : null, target: r.target, targetName: this.org.labels.payees[r.target] ?? null, maxUsd: r.maxUsd })),
+        suggestAfter: 3,
       },
       swarm: {
         traps: this.state.traps.slice(-20).reverse().map((t) => ({ ...t, agentName: t.agentId ? (L.agent(t.agentId) ?? t.agentId) : null, envFile: trapEnvFile(t) })),

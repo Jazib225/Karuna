@@ -114,7 +114,7 @@ const tighten = async (who: PrivateKeyAccount, c: Change) => gk.submitAction(awa
 const propose = async (who: PrivateKeyAccount, c: Change, label?: string) => gk.submitAction({ ...(await sign(who, Kind.Propose, c)), label });
 const vote = async (who: PrivateKeyAccount, id: number, c: Change, support = true) => gk.submitAction(await sign(who, Kind.Vote, c, id, support));
 async function waitTimelock() {
-  await test().increaseTime({ seconds: 61 });
+  await test().increaseTime({ seconds: 65 });
   await test().mine({ blocks: 1 });
   await gk.housekeeping(); // the Gatekeeper executes passed proposals itself
 }

@@ -73,7 +73,7 @@ async function sign(kind: number, c: Change): Promise<SignedAction> {
 }
 async function passTimelock() {
   const t = createTestClient({ chain, mode: "anvil", transport: http(RPC) });
-  await t.increaseTime({ seconds: 61 });
+  await t.increaseTime({ seconds: 65 });
   await t.mine({ blocks: 1 });
   await gk.housekeeping();
 }

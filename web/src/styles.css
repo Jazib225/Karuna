@@ -352,3 +352,8 @@ textarea { resize: vertical; }
 /* Swarm & traps */
 .row-between { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
 .tr.stack { display: flex; flex-direction: column; align-items: stretch; gap: .5rem; }
+
+/* Learned + preview */
+.learn-tr { grid-template-columns: auto 1fr auto; }
+.preview { margin: 0 1.1rem 1rem; padding: .6rem .8rem; border: 1px dashed var(--line); border-radius: var(--radius-md); display: flex; flex-direction: column; gap: .25rem; }
+.preview-bad { border-color: var(--deny); background: var(--deny-bg); }
