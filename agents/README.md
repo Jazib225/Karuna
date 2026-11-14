@@ -38,4 +38,22 @@ Roles: `bills` (pays legitimate invoices, flags scams), `supplies` (buys data wh
 (helps teammates — the swarm demo). `XAI_MODEL` picks the model (default `grok-4.7`). The xAI key pays
 for Grok's thinking; it is the runner's model key, not a key to the business's money, and Grok never sees it.
 
+## A Claude test agent (boxed)
+`examples/claude-agent.ts` gives **Claude Sonnet 5.5** a task and two tools, `http_request` and
+`read_inbox`, and runs inside a Karuna sandbox. The default task covers each kind of decision: an
+allowed GET, a denied GET, a POST that's held for approval, and its inbox. You can pass your own task
+as an argument. It never holds the Anthropic key: it sends the placeholder `karuna_key_anthropic`, and
+the egress proxy fills in the real key only on requests to `api.anthropic.com`.
+
+Once, in the console:
+1. Under Keys, add your Anthropic key named `anthropic` and bind it to `api.anthropic.com`.
+2. Under Rules, allow POST to `api.anthropic.com` for the agent. Without this, every model call waits for approval.
+
+```bash
+KARUNA_AGENT_TOKEN=kag_… pnpm karuna run --agent <id> ./agents -- npx tsx examples/claude-agent.ts
+```
+It makes at most 10 model calls per run (`MAX_TURNS`), at low effort, and prints the token count and
+cost at the end. That's a few cents per run. `CLAUDE_MODEL` switches the model; `claude-haiku-5-5` is
+about 20x cheaper.
+
 `pnpm --dir agents check:no-keys` proves no keys, wallet SDKs, or secrets are reachable.

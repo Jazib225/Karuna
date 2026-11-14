@@ -12,7 +12,7 @@
 import { createServer, request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { TLSSocket } from "node:tls";
-import type { Duplex } from "node:stream";
+import { Duplex } from "node:stream";
 import type { AddressInfo } from "node:net";
 import type { SandboxCA } from "./ca.ts";
 import type { Gatekeeper } from "./gatekeeper.ts";
@@ -43,11 +43,13 @@ export class EgressProxy {
   async open(token: string): Promise<number> {
     const existing = this.servers.get(token);
     if (existing) return (existing.address() as AddressInfo).port;
+    // Requests that arrive through a CONNECT tunnel: TLS ones (terminated here) and plain-HTTP ones
+    // (clients such as Node's fetch tunnel http:// through CONNECT too).
     const inner = createServer((req, res) => {
-      const t = (req.socket as TLSSocket & { karunaTarget?: Target }).karunaTarget;
+      const t = (req.socket as Duplex & { karunaTarget?: Target }).karunaTarget;
       if (!t) return void res.writeHead(400).end();
-      const port = t.port === 443 ? "" : `:${t.port}`;
-      void this.handle(token, req, res, `https://${t.host}${port}${req.url ?? "/"}`);
+      const port = t.port === (t.protocol === "https:" ? 443 : 80) ? "" : `:${t.port}`;
+      void this.handle(token, req, res, `${t.protocol}//${t.host}${port}${req.url ?? "/"}`);
     });
     const server = createServer((req, res) => {
       // Plain-HTTP proxying: the request line carries the absolute URL.
@@ -60,12 +62,30 @@ export class EgressProxy {
       if (!host) return void socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
       if (!this.gk.session(token)) return void socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
       socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-      if (head.length) socket.unshift(head);
+      const port = Number(portStr) || 443;
       // Terminate TLS here with a certificate from the org's sandbox CA (the only CA the box trusts).
-      const tls = new TLSSocket(socket, { isServer: true, secureContext: this.ca.contextFor(host), ALPNProtocols: ["http/1.1"] }) as TLSSocket & { karunaTarget?: Target };
-      tls.karunaTarget = { protocol: "https:", host, port: Number(portStr) || 443 };
-      tls.on("error", () => socket.destroy());
-      inner.emit("connection", tls);
+      const terminateTls = (stream: Duplex) => {
+        const tls = new TLSSocket(stream, { isServer: true, secureContext: this.ca.contextFor(host), ALPNProtocols: ["http/1.1"] }) as TLSSocket & { karunaTarget?: Target };
+        tls.karunaTarget = { protocol: "https:", host, port };
+        tls.on("error", () => socket.destroy());
+        inner.emit("connection", tls);
+      };
+      if (port === 443) {
+        if (head.length) socket.unshift(head);
+        return terminateTls(socket);
+      }
+      // Other ports: the first byte says what's inside the tunnel. 0x16 opens a TLS handshake;
+      // anything else is plain HTTP (Node's fetch tunnels http:// through CONNECT, e.g. to karuna.internal).
+      const start = (first: Buffer) => {
+        if (first[0] === 0x16) return terminateTls(replay(socket, first));
+        socket.pause();
+        socket.unshift(first);
+        (socket as Duplex & { karunaTarget?: Target }).karunaTarget = { protocol: "http:", host, port };
+        inner.emit("connection", socket);
+        socket.resume();
+      };
+      if (head.length) start(head);
+      else socket.once("data", start);
     });
     server.on("clientError", (_e, socket) => socket.destroy());
     await new Promise<void>((resolve, reject) => {
@@ -174,6 +194,36 @@ export class EgressProxy {
     res.writeHead(r.statusCode ?? 502, { "content-type": r.headers["content-type"] ?? "application/json" });
     r.pipe(res);
   }
+}
+
+/** A stream over `socket` that first yields `first` (bytes already read off it). TLSSocket on a raw
+ *  net.Socket reads its handle directly and would never see bytes read in JS; a plain Duplex makes
+ *  it read through the stream instead. */
+function replay(socket: Duplex, first: Buffer): Duplex {
+  const out = new Duplex({
+    read() {
+      socket.resume();
+    },
+    write(chunk, enc, cb) {
+      socket.write(chunk, enc, cb);
+    },
+    final(cb) {
+      socket.end();
+      cb();
+    },
+    destroy(err, cb) {
+      socket.destroy(err ?? undefined);
+      cb(err);
+    },
+  });
+  out.push(first);
+  socket.on("data", (d: Buffer) => {
+    if (!out.push(d)) socket.pause();
+  });
+  socket.on("end", () => out.push(null));
+  socket.on("error", (e) => out.destroy(e));
+  socket.on("close", () => out.destroy());
+  return out;
 }
 
 function splitHostPort(s: string): [string, string] {

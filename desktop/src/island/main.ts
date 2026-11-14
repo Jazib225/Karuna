@@ -10,7 +10,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { createContour } from "../../../web/src/site/contour.ts";
 import { createLotus, contextAttributes } from "../../../web/src/site/lotus.ts";
-import { mountGL, type GLHandle } from "../../../web/src/site/glrun.ts";
 
 type State = "idle" | "working" | "pending" | "approved" | "denied" | "paused" | "offline";
 interface Decision { type: "decision"; id: string; action_type: string; summary: string; result: "allow" | "deny" }
@@ -152,7 +151,9 @@ function drawSprite(now: number) {
   requestAnimationFrame(drawSprite);
   const dt = Math.min(0.1, (now - (lastT || now)) / 1000);
   lastT = now;
-  if (!frames.length || !visible) return;
+  if (!visible) return;
+  drawContour(now);
+  if (!frames.length) return;
   const st = currentState();
   // Approved settles: the turn slows to a stop. Everything else turns at its own pace.
   let speed = SPEED[st];
@@ -177,12 +178,77 @@ function drawSprite(now: number) {
   }
 }
 
-let marbleGL: GLHandle | null = null;
-function syncLive() {
-  // The live shader runs only where it's visible: the open card's marble (paused otherwise).
-  const cardOn = visible && !card.hidden && card.classList.contains("show");
-  if (cardOn && !marbleGL) marbleGL = mountGL($("card-marble"), (g) => createContour(g, "marble"), { fallbackSrc: "/brand/contour.webp", dprCap: 1.5 });
-  if (marbleGL) (cardOn ? marbleGL.start() : marbleGL.stop());
+// ------------------------------------------------------------------ contour background
+// The site's marble contours behind every surface: the notch pill, the floating lotus and the card.
+// One offscreen WebGL canvas (card-sized) renders the shader; each surface copies its own piece of
+// it into a plain 2D canvas, so the line density matches everywhere and there's only one GL context
+// (no lazy mount that can miss, no per-surface context that the browser may drop). If WebGL isn't
+// available, the site's still image is used instead.
+const BG = { w: 360, h: 560, fps: 30 };
+const bgDpr = Math.min(window.devicePixelRatio || 1, 1.5);
+const bgSrc = document.createElement("canvas");
+bgSrc.width = Math.round(BG.w * bgDpr);
+bgSrc.height = Math.round(BG.h * bgDpr);
+let bgRender: ReturnType<typeof createContour> | null = null;
+let bgImage: HTMLImageElement | null = null;
+let bgT = 0;
+let bgLast = 0;
+function initContour() {
+  const gl = (bgSrc.getContext("webgl2", { alpha: true, antialias: true, preserveDrawingBuffer: true }) ??
+    bgSrc.getContext("webgl", { alpha: true, antialias: true, preserveDrawingBuffer: true })) as WebGLRenderingContext | null;
+  try {
+    if (gl) {
+      bgRender = createContour(gl, "marble");
+      bgRender.resize(bgSrc.width, bgSrc.height);
+      bgRender.frame(0, 0);
+    }
+  } catch {
+    bgRender = null;
+  }
+  if (!bgRender) {
+    bgImage = new Image();
+    bgImage.src = "/brand/contour.webp";
+  }
+  bgSrc.addEventListener("webglcontextlost", (e) => e.preventDefault());
+  bgSrc.addEventListener("webglcontextrestored", () => {
+    bgRender = null;
+    initContour();
+  });
+}
+const bgCanvases = ["pill-bg", "floater-bg", "card-bg"].map((id) => $<HTMLCanvasElement>(id));
+/** Where each surface takes its piece of the shared texture (CSS px within BG): pill = top strip, floater = middle, card = all. */
+const bgAnchor = (c: HTMLCanvasElement, w: number, h: number) =>
+  c.id === "floater-bg" ? { x: (BG.w - w) / 2, y: (BG.h - h) / 2 } : { x: Math.max(0, (BG.w - w) / 2), y: 0 };
+function drawContour(now: number) {
+  if (now - bgLast < 1000 / BG.fps) return;
+  const dt = Math.min(0.1, (now - (bgLast || now)) / 1000);
+  bgLast = now;
+  bgT += dt;
+  const src: CanvasImageSource | null = bgRender ? bgSrc : bgImage?.complete && bgImage.naturalWidth ? bgImage : null;
+  if (!src) return;
+  if (bgRender) bgRender.frame(bgT, dt);
+  const sw = bgRender ? bgSrc.width : bgImage!.naturalWidth;
+  const sh = bgRender ? bgSrc.height : bgImage!.naturalHeight;
+  const sx = sw / BG.w;
+  const sy = sh / BG.h;
+  for (const c of bgCanvases) {
+    const box = c.parentElement!;
+    if (box.hidden || !box.getClientRects().length) continue; // fixed boxes have no offsetParent, so check layout instead
+    const w = Math.min(BG.w, box.clientWidth);
+    const h = Math.min(BG.h, box.clientHeight);
+    if (!w || !h) continue;
+    const dpr = window.devicePixelRatio || 1;
+    const pw = Math.round(w * dpr);
+    const ph = Math.round(h * dpr);
+    if (c.width !== pw || c.height !== ph) {
+      c.width = pw;
+      c.height = ph;
+    }
+    const a = bgAnchor(c, w, h);
+    const ctx = c.getContext("2d")!;
+    ctx.clearRect(0, 0, pw, ph);
+    ctx.drawImage(src, a.x * sx, a.y * sy, w * sx, h * sy, 0, 0, pw, ph);
+  }
 }
 
 // ------------------------------------------------------------------ rendering
@@ -319,7 +385,6 @@ function render() {
   } else {
     card.classList.remove("show");
   }
-  syncLive();
   reportRects();
 }
 
@@ -538,6 +603,7 @@ void (async () => {
   } catch {
     /* not in the app (design preview) */
   }
+  initContour();
   buildSprites();
   requestAnimationFrame(drawSprite);
   render();

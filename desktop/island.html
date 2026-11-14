@@ -11,15 +11,17 @@
   <body>
     <div id="notch" class="notch" data-state="idle" aria-live="polite">
       <div id="pill" class="pill" role="button" tabindex="-1" aria-label="Open Karuna">
+        <canvas class="surface-bg" id="pill-bg" aria-hidden="true"></canvas>
         <span class="pill-lotus" id="pill-lotus"><canvas id="sprite" width="28" height="28"></canvas></span>
         <span class="pill-text"><span class="state-label" id="label">Watching</span><span class="state-sub" id="sub"></span></span>
       </div>
     </div>
     <div id="floater" class="floater" data-state="idle" hidden aria-label="Karuna (drag to the top center to dock)">
+      <canvas class="surface-bg" id="floater-bg" aria-hidden="true"></canvas>
       <span class="floater-lotus" id="floater-lotus"><canvas id="fsprite" width="40" height="40"></canvas></span>
     </div>
     <section id="card" class="card" hidden>
-      <div class="card-marble" id="card-marble" aria-hidden="true"></div>
+      <canvas class="surface-bg" id="card-bg" aria-hidden="true"></canvas>
       <div class="card-body" id="card-body"></div>
     </section>
     <script type="module" src="/src/island/main.ts"></script>
