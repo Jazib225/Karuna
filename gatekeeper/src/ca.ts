@@ -54,6 +54,25 @@ export class SandboxCA {
     this.leafKeyPem = pki.privateKeyToPem(this.leafKeys.privateKey);
   }
 
+  /** The Gatekeeper's own server certificate for its remote port, valid for every name given. */
+  serverCert(names: string[]): { key: string; cert: string } {
+    const cert = pki.createCertificate();
+    cert.publicKey = this.leafKeys.publicKey;
+    cert.serialNumber = serial();
+    cert.validity.notBefore = new Date(Date.now() - 86_400_000);
+    cert.validity.notAfter = new Date(Date.now() + 365 * 86_400_000);
+    cert.setSubject([{ name: "commonName", value: "Karuna Gatekeeper" }]);
+    cert.setIssuer(this.caCert.subject.attributes);
+    cert.setExtensions([
+      { name: "basicConstraints", cA: false },
+      { name: "keyUsage", digitalSignature: true, keyEncipherment: true, critical: true },
+      { name: "extKeyUsage", serverAuth: true },
+      { name: "subjectAltName", altNames: [...new Set(names.map((n) => n.toLowerCase()))].map((n) => (/^[\d.]+$/.test(n) || n.includes(":") ? { type: 7, ip: n } : { type: 2, value: n })) },
+    ]);
+    cert.sign(this.caKey, md.sha256.create());
+    return { key: this.leafKeyPem, cert: pki.certificateToPem(cert) };
+  }
+
   /** A TLS context presenting a certificate for `host`, signed by the sandbox CA (cached). */
   contextFor(host: string): SecureContext {
     const name = host.toLowerCase();

@@ -805,7 +805,7 @@ function TokenReveal({ token, agent, agentId, onDone }: { token: string; agent: 
           <button className="btn btn-ghost" onClick={() => { navigator.clipboard?.writeText(token); setCopied(true); }}><Icon name={copied ? "check" : "copy"} /> {copied ? "Copied" : "Copy"}</button>
         </div>
         <pre className="snippet">{`# run the agent in a Karuna sandbox (from the repo root)
-KARUNA_AGENT_TOKEN=${token} \
+KARUNA_AGENT_TOKEN=${token} \\
   pnpm karuna run --agent ${agentId} ./my-agent -- python main.py
 
 // inside the box, pay or buy through Karuna:
@@ -850,6 +850,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
         <button className="btn btn-dark" type="submit" disabled={busy}><Icon name="plus" /> Propose agent</button>
       </form>
       <SandboxRuns ctx={ctx} />
+      <RemoteRuns ctx={ctx} />
       <p className="section-title">Adding, removing or changing an allowance goes to a team vote</p>
       {pol.agents.length === 0 ? (
         <div className="card"><Empty icon="agents">No agents yet. Propose one above; it can ask for money once Dharma adds it.</Empty></div>
@@ -1655,14 +1656,51 @@ function SandboxRuns({ ctx }: { ctx: Ctx }) {
           {sb.sessions.map((x) => (
             <div className="tr run-tr" key={x.id}>
               <span className="live-dot" aria-hidden />
-              <span className="b">{x.agentName}<div className="muted small mono">run {x.id}{x.host ? ` · ${x.host}` : ""} · started {ago(x.startedAt)}</div></span>
+              <span className="b">{x.agentName}
+                <div className="run-tags">
+                  <span className="tag" title={x.isolation === "gvisor" ? "gVisor: a user-space kernel between the agent and the machine" : "Hardened Docker. Install gVisor on that machine for a stronger wall."}>{x.isolation === "gvisor" ? <><Icon name="lock" size={11} /> gVisor</> : "Docker"}</span>
+                  {x.remote && <span className="tag" title="Runs on another machine through the remote port">remote</span>}
+                  {x.desktop && <span className="tag" title="Has a virtual screen and browser (computer-use agent)">desktop</span>}
+                  <span className="muted small mono">run {x.id}{x.host ? ` · ${x.host}` : ""} · {ago(x.startedAt)}</span>
+                </div>
+              </span>
               <span className="mono small muted" title={x.lastRequest ?? ""}>{x.requests} requests · {x.denied} blocked{x.lastRequest ? ` · last ${x.lastRequest}` : ""}</span>
-              {x.stopRequested ? <Badge v="approval">stopping</Badge> : <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => run(() => api(`/sandbox/${x.id}/stop`, {}), "Stopping the box")}>Stop</button>}
+              <span className="shield-actions">
+                {x.viewer && !x.remote && <a className="btn btn-ghost btn-sm" href={x.viewer} target="_blank" rel="noreferrer" title="Live view of the box's screen (this machine only)">Watch <Icon name="external" size={12} /></a>}
+                {x.viewer && x.remote && <span className="tag" title="The live view only opens on the machine running the box">watch on {x.host ?? "that machine"}</span>}
+                {x.stopRequested ? <Badge v="approval">stopping</Badge> : <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => run(() => api(`/sandbox/${x.id}/stop`, {}), "Stopping the box")}>Stop</button>}
+              </span>
             </div>
           ))}
         </div>
       )}
       <div className="log-foot"><span>no network except Karuna · no host files unless mounted · no real keys · wiped on exit</span><span>panic button stops every box</span></div>
+    </div>
+  );
+}
+
+function RemoteRuns({ ctx }: { ctx: Ctx }) {
+  const r = ctx.s.sandbox.remote;
+  const cmd = r ? `KARUNA_AGENT_TOKEN=kag_… pnpm karuna run --agent <id> \\
+  --gatekeeper https://<this-machine>:${r.port} --ca karuna-ca.pem \\
+  ./my-agent -- python main.py` : "";
+  return (
+    <div className="card">
+      <div className="hd"><h2>Run on another machine</h2><span className="sub">{r ? `remote port ${r.port} on ${r.host}` : "off"}</span></div>
+      <div className="pad stack-sm">
+        {r ? (
+          <>
+            <p className="muted small">A teammate's laptop or a cloud server can box agents under this org's rules. That machine needs Docker, the agent's token, and this org's certificate, so it trusts only this Gatekeeper. The box there still has no way out except here.</p>
+            <pre className="snippet">{cmd}</pre>
+            <div className="row-form">
+              <a className="btn btn-ghost" href="/api/sandbox/ca" download="karuna-ca.pem"><Icon name="lock" /> Download karuna-ca.pem</a>
+              <span className="muted small">Names it answers to: <span className="mono">{r.names.join(", ")}</span></span>
+            </div>
+          </>
+        ) : (
+          <p className="muted small">Off. Start the Gatekeeper with <span className="mono">KARUNA_REMOTE_PORT=8443 KARUNA_REMOTE_HOST=0.0.0.0</span> (and <span className="mono">KARUNA_PUBLIC_HOSTS=&lt;its LAN or VPN name&gt;</span>) to let other machines run boxes here.</p>
+        )}
+      </div>
     </div>
   );
 }

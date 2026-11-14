@@ -11,6 +11,8 @@ import { CircleChainWriter, publicClient } from "./chain.ts";
 import { SandboxCA } from "./ca.ts";
 import { SecretStore } from "./secrets.ts";
 import { EgressProxy } from "./proxy.ts";
+import { remoteListener } from "./remote.ts";
+import { hostname } from "node:os";
 
 const here = dirname(fileURLToPath(import.meta.url));
 loadEnv({ path: resolve(here, "../../.env"), quiet: true });
@@ -38,16 +40,28 @@ const gk = new Gatekeeper({
   secrets,
   // Agents run in Karuna sandboxes; an agent token used anywhere else is refused unless voted.
   requireSandbox: (process.env.KARUNA_REQUIRE_SANDBOX ?? "1") !== "0",
+  requireIsolation: process.env.KARUNA_REQUIRE_ISOLATION === "gvisor" ? "gvisor" : "docker",
 });
 const ca = new SandboxCA(dataDir);
 const egress = new EgressProxy(gk, ca, { agentApiPort: agentPort, holdMs: Number(process.env.KARUNA_HOLD_SECONDS ?? 120) * 1000 });
 const consoleToken = store.loadOrCreateConsoleToken();
 
-agentApi(gk, { proxy: egress, caPem: ca.certPem, secrets }).listen(agentPort, agentHost, () => console.log(`gatekeeper · agent API    http://${agentHost}:${agentPort}`));
-consoleApi(gk, wallet, consoleToken, secrets).listen(consolePort, "127.0.0.1", () =>
+const agentServer = agentApi(gk, { proxy: egress, caPem: ca.certPem, secrets });
+agentServer.listen(agentPort, agentHost, () => console.log(`gatekeeper · agent API    http://${agentHost}:${agentPort}`));
+consoleApi(gk, wallet, consoleToken, secrets, ca.certPem).listen(consolePort, "127.0.0.1", () =>
   console.log(`gatekeeper · console API  http://127.0.0.1:${consolePort}  (data: ${dataDir})`),
 );
 console.log(`gatekeeper · sandbox      egress proxy per run on 127.0.0.1 · sandbox ${gk.requireSandbox ? "required" : "optional"} · ${secrets.list().length} key(s)`);
+// S6: boxes on other machines. Off unless a port is set; bind 0.0.0.0 (or a LAN/VPN IP) to expose it.
+const remotePort = Number(process.env.KARUNA_REMOTE_PORT ?? 0);
+if (remotePort) {
+  const remoteHost = process.env.KARUNA_REMOTE_HOST ?? "127.0.0.1";
+  const names = ["localhost", "127.0.0.1", "host.docker.internal", hostname(), ...(process.env.KARUNA_PUBLIC_HOSTS ?? "").split(",").map((x) => x.trim()).filter(Boolean)];
+  gk.remote = { port: remotePort, host: remoteHost, names };
+  remoteListener({ gk, ca, names, proxy: egress, agentApi: agentServer }).listen(remotePort, remoteHost, () =>
+    console.log(`gatekeeper · remote port  https://${remoteHost}:${remotePort} for karuna run on other machines (names: ${names.join(", ")})`),
+  );
+}
 const v = gk.log.verify();
 console.log(`gatekeeper · signed log   ${gk.log.length} entries · ${v.ok ? "verified" : `TAMPERED at ${v.brokenAt}`}`);
 await gk.start();

@@ -647,3 +647,7 @@ select {
 .check input { width: 16px; height: 16px; accent-color: var(--ink); }
 .check small { color: var(--n500); }
 @media (max-width: 700px) { .key-tr, .run-tr { grid-template-columns: minmax(0, 1fr) auto; } .key-tr > .intro-mark, .run-tr > .live-dot { display: none; } .key-tr .pills { grid-column: 1 / -1; } }
+
+.run-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; font-weight: 400; }
+.run-tags .tag { height: 20px; font-size: 11px; }
+.run-tr { grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr) auto; }

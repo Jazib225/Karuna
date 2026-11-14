@@ -182,9 +182,10 @@ export const previewSnapshot: Snapshot = {
   log: { length: 46, head: hash(46), verified: true, brokenAt: null, publicKeyPem: "" },
   sandbox: {
     requireSandbox: true,
+    remote: { port: 8443, host: "0.0.0.0", names: ["localhost", "127.0.0.1", "bakery-mini"] },
     sessions: [
-      { id: "ee02b031", agentId: "payables", agentName: "Bills agent", startedAt: iso(1800), lastSeen: iso(2), host: "bakery-mini", requests: 214, denied: 3, lastRequest: "POST https://api.openai.com/v1/chat/completions", stopRequested: false },
-      { id: "9c1d77aa", agentId: "supplies", agentName: "Supplies agent", startedAt: iso(420), lastSeen: iso(4), host: "bakery-mini", requests: 37, denied: 0, lastRequest: "GET https://api.grainfeed.dev/v2/flour", stopRequested: false },
+      { id: "ee02b031", agentId: "payables", agentName: "Bills agent", startedAt: iso(1800), lastSeen: iso(2), host: "bakery-mini", isolation: "gvisor", desktop: false, remote: false, viewer: null, requests: 214, denied: 3, lastRequest: "POST https://api.openai.com/v1/chat/completions", stopRequested: false },
+      { id: "9c1d77aa", agentId: "supplies", agentName: "Supplies agent", startedAt: iso(420), lastSeen: iso(4), host: "sam-laptop", isolation: "docker", desktop: true, remote: true, viewer: "http://127.0.0.1:63873/vnc.html?autoconnect=1&resize=scale", requests: 37, denied: 0, lastRequest: "GET https://api.grainfeed.dev/v2/flour", stopRequested: false },
     ],
     keys: [
       { name: "openai", envVar: "OPENAI_API_KEY", placeholder: "karuna_key_openai", boundTo: ["api.openai.com"], createdAt: iso(86400 * 3) },

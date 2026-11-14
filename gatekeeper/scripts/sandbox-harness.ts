@@ -15,6 +15,7 @@ import { agentApi } from "../src/server.ts";
 import { SandboxCA } from "../src/ca.ts";
 import { SecretStore } from "../src/secrets.ts";
 import { EgressProxy } from "../src/proxy.ts";
+import { remoteListener } from "../src/remote.ts";
 import type { WalletBackend } from "../src/wallet.ts";
 import type { OnchainPolicy } from "../src/chain.ts";
 
@@ -65,7 +66,10 @@ const t2 = gk.rotateAgentToken("tester2").token;
 
 const ca = new SandboxCA(dataDir);
 const egress = new EgressProxy(gk, ca, { agentApiPort: AGENT_PORT, holdMs: Number(process.env.HARNESS_HOLD_MS ?? 20_000) });
-agentApi(gk, { proxy: egress, caPem: ca.certPem, secrets }).listen(AGENT_PORT, "127.0.0.1");
+const agentServer = agentApi(gk, { proxy: egress, caPem: ca.certPem, secrets });
+agentServer.listen(AGENT_PORT, "127.0.0.1");
+// S6: the remote port, as a teammate's machine would reach it (https, org CA only).
+remoteListener({ gk, ca, names: ["localhost", "127.0.0.1", "host.docker.internal"], proxy: egress, agentApi: agentServer }).listen(9443, "127.0.0.1");
 
 // Test-only control port: approve a held request as the test member; read state.
 createServer(async (req, res) => {
@@ -94,4 +98,4 @@ createServer(async (req, res) => {
   res.writeHead(404).end();
 }).listen(9799, "127.0.0.1");
 
-console.log(JSON.stringify({ dataDir, agentApi: `http://127.0.0.1:${AGENT_PORT}`, tokens: { tester: t1, tester2: t2 } }));
+console.log(JSON.stringify({ caFile: join(dataDir, "sandbox-ca", "ca.cert.pem"), remote: "https://127.0.0.1:9443", dataDir, agentApi: `http://127.0.0.1:${AGENT_PORT}`, tokens: { tester: t1, tester2: t2 } }));

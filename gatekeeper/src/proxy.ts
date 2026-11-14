@@ -76,6 +76,14 @@ export class EgressProxy {
     return (server.address() as AddressInfo).port;
   }
 
+  /** A remote relay's tunnel for this run: serve it exactly like a local connection. */
+  attach(token: string, socket: Duplex): boolean {
+    const server = this.servers.get(token);
+    if (!server || !this.gk.session(token)) return false;
+    server.emit("connection", socket);
+    return true;
+  }
+
   close(token: string) {
     const s = this.servers.get(token);
     if (!s) return;

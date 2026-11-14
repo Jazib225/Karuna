@@ -23,6 +23,23 @@ describe("karuna run arguments", () => {
   });
 });
 
+describe("remote, isolation and desktop options", () => {
+  const base = ["--agent", "bot", "./bot", "--", "python", "main.py"];
+  const env = { KARUNA_AGENT_TOKEN: "kag_x" };
+  it("defaults: local Gatekeeper, auto isolation, no desktop", () => {
+    expect(parseArgs(base, env)).toMatchObject({ isolation: "auto", desktop: false, gatekeeper: "http://127.0.0.1:8787" });
+  });
+  it("a Gatekeeper on another machine needs https and the org CA", () => {
+    expect(() => parseArgs(["--gatekeeper", "http://gk.lan:8787", ...base], env)).toThrow(/https/);
+    expect(() => parseArgs(["--gatekeeper", "https://gk.lan:8443", ...base], env)).toThrow(/--ca/);
+    expect(parseArgs(["--gatekeeper", "https://gk.lan:8443", "--ca", "ca.pem", ...base], env)).toMatchObject({ ca: "ca.pem" });
+  });
+  it("--desktop and --isolation", () => {
+    expect(parseArgs(["--desktop", "--isolation", "gvisor", ...base], env)).toMatchObject({ desktop: true, isolation: "gvisor" });
+    expect(() => parseArgs(["--isolation", "vm", ...base], env)).toThrow();
+  });
+});
+
 describe("secret scan before boxing", () => {
   const dir = () => mkdtempSync(join(tmpdir(), "karuna-scan-"));
   it("finds a real key in source, ignores .env files and node_modules", () => {

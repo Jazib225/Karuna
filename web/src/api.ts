@@ -117,7 +117,8 @@ export interface Snapshot {
 /** Karuna sandboxes: live runs, the org's keys (names only, never values), and exemptions. */
 export interface SandboxView {
   requireSandbox: boolean;
-  sessions: { id: string; agentId: string; agentName: string; startedAt: string; lastSeen: string; host: string | null; requests: number; denied: number; lastRequest: string | null; stopRequested: boolean }[];
+  remote: { port: number; host: string; names: string[] } | null;
+  sessions: { id: string; agentId: string; agentName: string; startedAt: string; lastSeen: string; host: string | null; isolation: "gvisor" | "docker"; desktop: boolean; remote: boolean; viewer: string | null; requests: number; denied: number; lastRequest: string | null; stopRequested: boolean }[];
   keys: { name: string; envVar: string; placeholder: string; boundTo: string[]; createdAt: string; rotatedAt?: string }[];
   unsandboxed: string[];
 }

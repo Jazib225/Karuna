@@ -76,7 +76,7 @@ export function agentApi(gk: Gatekeeper, sandbox?: SandboxDeps): Server {
         if (who.session) return send(res, 403, { error: "Start runs from outside the sandbox" });
         if (!sandbox) return send(res, 501, { error: "This Gatekeeper has no sandbox support" });
         const body = await readBody(req);
-        const s = gk.startSession(agentId, body.host);
+        const s = gk.startSession(agentId, { host: body.host, isolation: body.isolation, desktop: body.desktop, remote: body.remote });
         const proxyPort = await sandbox.proxy.open(s.token);
         return send(res, 200, {
           session: s.token, id: s.id, agentId, proxyPort, caPem: sandbox.caPem,
@@ -86,7 +86,8 @@ export function agentApi(gk: Gatekeeper, sandbox?: SandboxDeps): Server {
       }
       if (req.method === "POST" && url.pathname === "/v1/sessions/heartbeat") {
         if (!who.session) return send(res, 400, { error: "Heartbeat with the run's session token" });
-        return send(res, 200, gk.heartbeat(token));
+        const hb = await readBody(req);
+        return send(res, 200, gk.heartbeat(token, { viewer: hb.viewer }));
       }
       if (req.method === "DELETE" && url.pathname === "/v1/sessions") {
         if (who.session) gk.endSession(token, "runner exited");
@@ -123,7 +124,7 @@ export function agentApi(gk: Gatekeeper, sandbox?: SandboxDeps): Server {
 
 // ---------------------------------------------------------------- console API
 
-export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: string, secrets?: SecretStore): Server {
+export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: string, secrets?: SecretStore, caPem?: string): Server {
   let walletCache: { at: number; value: unknown } | null = null;
 
   return createServer(async (req, res) => {
@@ -147,6 +148,11 @@ export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: 
         return;
       }
       if (method === "GET" && path === "/state") return send(res, 200, gk.snapshot());
+      if (method === "GET" && path === "/sandbox/ca") {
+        // Public certificate (not a secret): remote machines pin it to trust only this Gatekeeper.
+        res.writeHead(200, { "content-type": "application/x-pem-file", "content-disposition": "attachment; filename=karuna-ca.pem" });
+        return void res.end(caPem ?? "");
+      }
       if (method === "GET" && path === "/policy") return send(res, 200, defaultRules.map((r) => ({ id: r.id, description: r.description, outcome: r.outcome })));
       if (method === "GET" && path === "/log") {
         const limit = Math.min(1000, Number(url.searchParams.get("limit") ?? 200) || 200);

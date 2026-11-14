@@ -16,6 +16,9 @@ export interface RunArgs {
   command: string[];
   memory: string;
   cpus: string;
+  ca?: string; // org sandbox CA (PEM file) for a remote https:// Gatekeeper
+  isolation: "auto" | "gvisor" | "docker";
+  desktop: boolean;
 }
 
 export const USAGE = `karuna run --agent <id> [options] [DIR] -- <command…>
@@ -29,11 +32,17 @@ the folders you mount, no real keys (placeholders the proxy swaps), wiped when i
   --image <image>       run this image instead of building DIR
   --mount <host[:container][:rw]>
                         share a host folder (read-only unless :rw, which needs a Dharma "mount" rule)
+  --desktop             give the box a virtual screen + browser (computer-use agents); you can watch it
+  --isolation <auto|gvisor|docker>
+                        gVisor (runsc) when Docker has it; auto falls back to hardened Docker
+  --ca <file>           the org's sandbox CA, for a Gatekeeper on another machine (https://)
   --memory <2g>  --cpus <2>
 
 Examples
   karuna run --agent invoice-bot ./invoice-bot -- python main.py
-  karuna run --agent supplies --mount ./reports:/data ./agents -- npx tsx examples/supplies-agent.ts`;
+  karuna run --agent supplies --mount ./reports:/data ./agents -- npx tsx examples/supplies-agent.ts
+  karuna run --agent browser-bot --desktop ./bot -- python main.py
+  karuna run --agent bot --gatekeeper https://gk.office.lan:8443 --ca karuna-ca.pem ./bot -- python main.py`;
 
 /** Split "C:\\data:/data:rw" style specs; Windows drive letters are part of the host path. */
 export function parseMount(spec: string): Mount {
@@ -62,7 +71,7 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
   const command = dash === -1 ? [] : argv.slice(dash + 1);
   const out: RunArgs = {
     agent: "", gatekeeper: env.KARUNA_GATEKEEPER_URL ?? "http://127.0.0.1:8787", token: env.KARUNA_AGENT_TOKEN ?? "",
-    mounts: [], command, memory: "2g", cpus: "2",
+    mounts: [], command, memory: "2g", cpus: "2", ca: env.KARUNA_CA_FILE, isolation: "auto", desktop: false,
   };
   for (let i = 0; i < opts.length; i++) {
     const a = opts[i];
@@ -78,6 +87,13 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
     else if (a === "--mount") out.mounts.push(parseMount(next()));
     else if (a === "--memory") out.memory = next();
     else if (a === "--cpus") out.cpus = next();
+    else if (a === "--ca") out.ca = next();
+    else if (a === "--desktop") out.desktop = true;
+    else if (a === "--isolation") {
+      const v = next();
+      if (v !== "auto" && v !== "gvisor" && v !== "docker") throw new Error("--isolation: auto, gvisor or docker");
+      out.isolation = v;
+    }
     else if (a.startsWith("--")) throw new Error(`Unknown option ${a}`);
     else if (!out.dir) out.dir = a;
     else throw new Error(`Unexpected argument ${a} (put the agent's command after --)`);
@@ -87,5 +103,9 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
   if (!out.token) throw new Error("No agent token: pass --token or set KARUNA_AGENT_TOKEN");
   if (!out.image && !out.dir) throw new Error("Give the agent's folder (DIR) or --image");
   if (!out.command.length && !out.image) throw new Error("Give the agent's start command after --");
+  const gk = new URL(out.gatekeeper);
+  const local = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(gk.hostname);
+  if (gk.protocol === "http:" && !local) throw new Error("A Gatekeeper on another machine must be reached over https:// (its remote port)");
+  if (gk.protocol === "https:" && !out.ca) throw new Error("--ca <karuna-ca.pem> is required for an https:// Gatekeeper (download it from the console)");
   return out;
 }

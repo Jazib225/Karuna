@@ -147,6 +147,16 @@ no host files unless `--mount`ed (read-only by default), and no real keys: add k
 to. An x402 seller's 402 becomes a Karuna payment. The panic button stops every box. See
 [docs/SANDBOX_PLAN.md](docs/SANDBOX_PLAN.md).
 
+- **Another machine** (teammate laptop, cloud VM): start the Gatekeeper with
+  `KARUNA_REMOTE_PORT=8443 KARUNA_REMOTE_HOST=0.0.0.0 KARUNA_PUBLIC_HOSTS=<its name>`, download
+  `karuna-ca.pem` from the console (Agents → Run on another machine), then on that machine:
+  `pnpm karuna run --agent <id> --gatekeeper https://<name>:8443 --ca karuna-ca.pem ./agent -- …`.
+- **Isolation:** `--isolation auto` (default) uses gVisor when Docker has the `runsc` runtime, else
+  hardened Docker. `KARUNA_REQUIRE_ISOLATION=gvisor` makes the Gatekeeper refuse anything weaker.
+- **Computer-use agents:** `--desktop` gives the box a virtual screen, Chromium (`$KARUNA_BROWSER`),
+  xdotool and ImageMagick. The runner prints a live view URL (this machine only); the console's
+  Watch button opens it. The browser's traffic goes through the same proxy and rules.
+
 For x402 services the wallet also needs a Gateway balance:
 `circle gateway deposit --amount 1 --address 0x… --chain ARC-TESTNET --method direct`.
 

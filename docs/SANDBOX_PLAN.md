@@ -1,9 +1,12 @@
 # Karuna Sandbox: implementation plan
 
-> **Status (Nov 2026):** S1–S5 built and verified end to end in real Docker boxes
-> (`gatekeeper/scripts/sandbox-harness.ts`). S6 (remote runner) and the later items are not built.
-> Code: `gatekeeper/src/{proxy,ca,secrets}.ts`, sandbox section of `gatekeeper.ts`, `runner/`,
-> Keys page + live runs in `web/`.
+> **Status (Nov 2026):** S1–S6 built and verified end to end in real Docker boxes
+> (`gatekeeper/scripts/sandbox-harness.ts`), plus gVisor support and desktop boxes for computer-use
+> agents. Code: `gatekeeper/src/{proxy,ca,secrets,remote}.ts`, sandbox section of `gatekeeper.ts`,
+> `runner/`, Keys page + live runs + remote panel in `web/`. Not built: microVM isolation.
+>
+> Naming: a **desktop box** (`karuna run --desktop`) is a sandbox with a virtual screen for
+> computer-use agents. It is unrelated to the Karuna desktop app (the Windows shell + island).
 
 > Goal: **every agent runs in a Karuna sandbox, and the sandbox's only way out is Karuna.**
 > Money is already enforced (only the Gatekeeper holds the wallet). This plan enforces everything
@@ -171,7 +174,9 @@ Claude Agent SDK. Programs that ignore the proxy simply can't connect (safe fail
 | S4 | x402 through the proxy, `karuna.pay()` from inside, freeze → stop | Plain `fetch` to the test seller buys data (Gatekeeper pays, Arc tx in Activity); panic button stops running boxes within seconds |
 | S5 | Sandbox required by default, enforcement badges, `unsandboxed` rule | A `kag_` token used outside a box is refused; after a vote on `unsandboxed`, it works and the agent shows "Partially enforced" |
 | S6 | Remote runner: teammate laptop / cloud VM | `karuna run --gatekeeper https://…` on a second machine runs a boxed agent under the same Dharma rules (needs the Gatekeeper's agent API + proxy exposed over TLS with auth; today they bind to 127.0.0.1) |
-| Later | Desktop/computer-use agents (virtual display in the box); stronger isolation (gVisor or a microVM instead of plain Docker) | — |
+| S7 ✅ | gVisor: `--isolation auto|gvisor|docker`; org can require it (`KARUNA_REQUIRE_ISOLATION=gvisor`) | Without runsc, auto falls back to hardened Docker and says so; `--isolation gvisor` refuses to start |
+| S8 ✅ | Desktop boxes (`--desktop`): Xvfb + window manager + Chromium (proxy + org CA via NSS, background services off), xdotool/ImageMagick, noVNC viewer on 127.0.0.1 only | Chromium loads an allowed page through the proxy and is denied an unlisted one (signed log); screenshot + click work; raw sockets fail; viewer answers locally |
+| Later | microVM isolation (Firecracker / Kata) | — |
 
 ## Risks and open questions
 

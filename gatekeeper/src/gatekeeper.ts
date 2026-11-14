@@ -155,6 +155,7 @@ export interface GatekeeperDeps {
   swarmWindowMs?: number; // …within this window freezes everyone
   secrets?: SecretStore; // the org's API keys; only the egress proxy ever sees values
   requireSandbox?: boolean; // agent tokens only work from inside a Karuna sandbox (unless voted otherwise)
+  requireIsolation?: "gvisor" | "docker"; // refuse runs weaker than this
 }
 
 /** One `karuna run`: an agent in a box, reachable only through the egress proxy. */
@@ -165,6 +166,10 @@ export interface SandboxSession {
   startedAt: string;
   lastSeen: number;
   host: string | null; // machine the runner reported
+  isolation: "gvisor" | "docker"; // what the runner reported it used
+  desktop: boolean; // has a virtual screen (computer-use agent)
+  remote: boolean; // runner is on another machine (S6)
+  viewer: string | null; // desktop viewer URL, on the runner's machine only
   requests: number;
   denied: number;
   lastRequest: string | null;
@@ -220,6 +225,8 @@ export class Gatekeeper extends EventEmitter {
   private readonly now: () => Date;
   /** Live sandbox runs, by session token. In memory: a Gatekeeper restart ends every run. */
   private sessions = new Map<string, SandboxSession>();
+  /** The remote port for boxes on other machines, when enabled (S6). */
+  remote: { port: number; host: string; names: string[] } | null = null;
   /** One-time passes for HTTP requests a member approved: request hash -> expiry. */
   private grants = new Map<string, number>();
 
@@ -877,17 +884,22 @@ export class Gatekeeper extends EventEmitter {
   }
 
   /** `karuna run` asks for a box. The agent must be on Dharma and the org not frozen. */
-  startSession(agentId: string, host?: unknown): SandboxSession {
+  startSession(agentId: string, meta: { host?: unknown; isolation?: unknown; desktop?: unknown; remote?: unknown } = {}): SandboxSession {
     const pol = this.requireReady();
     if (!pol.agents.some((a) => a.id === agentId)) throw new GatekeeperError("This agent is not active in Dharma yet", 403);
     if (this.isFrozen()) throw new GatekeeperError("All agents are frozen", 423);
+    const isolation = meta.isolation === "gvisor" ? "gvisor" : "docker";
+    if (this.deps.requireIsolation === "gvisor" && isolation !== "gvisor") {
+      throw new GatekeeperError("This organization requires gVisor isolation. Install gVisor (runsc) for Docker on that machine.", 403);
+    }
     const s: SandboxSession = {
       id: randomUUID().slice(0, 8), token: `ksess_${randomBytes(24).toString("base64url")}`, agentId,
-      startedAt: this.now().toISOString(), lastSeen: Date.now(), host: typeof host === "string" ? host.slice(0, 80) : null,
+      startedAt: this.now().toISOString(), lastSeen: Date.now(), host: typeof meta.host === "string" ? meta.host.slice(0, 80) : null,
+      isolation, desktop: meta.desktop === true, remote: meta.remote === true, viewer: null,
       requests: 0, denied: 0, lastRequest: null, stopRequested: false,
     };
     this.sessions.set(s.token, s);
-    this.logEvent({ type: "sandbox-started", agent: agentId, session: s.id, host: s.host });
+    this.logEvent({ type: "sandbox-started", agent: agentId, session: s.id, host: s.host, isolation, desktop: s.desktop, remote: s.remote });
     this.save();
     return s;
   }
@@ -905,10 +917,11 @@ export class Gatekeeper extends EventEmitter {
   }
 
   /** Runner heartbeat. Tells the runner to stop the box when frozen, removed, or stopped. */
-  heartbeat(token: string): { stop: boolean; reason?: string } {
+  heartbeat(token: string, info: { viewer?: unknown } = {}): { stop: boolean; reason?: string } {
     const s = this.session(token);
     if (!s) return { stop: true, reason: "session ended" };
     s.lastSeen = Date.now();
+    if (typeof info.viewer === "string" && /^http:\/\/127\.0\.0\.1:\d+\//.test(info.viewer)) s.viewer = info.viewer;
     if (this.isFrozen()) return { stop: true, reason: "all agents are frozen" };
     if (!this.policy?.agents.some((a) => a.id === s.agentId)) return { stop: true, reason: "agent removed from Dharma" };
     if (s.stopRequested) return { stop: true, reason: "stopped from the console" };
@@ -966,6 +979,12 @@ export class Gatekeeper extends EventEmitter {
       s.denied++;
       this.logDecision(request, { outcome: "deny", ruleId, reason });
       if (!record) return { verdict: "deny" };
+      // Every denial is in the signed log; the console gets one card per agent + host + rule per 10
+      // minutes, so a retry loop (or a browser's background pings) can't bury real approvals.
+      const since = Date.now() - 10 * 60_000;
+      const repeat = [...this.state.proposals].reverse().find((p) => p.agentId === agentId && p.status === "denied" && p.request.tool === "http"
+        && p.decision.ruleId === ruleId && Date.parse(p.createdAt) > since && (() => { try { return new URL(p.request.url ?? "").host === host; } catch { return false; } })());
+      if (repeat) return { verdict: "deny", proposalId: repeat.id };
       this.state.proposals.push({ ...base, request, decision: { outcome: "deny", ruleId, reason }, facts: [{ label: "Request", value: `${method} ${r.url}`.slice(0, 300) }], status: "denied" });
       this.save();
       return { verdict: "deny", proposalId: base.id };
@@ -1103,6 +1122,7 @@ export class Gatekeeper extends EventEmitter {
     const L = this.labels();
     return {
       requireSandbox: this.requireSandbox,
+      remote: this.remote,
       sessions: [...this.sessions.values()]
         .filter((s) => Date.now() - s.lastSeen <= SESSION_IDLE_MS)
         .map(({ token: _t, ...s }) => ({ ...s, agentName: L.agent(s.agentId) ?? s.agentId, lastSeen: new Date(s.lastSeen).toISOString() })),
