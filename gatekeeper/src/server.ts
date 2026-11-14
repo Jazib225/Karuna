@@ -67,6 +67,12 @@ export function agentApi(gk: Gatekeeper): Server {
         if (!action || typeof action !== "object") return send(res, 400, { error: "action is required" });
         return send(res, 200, await gk.propose(agentId, action, body.reason as string | undefined));
       }
+      if (req.method === "GET" && url.pathname === "/v1/inbox") return send(res, 200, { messages: gk.agentInbox(agentId) });
+      const r = url.pathname.match(/^\/v1\/inbox\/([\w-]+)\/report$/);
+      if (req.method === "POST" && r) {
+        const body = await readBody(req);
+        return send(res, 200, gk.reportMessage(agentId, r[1], body.reason as string | undefined));
+      }
       const m = url.pathname.match(/^\/v1\/proposals\/([\w-]+)$/);
       if (req.method === "GET" && m) {
         const v = gk.agentView(agentId, m[1]);
@@ -136,6 +142,8 @@ export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: 
         await gk.sync(true).catch(() => undefined);
         return send(res, 200, { ok: true });
       }
+      if (method === "POST" && path === "/inbox") return send(res, 200, gk.postMessage(body as never));
+      if (method === "POST" && path === "/shield/test") return send(res, 200, gk.runTest(body as never));
       if (method === "POST" && path === "/setup") return send(res, 200, await gk.setup(body as never));
       if (method === "PATCH" && path === "/settings") return send(res, 200, (gk.renameOrg(body.orgName), { ok: true }));
       if (method === "POST" && path === "/dharma/action") return send(res, 200, await gk.submitAction(body as unknown as SignedAction));

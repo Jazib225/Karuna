@@ -7,12 +7,12 @@ import { Kind, SignerUnavailable, decidePayment, loadSigner, submitChange } from
 import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
 import { keccak256, stringToHex } from "viem";
 
-type View = "overview" | "approvals" | "dharma" | "agents" | "payees" | "policy" | "activity" | "team";
+type View = "overview" | "approvals" | "dharma" | "shield" | "agents" | "payees" | "policy" | "activity" | "team";
 const TITLES: Record<View, string> = {
-  overview: "Overview", approvals: "Approvals", dharma: "Dharma", agents: "Agents", payees: "Payees & services",
+  overview: "Overview", approvals: "Approvals", dharma: "Dharma", shield: "Auto-Shield", agents: "Agents", payees: "Payees & services",
   policy: "Policy", activity: "Signed log", team: "Team",
 };
-const ICON: Record<View, string> = { overview: "▦", approvals: "◷", dharma: "⚖", agents: "◉", payees: "⇄", policy: "☰", activity: "≋", team: "☺" };
+const ICON: Record<View, string> = { overview: "▦", approvals: "◷", dharma: "⚖", shield: "⛨", agents: "◉", payees: "⇄", policy: "☰", activity: "≋", team: "☺" };
 const AGENT_API = "http://127.0.0.1:8787";
 
 const usd = (n: number) => `$${n > 0 && n < 0.01 ? n.toFixed(4).replace(/0+$/, "") : n.toFixed(2)}`;
@@ -276,6 +276,25 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
     return () => clearInterval(t);
   }, []);
   const dismiss = (id: string) => setAlerts((prev) => prev.filter((a) => a.id !== id));
+  const seenShield = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    const ids = s.shield.alerts.map((a) => a.id);
+    if (!seenShield.current) {
+      seenShield.current = new Set(ids); // existing alerts on load: no pop-ups
+      return;
+    }
+    const fresh = s.shield.alerts.filter((a) => !seenShield.current!.has(a.id) && a.kind !== "shield-failed");
+    fresh.forEach((a) => seenShield.current!.add(a.id));
+    if (fresh.length) {
+      setAlerts((prev) => [
+        ...fresh.map((a): Alert => ({
+          id: a.id, title: a.title, body: a.body, source: "rpc", at: Date.now(), sticky: a.kind === "changed-bank-account",
+          tone: a.kind === "changed-bank-account" ? "bad" : a.kind === "shield-passed" ? "ok" : "warn", go: "shield", cta: "Auto-Shield",
+        })),
+        ...prev,
+      ].slice(0, 6));
+    }
+  }, [s.shield.alerts]);
 
   const pending = s.proposals.filter((p) => p.status === "pending");
   const ballots = pol.proposals.filter((g) => g.status === "open" && !g.voters.includes(myAddr));
@@ -294,6 +313,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
               {v === "approvals" && pending.length > 0 && <span className="count warn">{pending.length}</span>}
               {v === "dharma" && ballots.length > 0 && <span className="count warn">{ballots.length}</span>}
               {v === "team" && s.enrollments.length > 0 && <span className="count">{s.enrollments.length}</span>}
+              {v === "shield" && s.shield.autoRules.some((r) => r.active) && <span className="count warn">{s.shield.autoRules.filter((r) => r.active).length}</span>}
             </a>
           ))}
         </nav>
@@ -337,7 +357,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
             <div key={a.id} className={`alert ${a.tone}`}>
               <div className="alert-top">
                 <b>{a.title}</b>
-                <span className="via">{a.source === "quicknode" ? "via QuickNode" : "via Arc RPC"}</span>
+                <span className="via">{a.source === "quicknode" ? "via QuickNode" : a.source === "rpc" && a.go === "shield" ? "Gatekeeper" : "via Arc RPC"}</span>
                 <button className="alert-x" aria-label="Dismiss" onClick={() => dismiss(a.id)}>×</button>
               </div>
               <div className="alert-body">{a.body}</div>
@@ -356,6 +376,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
           {view === "overview" && <Overview ctx={ctx} wallet={wallet} go={setView} />}
           {view === "approvals" && <Approvals ctx={ctx} dharma={dharma} />}
           {view === "dharma" && <Dharma ctx={ctx} />}
+          {view === "shield" && <Shield ctx={ctx} />}
           {view === "agents" && <Agents ctx={ctx} />}
           {view === "payees" && <Payees ctx={ctx} />}
           {view === "policy" && <Policy ctx={ctx} />}
@@ -697,6 +718,10 @@ function Agents({ ctx }: { ctx: Ctx }) {
                       </form>
                     )}
                     <span className="tag">{a.hasToken ? "token issued" : "no token"}</span>
+                    {(() => {
+                      const n = s.shield.autoRules.filter((r) => r.active && r.agent === a.id).length;
+                      return n ? <span className="tag warn-tag">{n} auto-rule{n > 1 ? "s" : ""}</span> : null;
+                    })()}
                   </div>
                 )}
                 <div className="agent-actions">
@@ -1032,4 +1057,166 @@ function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string
 function LiveBadge({ mode }: { mode: LiveMode }) {
   const label = mode === "quicknode" ? "QuickNode live" : mode === "rpc" ? "Arc RPC (fallback)" : mode === "connecting" ? "connecting…" : "relay offline";
   return <span className={`live ${mode}`} title="Where live chain events come from"><span className="d" /> {label}</span>;
+}
+
+// ============================================================== Auto-Shield
+
+function Shield({ ctx }: { ctx: Ctx }) {
+  const { s, busy, run } = ctx;
+  const pol = s.policy!;
+  const active = pol.agents.filter((a) => a.active);
+  const categories = [...new Set(pol.payees.map((p) => p.category))];
+  const [test, setTest] = useState({ agentId: "", template: "", category: "" });
+  const [msg, setMsg] = useState({ agentId: "", from: "", subject: "", body: "" });
+  const agentName = (id: string | null) => (id ? pol.agents.find((a) => a.id === id)?.name ?? id : "every agent");
+  const tests = s.shield.tests;
+  const stats = (id: string) => {
+    const t = tests.filter((x) => x.agentId === id);
+    return { sent: t.length, passed: t.filter((x) => x.status === "passed").length, failed: t.filter((x) => x.status === "failed").length };
+  };
+
+  const runTest = (e: FormEvent) => {
+    e.preventDefault();
+    run(() => api("/shield/test", { agentId: test.agentId || active[0]?.id, template: test.template || undefined, category: test.category || undefined }),
+      "Test sent. It looks exactly like a real message to the agent.");
+  };
+  const send = (e: FormEvent) => {
+    e.preventDefault();
+    run(() => api("/inbox", { ...msg, agentId: msg.agentId || active[0]?.id }), "Message delivered to the agent's inbox").then((ok) => ok && setMsg({ ...msg, subject: "", body: "" }));
+  };
+
+  return (
+    <div className="stack">
+      <div className="card rise">
+        <div className="pad stack">
+          <p>Karuna slips fake scam messages into your agents' inboxes. They look exactly like real mail. If an agent acts on one, the payment is blocked (test money never moves) and Dharma gets a <b>block rule for that agent and that category only</b>. Only a vote can lift it.</p>
+          <p className="muted small">Random tests: {s.shield.testsPerDay ? `about ${s.shield.testsPerDay} per agent per day` : "off"} · a test nobody acts on for {s.shield.windowMinutes} min counts as passed · Auto-Shield can only add blocks, never allow anything</p>
+        </div>
+      </div>
+
+      {active.length > 0 && (
+        <div className="grid-tiles">
+          {active.map((a, i) => {
+            const st2 = stats(a.id);
+            const rules = s.shield.autoRules.filter((r) => r.active && r.agent === a.id);
+            return (
+              <div className="tile rise" style={st(i)} key={a.id}>
+                <div className="k">{a.name}</div>
+                <div className="v small-v">{st2.passed} passed · <span className={st2.failed ? "bad-text" : ""}>{st2.failed} failed</span></div>
+                <div className="small muted">{st2.sent} tests · {rules.length} auto-rule{rules.length === 1 ? "" : "s"}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="card">
+        <div className="hd"><h2>Auto-blocks on Dharma</h2><span className="sub">{s.shield.autoRules.filter((r) => r.active).length} active</span></div>
+        {s.shield.autoRules.filter((r) => r.active).length === 0 ? (
+          <div className="empty">No agent is blocked. When one falls for a test, its block appears here.</div>
+        ) : (
+          <div className="table">
+            {s.shield.autoRules.filter((r) => r.active).map((r) => {
+              const removing = pol.proposals.some((g) => g.change?.op === "RemoveRule" && g.change.id === r.id && (g.status === "open" || g.status === "queued"));
+              const approvalId = r.id.replace(/^sh-/, "ap-");
+              const hasApproval = pol.rules.some((x) => x.id === approvalId && x.active);
+              return (
+                <div className="tr shield-tr" key={r.id}>
+                  <span className="b">{agentName(r.agent)} can't pay for <b>{r.category}</b></span>
+                  <span className="mono small muted">{r.id}</span>
+                  <span className="shield-actions">
+                    {removing ? (
+                      <span className="tag">restore proposed → vote on Dharma</span>
+                    ) : (
+                      <>
+                        <button className="btn btn-ghost btn-sm" disabled={busy || hasApproval}
+                          title="Adds a rule that sends this agent's payments in this category to a human (applies now), then proposes lifting the block"
+                          onClick={async () => {
+                            const ok = await ctx.change({ op: "AddRule", id: approvalId, outcome: "Approval", agent: r.agent ?? undefined, scope: `payment:${r.category}` });
+                            if (ok) await ctx.change({ op: "RemoveRule", id: r.id });
+                          }}>
+                          Restore with approval required
+                        </button>
+                        <button className="btn btn-dark btn-sm" disabled={busy} onClick={() => ctx.change({ op: "RemoveRule", id: r.id })}>Propose restore</button>
+                      </>
+                    )}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <div className="log-foot"><span>lifting a block is a loosening: {pol.required} vote{pol.required > 1 ? "s" : ""} + {pol.timelock}s</span><span>tightening it further applies at once</span></div>
+      </div>
+
+      <div className="grid2">
+        <form className="card" onSubmit={runTest}>
+          <div className="hd"><h2>Run a scam test now</h2></div>
+          <div className="pad stack">
+            <label className="field"><span>Agent</span>
+              <select value={test.agentId} onChange={(e) => setTest({ ...test, agentId: e.target.value })}>
+                {active.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+            </label>
+            <label className="field"><span>Scam</span>
+              <select value={test.template} onChange={(e) => setTest({ ...test, template: e.target.value })}>
+                <option value="">Random</option>
+                {Object.entries(s.shield.templates).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+              </select>
+            </label>
+            <label className="field"><span>Category it pretends to be</span>
+              <input list="shield-cats" value={test.category} onChange={(e) => setTest({ ...test, category: e.target.value })} placeholder={categories[0] ?? "supplies"} />
+              <datalist id="shield-cats">{categories.map((c) => <option key={c} value={c} />)}</datalist>
+            </label>
+            <button className="btn btn-dark" disabled={busy || !active.length}>Send test</button>
+          </div>
+        </form>
+
+        <form className="card" onSubmit={send}>
+          <div className="hd"><h2>Send a real message to an agent</h2></div>
+          <div className="pad stack">
+            <div className="row-form">
+              <select value={msg.agentId} onChange={(e) => setMsg({ ...msg, agentId: e.target.value })}>
+                {active.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+              <input required value={msg.from} onChange={(e) => setMsg({ ...msg, from: e.target.value })} placeholder="From (e.g. a supplier)" />
+            </div>
+            <input className="plain-input" required value={msg.subject} onChange={(e) => setMsg({ ...msg, subject: e.target.value })} placeholder="Subject" />
+            <textarea required rows={3} value={msg.body} onChange={(e) => setMsg({ ...msg, body: e.target.value })} placeholder="Invoice text, payment details…" />
+            <button className="btn btn-ghost" disabled={busy || !active.length}>Deliver</button>
+          </div>
+        </form>
+      </div>
+
+      <div className="card">
+        <div className="hd"><h2>Tests</h2><span className="sub">only humans can see which messages were tests</span></div>
+        {tests.length === 0 ? <div className="empty">No tests yet.</div> : (
+          <div className="resolved">
+            {tests.slice(0, 20).map((t) => (
+              <div className="res" key={t.id}>
+                <span className={`chip ${t.status === "failed" ? "deny" : t.status === "passed" ? "allow" : "approval"}`}>{t.status}</span>
+                <span className="small">{agentName(t.agentId)} · {s.shield.templates[t.template] ?? t.template} · {t.category}</span>
+                <span className="muted small">{t.resolution ? `${t.resolution} · ` : ""}{ago(t.sentAt)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <div className="hd"><h2>Inboxes</h2><span className="sub">what agents received</span></div>
+        {s.inbox.length === 0 ? <div className="empty">No messages yet.</div> : (
+          <div className="resolved">
+            {s.inbox.slice(0, 20).map((m) => (
+              <div className="res" key={m.id}>
+                <span className={`chip ${m.test ? (m.test.status === "failed" ? "deny" : m.test.status === "passed" ? "allow" : "approval") : ""}`}>{m.test ? "test" : "real"}</span>
+                <span className="small"><b>{m.subject}</b> <span className="muted">from {m.from} → {agentName(m.agentId)}</span></span>
+                <span className="muted small">{m.reportedAt ? "flagged by agent · " : ""}{ago(m.receivedAt)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }

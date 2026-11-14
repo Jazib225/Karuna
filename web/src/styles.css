@@ -338,3 +338,13 @@ button { font-family: inherit; }
 .live.quicknode .d { background: var(--allow); box-shadow: 0 0 0 3px var(--allow-bg); }
 .live.rpc .d { background: var(--approve); }
 .live.offline .d, .live.none .d { background: var(--deny); }
+
+/* ============ Auto-Shield (Phase 5) ============ */
+.grid-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: .9rem; }
+.small-v { font-size: 1.05rem !important; }
+.bad-text { color: var(--deny); }
+.warn-tag { color: var(--approve); border-color: #c07f1a55; }
+.shield-tr { grid-template-columns: 1fr auto auto; }
+.shield-actions { display: flex; gap: .5rem; flex-wrap: wrap; justify-content: flex-end; }
+textarea, .plain-input, .row-form select { font: inherit; font-size: .9rem; border: 1px solid var(--line-strong); border-radius: var(--radius-lg); padding: .55rem .7rem; width: 100%; background: #fff; }
+textarea { resize: vertical; }

@@ -74,9 +74,26 @@ export interface Snapshot {
   };
   frozen: null | false | { by: string | null; at: string; confirmed: boolean };
   enrollments: { address: string; name: string; requestedAt: string }[];
+  shield: {
+    tests: ShieldTest[];
+    alerts: ShieldAlert[];
+    autoRules: { id: string; active: boolean; outcome: Outcome; agent: string | null; agentName: string | null; category: string; failedTest: string | null }[];
+    templates: Record<string, string>;
+    testsPerDay: number;
+    windowMinutes: number;
+  };
+  inbox: (InboxMessage & { test: { id: string; status: ShieldTest["status"]; template: string } | null })[];
   proposals: Proposal[];
   log: { length: number; head: string; verified: boolean; brokenAt: number | null; publicKeyPem: string };
 }
+
+export interface InboxMessage { id: string; agentId: string; from: string; subject: string; body: string; receivedAt: string; reportedAt?: string; reportReason?: string }
+export interface ShieldTest {
+  id: string; messageId: string; agentId: string; template: string; category: string;
+  bait: { address: string; ref: string; amountUsd: number };
+  sentAt: string; status: "pending" | "passed" | "failed"; resolvedAt?: string; resolution?: string; proposalIds: string[]; ruleId?: string;
+}
+export interface ShieldAlert { id: string; kind: "shield-failed" | "shield-passed" | "changed-bank-account" | "agent-reported"; agentId: string; title: string; body: string; at: string }
 
 export interface LogEntry {
   seq: number;

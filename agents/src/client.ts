@@ -12,9 +12,18 @@ export interface ProposalResult {
 }
 
 export type Action =
-  | { type: "x402"; url: string; method?: string; body?: unknown; maxUsd?: number }
-  | { type: "transfer"; to: string; amountUsd: number }
+  | { type: "x402"; url: string; method?: string; body?: unknown; maxUsd?: number; sourceMessageId?: string }
+  | { type: "transfer"; to: string; amountUsd: number; payeeName?: string; sourceMessageId?: string }
   | { type: "action"; tool: "shell" | "file" | "http" | "message"; command?: string; path?: string; fileOp?: "read" | "write"; method?: string; url?: string; body?: string };
+
+/** A message in this agent's inbox (invoices, emails). */
+export interface Message {
+  id: string;
+  from: string;
+  subject: string;
+  body: string;
+  receivedAt: string;
+}
 
 export class KarunaAgent {
   constructor(private readonly opts: { gatekeeperUrl: string; token: string }) {
@@ -41,9 +50,30 @@ export class KarunaAgent {
     return this.propose({ type: "x402", url, method: opts.method, body: opts.body, maxUsd: opts.maxUsd }, opts.reason);
   }
 
-  /** Ask Karuna to send USDC to a recipient. */
-  pay(to: string, amountUsd: number, reason?: string) {
-    return this.propose({ type: "transfer", to, amountUsd }, reason);
+  /**
+   * Ask Karuna to send USDC to a recipient. Name the payee you believe this is, and cite the inbox
+   * message you're acting on: Karuna checks the name against the account on file.
+   */
+  pay(to: string, amountUsd: number, reason?: string, opts: { payeeName?: string; sourceMessageId?: string } = {}) {
+    return this.propose({ type: "transfer", to, amountUsd, ...opts }, reason);
+  }
+
+  /** This agent's inbox, newest first. */
+  async inbox(): Promise<Message[]> {
+    const r = await fetch(new URL("/v1/inbox", this.opts.gatekeeperUrl), { headers: { authorization: `Bearer ${this.opts.token}` } });
+    const body = (await r.json().catch(() => ({}))) as { messages?: Message[]; error?: string };
+    if (!r.ok) throw new Error(body.error ?? `Gatekeeper returned ${r.status}`);
+    return body.messages ?? [];
+  }
+
+  /** Flag a message as suspicious instead of acting on it. */
+  async report(messageId: string, reason?: string): Promise<void> {
+    const r = await fetch(new URL(`/v1/inbox/${encodeURIComponent(messageId)}/report`, this.opts.gatekeeperUrl), {
+      method: "POST",
+      headers: { authorization: `Bearer ${this.opts.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ reason }),
+    });
+    if (!r.ok) throw new Error(`Gatekeeper returned ${r.status}`);
   }
 
   status(id: string): Promise<ProposalResult> {
