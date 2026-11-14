@@ -4,8 +4,13 @@
 // Every write is simulated first, so a call that would revert costs nothing and its reason is
 // readable (e.g. "CoreBoundary").
 import { execFile } from "node:child_process";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ARGV_WRAPPER = fileURLToPath(new URL("./circle-argv.mjs", import.meta.url));
 import {
   BaseError, ContractFunctionRevertedError, createPublicClient, encodeDeployData, http,
   type Address, type Chain, type Hex, type PublicClient, type WalletClient,
@@ -69,12 +74,23 @@ const cliArg = (v: unknown) => (typeof v === "bigint" ? v.toString() : typeof v 
 export class CircleChainWriter implements ChainWriter {
   private readonly env: NodeJS.ProcessEnv;
   constructor(readonly from: Address, private readonly client: PublicClient, private readonly bin = process.env.CIRCLE_BIN ?? "circle") {
-    this.env = { ...process.env, CIRCLE_VERSION_CHECK: "off", PATH: `${join(homedir(), ".local", "bin")}:${process.env.PATH ?? ""}` };
+    this.env = { ...process.env, CIRCLE_VERSION_CHECK: "off", PATH: `${join(homedir(), ".local", "bin")}${delimiter}${process.env.PATH ?? ""}` };
   }
 
   private run(args: string[], timeoutMs = 180_000): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
-      execFile(this.bin, [...args, "-o", "json"], { env: this.env, timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
+      // A .js CIRCLE_BIN (e.g. the npm package entry on Windows) runs under node.
+      const js = /\.[cm]?js$/i.test(this.bin);
+      let cliArgs = [...args, "-o", "json"];
+      if (js && cliArgs.join(" ").length > 24_000) {
+        // Too long for a Windows command line (deploy bytecode): hand the args over in a temp file.
+        const file = join(tmpdir(), `circle-args-${randomUUID()}.json`);
+        writeFileSync(file, JSON.stringify(cliArgs));
+        cliArgs = [ARGV_WRAPPER, this.bin, file];
+      } else if (js) {
+        cliArgs = [this.bin, ...cliArgs];
+      }
+      execFile(js ? process.execPath : this.bin, cliArgs, { env: this.env, timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
         const text = stdout || stderr;
         const i = text.indexOf("{");
         let parsed: Record<string, unknown> | null = null;

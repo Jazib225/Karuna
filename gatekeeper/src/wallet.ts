@@ -4,7 +4,7 @@
 // to an agent: agents only reach the Gatekeeper's proposal API.
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { formatUnits, erc20Abi, createPublicClient, http, type Address } from "viem";
 import { arcTestnet } from "viem/chains";
 import { USDC_TOKEN, WALLET_CHAIN } from "./config.ts";
@@ -73,15 +73,17 @@ export class CircleCliWallet implements WalletBackend {
     this.env = {
       ...process.env,
       CIRCLE_VERSION_CHECK: "off",
-      PATH: `${join(homedir(), ".local", "bin")}:${process.env.PATH ?? ""}`,
+      PATH: `${join(homedir(), ".local", "bin")}${delimiter}${process.env.PATH ?? ""}`,
     };
   }
 
   private run(args: string[], timeoutMs = 120_000): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
+      // A .js CIRCLE_BIN (e.g. the npm package entry on Windows, where the circle.cmd shim can't be execFile'd) runs under node.
+      const js = /\.[cm]?js$/i.test(this.bin);
       execFile(
-        this.bin,
-        [...args, "-o", "json"],
+        js ? process.execPath : this.bin,
+        [...(js ? [this.bin] : []), ...args, "-o", "json"],
         { env: this.env, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 },
         (err, stdout, stderr) => {
           const parsed = extractJson(stdout) ?? extractJson(stderr);
