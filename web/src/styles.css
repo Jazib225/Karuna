@@ -362,3 +362,9 @@ textarea { resize: vertical; }
 .page-split { margin-top: 1.4rem; }
 .txlink { font-family: var(--font-mono); font-size: .74rem; white-space: nowrap; }
 .count.info { background: var(--n100, #eee); color: inherit; }
+
+/* grouped menu */
+.nav-group { display: flex; flex-direction: column; }
+.nav-group + .nav-group { margin-top: .9rem; }
+.nav-label { font-size: .68rem; text-transform: uppercase; letter-spacing: .06em; color: var(--n500); padding: 0 .75rem .3rem; }
+.nav-label span { text-transform: none; letter-spacing: 0; }

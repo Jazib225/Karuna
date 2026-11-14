@@ -7,17 +7,28 @@ import { Kind, SignerUnavailable, decidePayment, loadSigner, submitChange } from
 import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
 import { keccak256, stringToHex } from "viem";
 
-// Six pages. Older names (from pop-ups, links, saved state) still resolve to the page that holds them.
-type Page = "overview" | "approvals" | "agents" | "safety" | "rules" | "activity";
-type View = Page | "dharma" | "shield" | "swarm" | "payees" | "policy" | "team";
+// One job per page. The menu groups them: everyday work first, then the automatic safety systems,
+// settings, and a testing tool. Older names (pop-ups, saved state) still resolve.
+type Page = "overview" | "approvals" | "votes" | "agents" | "payees" | "activity" | "shield" | "swarm" | "rules" | "team" | "inbox";
+type View = Page | "dharma" | "safety" | "policy";
 const PAGE_OF: Record<View, Page> = {
-  overview: "overview", approvals: "approvals", agents: "agents", safety: "safety", rules: "rules", activity: "activity",
-  dharma: "approvals", shield: "safety", swarm: "safety", payees: "rules", policy: "rules", team: "rules",
+  overview: "overview", approvals: "approvals", votes: "votes", agents: "agents", payees: "payees", activity: "activity",
+  shield: "shield", swarm: "swarm", rules: "rules", team: "team", inbox: "inbox",
+  dharma: "votes", safety: "shield", policy: "rules",
 };
 const TITLES: Record<Page, string> = {
-  overview: "Home", approvals: "Approvals & votes", agents: "Agents", safety: "Safety", rules: "Rules & team", activity: "Activity",
+  overview: "Home", approvals: "Approvals", votes: "Votes", agents: "Agents", payees: "Payees", activity: "Activity",
+  shield: "Auto-Shield", swarm: "Swarm Stopper", rules: "Rules", team: "Team", inbox: "Test inbox",
 };
-const ICON: Record<Page, string> = { overview: "▦", approvals: "◷", agents: "◉", safety: "⛨", rules: "☰", activity: "≋" };
+const ICON: Record<Page, string> = {
+  overview: "▦", approvals: "◷", votes: "⚖", agents: "◉", payees: "⇄", activity: "≋", shield: "⛨", swarm: "⌬", rules: "☰", team: "☺", inbox: "✉",
+};
+const NAV: { label: string | null; hint?: string; pages: Page[] }[] = [
+  { label: null, pages: ["overview", "approvals", "votes", "agents", "payees", "activity"] },
+  { label: "Safety", hint: "runs on its own", pages: ["shield", "swarm"] },
+  { label: "Settings", pages: ["rules", "team"] },
+  { label: "Testing", hint: "demos only", pages: ["inbox"] },
+];
 /** Arc explorer link for a transaction hash (payments, Dharma writes, freezes, anchors). */
 const isTx = (v: unknown): v is string => typeof v === "string" && /^0x[0-9a-fA-F]{64}$/.test(v);
 function TxLink({ tx, s }: { tx: unknown; s: Snapshot }) {
@@ -305,7 +316,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
           return {
             id: a.id, title: a.title, body: a.body, source: "rpc", at: Date.now(), sticky: bad,
             tone: bad ? "bad" : a.kind === "shield-passed" ? "ok" : "warn",
-            go: swarm ? "swarm" : "shield", cta: "Safety",
+            go: swarm ? "swarm" : "shield", cta: swarm ? "Swarm Stopper" : "Auto-Shield",
           };
         }),
         ...prev,
@@ -324,14 +335,20 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
         <div className="brand"><span className="mark">⬡</span> Karuna</div>
         <div className="biz">{s.org.name}</div>
         <nav className="nav">
-          {(Object.keys(TITLES) as Page[]).map((v) => (
-            <a key={v} className={view === v ? "sel" : ""} onClick={() => setView(v)}>
-              <span className="ic">{ICON[v]}</span> {TITLES[v]}
-              {v === "approvals" && pending.length > 0 && <span className="count warn">{pending.length}</span>}
-              {v === "approvals" && ballots.length > 0 && <span className="count info">{ballots.length} vote{ballots.length > 1 ? "s" : ""}</span>}
-              {v === "rules" && s.enrollments.length > 0 && <span className="count">{s.enrollments.length}</span>}
-              {v === "safety" && (s.shield.autoRules.some((r) => r.active) || s.swarm.tainted.length > 0) && <span className="count warn">{s.shield.autoRules.filter((r) => r.active).length + s.swarm.tainted.length}</span>}
-            </a>
+          {NAV.map((g) => (
+            <div key={g.label ?? "main"} className="nav-group">
+              {g.label && <div className="nav-label">{g.label}{g.hint && <span> · {g.hint}</span>}</div>}
+              {g.pages.map((v) => (
+                <a key={v} className={view === v ? "sel" : ""} onClick={() => setView(v)}>
+                  <span className="ic">{ICON[v]}</span> {TITLES[v]}
+                  {v === "approvals" && pending.length > 0 && <span className="count warn">{pending.length}</span>}
+                  {v === "votes" && ballots.length > 0 && <span className="count warn">{ballots.length}</span>}
+                  {v === "team" && s.enrollments.length > 0 && <span className="count">{s.enrollments.length}</span>}
+                  {v === "shield" && s.shield.autoRules.some((r) => r.active) && <span className="count warn">{s.shield.autoRules.filter((r) => r.active).length}</span>}
+                  {v === "swarm" && s.swarm.tainted.length > 0 && <span className="count warn">{s.swarm.tainted.length}</span>}
+                </a>
+              ))}
+            </div>
           ))}
         </nav>
         <div className="member">
@@ -391,37 +408,15 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
             </div>
           )}
           {view === "overview" && <Overview ctx={ctx} wallet={wallet} go={setView} />}
-          {view === "approvals" && (
-            <div className="stack">
-              <Approvals ctx={ctx} dharma={dharma} />
-              <p className="section-title page-split">Votes on rule changes — anything that loosens the rules waits here for members' votes and a timelock</p>
-              <Dharma ctx={ctx} />
-            </div>
-          )}
-          {view === "agents" && (
-            <div className="stack">
-              <Agents ctx={ctx} />
-              <Shield ctx={ctx} part="messages" />
-            </div>
-          )}
-          {view === "safety" && (
-            <div className="stack">
-              <p className="section-title">Scam tests — Karuna sends fake scams; an agent that falls for one loses that category until you restore it</p>
-              <Shield ctx={ctx} part="tests" />
-              <p className="section-title page-split">Trap passwords &amp; swarm — fake keys as bait; sharing one, or agents ganging up, freezes every agent</p>
-              <Swarm ctx={ctx} />
-            </div>
-          )}
-          {view === "rules" && (
-            <div className="stack">
-              <p className="section-title">Who agents may pay</p>
-              <Payees ctx={ctx} />
-              <p className="section-title page-split">Rules on Dharma</p>
-              <Policy ctx={ctx} />
-              <p className="section-title page-split">Team</p>
-              <Team ctx={ctx} />
-            </div>
-          )}
+          {view === "approvals" && <Approvals ctx={ctx} dharma={dharma} />}
+          {view === "votes" && <Dharma ctx={ctx} />}
+          {view === "agents" && <Agents ctx={ctx} />}
+          {view === "payees" && <Payees ctx={ctx} />}
+          {view === "shield" && <Shield ctx={ctx} part="tests" />}
+          {view === "swarm" && <Swarm ctx={ctx} />}
+          {view === "rules" && <div className="stack"><Policy ctx={ctx} /><Learned ctx={ctx} /></div>}
+          {view === "team" && <Team ctx={ctx} />}
+          {view === "inbox" && <Shield ctx={ctx} part="messages" />}
           {view === "activity" && <Activity ctx={ctx} log={log} />}
         </div>
       </main>
@@ -531,7 +526,6 @@ function Approvals({ ctx, dharma }: { ctx: Ctx; dharma: Address }) {
       <p className="section-title">Facts first — Karuna verified everything in the grey box. Your approval is signed by your key and bound to the payload hash.</p>
       {pending.length === 0 && <div className="card"><div className="empty">Nothing is waiting for a human.</div></div>}
       {pending.map((p, i) => <div className="rise" style={st(i)} key={p.id}><ApprovalCard p={p} ctx={ctx} dharma={dharma} /></div>)}
-      <Learned ctx={ctx} />
       {resolved.length > 0 && (
         <div className="card">
           <div className="hd"><h2>Recently resolved</h2></div>
@@ -1063,7 +1057,7 @@ function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string
     }
     case "AgentFrozen":
       if (s.frozen && s.frozen.by === "Swarm Stopper")
-        return { ...base, tone: "bad", sticky: true, go: "swarm", cta: "Safety", title: "Swarm freeze recorded on Dharma", body: "Swarm Stopper froze every agent. Unfreezing needs a member vote." };
+        return { ...base, tone: "bad", sticky: true, go: "swarm", cta: "Swarm Stopper", title: "Swarm freeze recorded on Dharma", body: "Swarm Stopper froze every agent. Unfreezing needs a member vote." };
       return { ...base, tone: "bad", sticky: true, title: "All agents frozen", body: `${name(String(a.by))} hit the panic button. Recorded on Dharma.` };
     case "AgentsUnfrozen":
       return { ...base, tone: "ok", sticky: false, title: "Agents unfrozen", body: "The vote passed and the timelock ended." };
@@ -1171,8 +1165,7 @@ function Shield({ ctx, part }: { ctx: Ctx; part: "tests" | "messages" }) {
     <div className="stack">
       <div className="card rise">
         <div className="pad stack">
-          <p>Karuna slips fake scam messages into your agents' inboxes. They look exactly like real mail. If an agent acts on one, the payment is blocked (test money never moves) and Dharma gets a <b>block rule for that agent and that category only</b>. Only a vote can lift it.</p>
-          <p className="muted small">Random tests: {s.shield.testsPerDay ? `about ${s.shield.testsPerDay} per agent per day` : "off"} · a test nobody acts on for {s.shield.windowMinutes} min counts as passed · Auto-Shield can only add blocks, never allow anything</p>
+          <p>Karuna sends your agents fake scam messages{s.shield.testsPerDay ? ` (about ${s.shield.testsPerDay} per agent per day)` : ""}. An agent that falls for one can't pay that category until you restore it below. You only need this page when an agent is blocked.</p>
         </div>
       </div>
 
@@ -1287,30 +1280,14 @@ function Swarm({ ctx }: { ctx: Ctx }) {
   const [plantTo, setPlantTo] = useState<Record<string, string>>({});
   const [shown, setShown] = useState<string | null>(null);
   const agentName = (id: string) => pol.agents.find((a) => a.id === id)?.name ?? id;
-  const unfreezing = pol.proposals.some((g) => g.change?.op === "Unfreeze" && (g.status === "open" || g.status === "queued"));
 
   return (
     <div className="stack">
       <div className="card rise">
         <div className="pad stack">
-          <p>Agents never get real keys, so <b>any key an agent uses is bait</b>. Plant trap credentials in their sandboxes; touching one is denied and marks the agent. Agent-to-agent messages are proposals like any other, so there is no hidden channel.</p>
-          <p className="muted small">
-            Swarm Stopper freezes <b>every</b> agent when a credential shows up in an agent-to-agent message, when a marked agent messages another agent,
-            or when {sw.agentsToTrip} agents go after the same new target within {sw.windowSeconds}s. Freezing is instant and then recorded on Dharma; unfreezing needs a vote.
-          </p>
+          <p>Agents never get real passwords, so any password an agent uses is bait. If an agent shares one, or {sw.agentsToTrip} agents go after the same new target within {sw.windowSeconds}s, <b>every agent freezes</b>. Unfreeze from the top bar (needs a vote).</p>
         </div>
       </div>
-
-      {s.frozen && (
-        <div className="card rise">
-          <div className="pad row-between">
-            <span><b className="bad-text">All agents are frozen</b> <span className="muted small">by {s.frozen.by ?? "a member"} · {ago(s.frozen.at)} · {s.frozen.confirmed ? "recorded on Dharma" : "recording on Dharma…"}</span></span>
-            {unfreezing ? <span className="tag">unfreeze proposed → vote on Dharma</span> : (
-              <button className="btn btn-dark btn-sm" disabled={busy || !s.frozen.confirmed} onClick={() => ctx.change({ op: "Unfreeze" })}>Propose unfreeze</button>
-            )}
-          </div>
-        </div>
-      )}
 
       <div className="grid2">
         <div className="card">
