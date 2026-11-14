@@ -140,7 +140,8 @@ Karuna is a **permission layer for autonomous AI agents**.
 - Agent earns or holds its own allowance (rewards money-chasing, i.e., reward hacking)
 - Gemini prediction-market trading (adds risky capability unrelated to containment)
 - Precedents that auto-approve freely (replaced by the one-sided "Learns From Your Choices")
-- VRM avatar, ElevenLabs voices, Solana (old doc, outdated)
+- VRM avatar, Solana (old doc, outdated)
+- ElevenLabs is NOT dropped yet. Still undecided.
 
 ---
 
@@ -236,7 +237,8 @@ Karuna is a **permission layer for autonomous AI agents**.
 
 ⚠️ **Verify:** a third-party guide says Circle Agent Wallet spending policies apply to **mainnet only** (testnet rejects `limit set`). If true, the Dharma contract enforces limits on testnet. Ask at Circle office hours.
 
-**Dropped:** ElevenLabs (replaced by the Circle Agent Stack), Solana.
+**Dropped:** Solana.
+**Undecided:** ElevenLabs (not dropped yet).
 
 ---
 

@@ -198,15 +198,57 @@ export function useGatekeeper() {
   useEffect(() => {
     refresh();
     refreshWallet();
-    const es = new EventSource("/api/events");
-    es.addEventListener("change", () => {
-      refresh();
-      refreshWallet();
-    });
-    es.onerror = () => setTimeout(refresh, 1500);
+    // Live updates. A browser gives up on an EventSource for good when a reconnect gets an error
+    // response (e.g. the dev proxy's 502 while the Gatekeeper restarts), and the console would then
+    // freeze on stale state (a panic freeze that never shows). So: reopen it ourselves with backoff,
+    // re-read everything on every (re)connect, and poll slowly as a last resort.
+    let es: EventSource | null = null;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let backoff = 1000;
+    let closed = false;
+    let lastSeen = Date.now();
+    const reopen = () => {
+      es?.close();
+      clearTimeout(retry);
+      retry = setTimeout(open, backoff);
+      backoff = Math.min(backoff * 2, 15_000);
+    };
+    const open = () => {
+      if (closed) return;
+      lastSeen = Date.now();
+      es = new EventSource("/api/events");
+      const alive = () => (lastSeen = Date.now());
+      es.addEventListener("hello", () => {
+        alive();
+        backoff = 1000;
+        refresh();
+        refreshWallet();
+      });
+      es.addEventListener("change", () => {
+        alive();
+        refresh();
+        refreshWallet();
+      });
+      es.addEventListener("ping", alive);
+      es.onerror = () => {
+        refresh();
+        if (es?.readyState === EventSource.CLOSED) reopen();
+      };
+    };
+    open();
+    // The Gatekeeper pings every 15 s. A proxy can keep a dead stream "open" with no error, so if
+    // nothing arrives for 40 s, start over.
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastSeen > 40_000) reopen();
+    }, 10_000);
+    const poll = setInterval(refresh, 15_000);
     const t = setInterval(refreshWallet, 20_000);
     return () => {
-      es.close();
+      closed = true;
+      es?.close();
+      clearTimeout(retry);
+      clearInterval(watchdog);
+      clearInterval(poll);
       clearInterval(t);
     };
   }, [refresh, refreshWallet]);

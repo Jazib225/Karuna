@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import type { Address } from "viem";
 import type { PrivateKeyAccount } from "viem/accounts";
-import { isTightening, isAddr, decodeChange, describeChange, type Change } from "@prekaruna/dharma";
+import { isAddr, decodeChange, describeChange, type Change } from "@prekaruna/dharma";
 import { api, useGatekeeper, type LooseningPreview, type AgentView, type Governance, type LogEntry, type Proposal, type Rule, type Snapshot, type WalletInfo } from "./api.ts";
 import { Kind, SignerUnavailable, decidePayment, loadSigner, submitChange } from "./signer.ts";
 import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
@@ -356,11 +356,6 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
   const myAddr = me.address.toLowerCase();
   const myName = pol.members.find((m) => m.address === myAddr)?.name ?? short(myAddr);
   const name = (a?: string | null) => (a ? (pol.members.find((m) => m.address === a.toLowerCase())?.name ?? short(a)) : "—");
-  const shape = {
-    agents: pol.agents.filter((a) => a.active).map((a) => ({ id: a.id, capUsd: a.capUsd })),
-    thresholdUsd: pol.thresholdUsd,
-    rules: pol.rules.map((r) => ({ id: r.id, outcome: r.outcome, builtin: r.builtin })),
-  };
   const ctx: Ctx = {
     s, me, run, busy, name,
     change: (c, label) => {

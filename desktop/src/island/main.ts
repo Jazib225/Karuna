@@ -234,6 +234,7 @@ function drawContour(now: number) {
   for (const c of bgCanvases) {
     const box = c.parentElement!;
     if (box.hidden || !box.getClientRects().length) continue; // fixed boxes have no offsetParent, so check layout instead
+    if (box === pill && !notch.classList.contains("open")) continue; // retracted: the strip shows no background
     const w = Math.min(BG.w, box.clientWidth);
     const h = Math.min(BG.h, box.clientHeight);
     if (!w || !h) continue;

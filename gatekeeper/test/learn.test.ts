@@ -1,8 +1,9 @@
 // Learns From Your Choices + Preview Before Loosening, against the REAL Dharma contract on anvil.
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import { startAnvil } from "./anvil.ts";
 import { mkdtempSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPublicClient, createTestClient, createWalletClient, defineChain, http, zeroAddress, type Address, type Hex, type PublicClient } from "viem";
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
@@ -24,16 +25,8 @@ const NEW_ACCOUNT = "0x00000000000000000000000000000000000000e7" as Address;
 let anvil: ChildProcess;
 let client: PublicClient;
 beforeAll(async () => {
-  anvil = spawn(join(homedir(), ".foundry/bin/anvil"), ["--port", String(PORT), "--chain-id", "5042002", "--silent"], { stdio: "ignore" });
   client = createPublicClient({ chain, transport: http(RPC) }) as PublicClient;
-  for (let i = 0; i < 50; i++) {
-    try {
-      await client.getBlockNumber();
-      return;
-    } catch {
-      await new Promise((r) => setTimeout(r, 100));
-    }
-  }
+  anvil = await startAnvil(PORT);
 }, 20_000);
 afterAll(() => anvil?.kill());
 

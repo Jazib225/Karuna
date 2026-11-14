@@ -1,9 +1,10 @@
 // Gatekeeper ↔ Dharma, end to end, against the REAL contract on a local chain (anvil).
 // Payments use a fake wallet; governance uses real signatures and real transactions.
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import { startAnvil } from "./anvil.ts";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createPublicClient, createTestClient, createWalletClient, defineChain, http,
@@ -34,17 +35,8 @@ let client: PublicClient;
 const test = () => createTestClient({ chain, mode: "anvil", transport: http(RPC) });
 
 beforeAll(async () => {
-  anvil = spawn(join(homedir(), ".foundry/bin/anvil"), ["--port", String(PORT), "--chain-id", "5042002", "--silent"], { stdio: "ignore" });
   client = createPublicClient({ chain, transport: http(RPC) }) as PublicClient;
-  for (let i = 0; i < 50; i++) {
-    try {
-      await client.getBlockNumber();
-      return;
-    } catch {
-      await new Promise((r) => setTimeout(r, 100));
-    }
-  }
-  throw new Error("anvil did not start");
+  anvil = await startAnvil(PORT);
 }, 20_000);
 afterAll(() => anvil?.kill());
 

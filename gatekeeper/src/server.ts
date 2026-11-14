@@ -140,7 +140,8 @@ export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: 
         res.write("event: hello\ndata: {}\n\n");
         const onChange = () => res.write("event: change\ndata: {}\n\n");
         gk.on("change", onChange);
-        const beat = setInterval(() => res.write(": keepalive\n\n"), 15_000);
+        // A named event (not a comment) so the console can see the stream is alive and reopen it if not.
+        const beat = setInterval(() => res.write("event: ping\ndata: {}\n\n"), 15_000);
         req.on("close", () => {
           gk.off("change", onChange);
           clearInterval(beat);
