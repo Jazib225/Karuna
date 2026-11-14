@@ -8,6 +8,7 @@ import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
 import { keccak256, stringToHex } from "viem";
 import { PREVIEW, previewLog, previewSigner, previewSnapshot, previewWallet } from "./preview.ts";
 import { Badge, Icon, type IconName } from "./icons.tsx";
+import { setDesktopSigner } from "./desktop.ts";
 
 // One job per page. The menu groups them: everyday work first, then the automatic safety systems,
 // settings, and a testing tool. Older names (pop-ups, saved state) still resolve.
@@ -143,6 +144,10 @@ export default function App() {
 
   let body: ReactNode;
   const s = gk.state;
+  // Desktop app: the island's approvals are signed by this window's member key (see desktop.ts).
+  const memberAddr = signer.me?.address.toLowerCase();
+  const isMember = !!s?.policy?.members.some((m) => m.address === memberAddr);
+  useEffect(() => setDesktopSigner(signer.me, (s?.org.dharma?.address as Address | undefined) ?? null, isMember), [signer.me, s?.org.dharma?.address, isMember]);
   if (!s && gk.offline) body = <Offline reason={gk.offline} />;
   else if (!s) body = <Loading text="Connecting to the Gatekeeper…" />;
   else if (!signer.me) body = <div className="center"><Backdrop /><div className="onboard narrow"><div className="onboard-body"><h2 className="setup-title heading-gradient">No signing key</h2><p className="lede">{signer.error}</p></div></div></div>;

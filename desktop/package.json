@@ -1,0 +1,22 @@
+{
+  "name": "@prekaruna/desktop",
+  "private": true,
+  "type": "module",
+  "description": "Karuna desktop app (Windows first): the console in a window, plus the island that takes over when it's minimized.",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:island": "vite",
+    "build": "vite build",
+    "tauri": "tauri",
+    "mock": "node scripts/mock-gatekeeper.mjs",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.5.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.5.0",
+    "typescript": "5.9.3",
+    "vite": "6.3.6"
+  }
+}

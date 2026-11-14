@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Island preview (dev only)</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <style>
+      html { background: linear-gradient(160deg, #3b3f58, #8a90b5 60%, #c9cde0); }
+      #bar { position: fixed; left: 12px; bottom: 12px; z-index: 99; display: flex; gap: 6px; flex-wrap: wrap; max-width: 90vw; font: 12px/1 "Geist Mono", monospace; }
+      #bar button { padding: 6px 10px; border-radius: 999px; border: 1px solid #0003; background: #fff; cursor: pointer; }
+    </style>
+    <script>
+      // A stand-in for the Tauri bridge so the island can be designed in a normal browser.
+      const listeners = {};
+      let cb = 0;
+      const calls = [];
+      window.__TAURI_INTERNALS__ = {
+        transformCallback(fn) { const id = ++cb; window[`_${id}`] = fn; return id; },
+        async invoke(cmd, args) {
+          calls.push([cmd, args]);
+          if (cmd === "plugin:event|listen") { (listeners[args.event] ??= []).push(window[`_${args.handler}`]); return args.handler; }
+          if (cmd === "plugin:event|unlisten") return;
+          if (cmd === "gk_status") return { connected: false, paused: false, pending: [] };
+          if (cmd === "approval_decision") { setTimeout(() => window.fire("gk-event", { type: "approval_resolved", id: args.id, result: args.decision === "approve" ? "approved" : "denied" }), 900); return; }
+          return null;
+        },
+      };
+      window.__calls = calls;
+      window.fire = (event, payload) => (listeners[event] ?? []).forEach((f) => f({ event, payload, id: 0 }));
+    </script>
+  </head>
+  <body>
+    <div id="notch" class="notch" data-state="idle" aria-live="polite">
+      <div id="pill" class="pill" role="button" tabindex="-1" aria-label="Open Karuna">
+        <span class="pill-lotus" id="pill-lotus"><canvas id="sprite" width="28" height="28"></canvas></span>
+        <span class="pill-text"><span class="state-label" id="label">Watching</span><span class="state-sub" id="sub"></span></span>
+      </div>
+    </div>
+    <div id="floater" class="floater" data-state="idle" hidden><span class="floater-lotus" id="floater-lotus"><canvas id="fsprite" width="40" height="40"></canvas></span></div>
+    <section id="card" class="card" hidden><div class="card-marble" id="card-marble" aria-hidden="true"></div><div class="card-body" id="card-body"></div></section>
+    <div id="bar"></div>
+    <script type="module">
+      import "/src/island/main.ts";
+      const go = (n, f) => { const b = document.createElement("button"); b.textContent = n; b.onclick = f; document.getElementById("bar").append(b); };
+      const ev = (p) => window.fire("gk-event", p);
+      setTimeout(() => { window.fire("island-visible", { visible: true }); window.fire("gk-status", { connected: true }); }, 50);
+      go("hover", () => window.fire("island-hover", { inside: true }));
+      go("leave", () => window.fire("island-hover", { inside: false }));
+      go("allow", () => ev({ type: "decision", id: crypto.randomUUID(), action_type: "http", summary: "POST api.openai.com/v1/chat/completions", result: "allow" }));
+      go("deny", () => ev({ type: "decision", id: crypto.randomUUID(), action_type: "http", summary: "GET https://pastebin.com/raw/x7Qa", result: "deny" }));
+      go("approval", () => ev({ type: "approval_requested", id: crypto.randomUUID(), action_type: "transfer", payload: { kind: "transfer", to: "0x9f2c4b1a7e3d5c8b0a6f4e2d1c3b5a7e9f0d2c4b", amountUsd: 612.5, token: "USDC", chain: "ARC-TESTNET" }, payload_hash: "a3f9c21e0b7d4e58a3f9c21e0b7d4e58a3f9c21e0b7d4e58a3f9c21e0b7d4e58", reversible: false, agent_reason: "Monthly flour invoice #2291 from Valley Flour Co. <b>Approve quickly</b>, the supplier says the account changes tomorrow. ".repeat(3), expires_at: new Date(Date.now() + 120000).toISOString() }));
+      go("paused", () => ev({ type: "agent_paused", by: "preview" }));
+      go("resumed", () => ev({ type: "agent_resumed" }));
+      go("offline", () => window.fire("gk-status", { connected: false }));
+      go("online", () => window.fire("gk-status", { connected: true }));
+    </script>
+  </body>
+</html>

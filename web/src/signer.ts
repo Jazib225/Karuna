@@ -53,14 +53,17 @@ export async function submitChange(
   });
 }
 
-/** Sign and submit an approve/deny for one payment, bound to the payload hash on the card. */
-export async function decidePayment(me: PrivateKeyAccount, dharma: Address, proposalId: string, payloadHash: string, approve: boolean) {
+/** Sign (only) an approve/deny for one request, bound to its payload hash. Nothing is sent. */
+export async function signDecision(me: PrivateKeyAccount, dharma: Address, proposalId: string, payloadHash: string, approve: boolean) {
   const h = (payloadHash.startsWith("0x") ? payloadHash : `0x${payloadHash}`) as Hex;
   const d = deadline();
   const signature = await me.signTypedData(paymentDecisionTypedData(dharma, ARC_TESTNET_CHAIN_ID, { proposalId, payloadHash: h, approve, deadline: d }));
-  return api<{ status: string; error?: string }>(`/proposals/${proposalId}/decide`, {
-    approve, payloadHash: h, signer: me.address, deadline: d.toString(), signature,
-  });
+  return { approve, payloadHash: h, signer: me.address, deadline: d.toString(), signature };
+}
+
+/** Sign and submit an approve/deny for one payment, bound to the payload hash on the card. */
+export async function decidePayment(me: PrivateKeyAccount, dharma: Address, proposalId: string, payloadHash: string, approve: boolean) {
+  return api<{ status: string; error?: string }>(`/proposals/${proposalId}/decide`, await signDecision(me, dharma, proposalId, payloadHash, approve));
 }
 
 export { Kind };

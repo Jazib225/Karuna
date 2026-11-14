@@ -12,6 +12,7 @@ import { SandboxCA } from "./ca.ts";
 import { SecretStore } from "./secrets.ts";
 import { EgressProxy } from "./proxy.ts";
 import { remoteListener } from "./remote.ts";
+import { PIPE_PATH, pipeServer } from "./pipe.ts";
 import { hostname } from "node:os";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -42,6 +43,7 @@ const gk = new Gatekeeper({
   requireSandbox: (process.env.KARUNA_REQUIRE_SANDBOX ?? "1") !== "0",
   requireIsolation: process.env.KARUNA_REQUIRE_ISOLATION === "gvisor" ? "gvisor" : "docker",
 });
+gk.holdMs = Number(process.env.KARUNA_HOLD_SECONDS ?? 120) * 1000;
 const ca = new SandboxCA(dataDir);
 const egress = new EgressProxy(gk, ca, { agentApiPort: agentPort, holdMs: Number(process.env.KARUNA_HOLD_SECONDS ?? 120) * 1000 });
 const consoleToken = store.loadOrCreateConsoleToken();
@@ -62,6 +64,10 @@ if (remotePort) {
     console.log(`gatekeeper · remote port  https://${remoteHost}:${remotePort} for karuna run on other machines (names: ${names.join(", ")})`),
   );
 }
+// Local event pipe for the desktop app (island). Approvals over it still need a member signature.
+pipeServer(gk)
+  .on("error", (e) => console.error(`gatekeeper · pipe         ${PIPE_PATH} unavailable: ${e.message}`))
+  .listen(PIPE_PATH, () => console.log(`gatekeeper · pipe         ${PIPE_PATH} (desktop app events)`));
 const v = gk.log.verify();
 console.log(`gatekeeper · signed log   ${gk.log.length} entries · ${v.ok ? "verified" : `TAMPERED at ${v.brokenAt}`}`);
 await gk.start();

@@ -1,0 +1,503 @@
+// The island: what Karuna shows at the top of the screen while the console is minimized.
+//
+// Two modes: a fake notch at top center (default) and a floating lotus you can drag anywhere.
+// The window covers the whole monitor and is click-through except over what this page reports as
+// interactive (see reportRects); the app tells us when the cursor enters or leaves those areas.
+// Every field on an approval card comes from the Gatekeeper; the agent's own words are shown as
+// plain text, in a quieter box, labeled untrusted.
+import "./island.css";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { createContour } from "../../../web/src/site/contour.ts";
+import { createLotus, contextAttributes } from "../../../web/src/site/lotus.ts";
+import { mountGL, type GLHandle } from "../../../web/src/site/glrun.ts";
+
+type State = "idle" | "working" | "pending" | "approved" | "denied" | "paused" | "offline";
+interface Decision { type: "decision"; id: string; action_type: string; summary: string; result: "allow" | "deny" }
+interface ApprovalRequested {
+  type: "approval_requested"; id: string; action_type: string; payload: Record<string, unknown>; payload_hash: string;
+  reversible: boolean; agent_reason: string | null; expires_at: string | null;
+}
+type GkEvent =
+  | Decision
+  | ApprovalRequested
+  | { type: "approval_resolved"; id: string; result: string }
+  | { type: "agent_paused"; by?: string }
+  | { type: "agent_resumed" }
+  | { type: "error"; id?: string; error: string };
+
+const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+const notch = $("notch");
+const pill = $("pill");
+const label = $("label");
+const sub = $("sub");
+const floater = $("floater");
+const card = $("card");
+const cardBody = $("card-body");
+const sprite = $<HTMLCanvasElement>("sprite");
+const fsprite = $<HTMLCanvasElement>("fsprite");
+
+const LABELS: Record<State, string> = {
+  idle: "Watching", working: "Working", pending: "Needs you", approved: "Approved", denied: "Denied", paused: "Paused", offline: "Offline",
+};
+const REASON_CAP = 280;
+const RETRACT_MS = 700;
+const DOCK = { halfWidth: 170, maxY: 90 };
+
+// ------------------------------------------------------------------ state
+let connected = false;
+let paused = false;
+let hovering = false;
+let visible = false;
+let dragging = false;
+let transient: { state: State; until: number } | null = null;
+const queue: ApprovalRequested[] = [];
+const feed: { at: number; e: Decision }[] = [];
+const cardStatus = new Map<string, { text: string; err: boolean }>();
+let reasonOpen = false;
+
+type Mode = { mode: "notch" } | { mode: "floating"; x: number; y: number };
+const loadMode = (): Mode => {
+  try {
+    const m = JSON.parse(localStorage.getItem("karuna.island.mode") ?? "") as Mode;
+    if (m.mode === "floating" && Number.isFinite(m.x) && Number.isFinite(m.y)) return m;
+  } catch {
+    /* default */
+  }
+  return { mode: "notch" };
+};
+let mode = loadMode();
+const saveMode = () => {
+  try {
+    localStorage.setItem("karuna.island.mode", JSON.stringify(mode));
+  } catch {
+    /* per-machine convenience only */
+  }
+};
+
+function currentState(): State {
+  if (!connected) return "offline";
+  if (queue.length) return "pending";
+  if (transient && transient.until > Date.now()) return transient.state;
+  if (paused) return "paused";
+  return "idle";
+}
+const flash = (state: State, ms: number) => {
+  transient = { state, until: Date.now() + ms };
+  setTimeout(render, ms + 20);
+};
+
+// ------------------------------------------------------------------ lotus: sprite sheet + live
+const FRAMES = 60;
+const SPR = 40; // backing px per frame: chunky, like the site's dither
+let sheet: HTMLCanvasElement | null = null;
+/** Render the site's lotus shader once into a sprite sheet of one slow turn (20 s per turn on the site). */
+function buildSprites() {
+  const glc = document.createElement("canvas");
+  glc.width = SPR;
+  glc.height = SPR;
+  const gl = (glc.getContext("webgl2", { ...contextAttributes, preserveDrawingBuffer: true }) ??
+    glc.getContext("webgl", { ...contextAttributes, preserveDrawingBuffer: true })) as WebGLRenderingContext | null;
+  if (!gl) return;
+  const r = createLotus(gl);
+  r.resize(SPR, SPR);
+  sheet = document.createElement("canvas");
+  sheet.width = SPR * FRAMES;
+  sheet.height = SPR;
+  const ctx = sheet.getContext("2d")!;
+  for (let i = 0; i < FRAMES; i++) {
+    r.frame((i / FRAMES) * 20, 0);
+    ctx.drawImage(glc, i * SPR, 0);
+  }
+  r.destroy();
+  gl.getExtension("WEBGL_lose_context")?.loseContext();
+}
+
+const SPEED: Record<State, number> = { idle: 1, working: 3.2, pending: 0.55, approved: 0, denied: 0, paused: 0, offline: 0 };
+let phase = 0;
+let lastT = 0;
+let settleFrom = 0;
+function drawSprite(now: number) {
+  requestAnimationFrame(drawSprite);
+  if (!sheet || !visible) return;
+  const dt = Math.min(0.1, (now - lastT) / 1000);
+  lastT = now;
+  const st = currentState();
+  // Approved settles: the turn slows to a stop. Everything else turns at its own pace.
+  let speed = SPEED[st];
+  if (st === "approved") speed = Math.max(0, 1.6 * (1 - (now - settleFrom) / 1100));
+  phase = (phase + (dt * speed * FRAMES) / 20) % FRAMES;
+  // The same sprite sheet drives the pill and the floating lotus.
+  for (const c of [sprite, fsprite]) {
+    const ctx = c.getContext("2d")!;
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, c.width, c.height);
+    ctx.drawImage(sheet, Math.floor(phase) * SPR, 0, SPR, SPR, 0, 0, c.width, c.height);
+  }
+}
+
+let marbleGL: GLHandle | null = null;
+function syncLive() {
+  // The live shader runs only where it's visible: the open card's marble (paused otherwise).
+  const cardOn = visible && !card.hidden && card.classList.contains("show");
+  if (cardOn && !marbleGL) marbleGL = mountGL($("card-marble"), (g) => createContour(g, "marble"), { fallbackSrc: "/brand/contour.webp", dprCap: 1.5 });
+  if (marbleGL) (cardOn ? marbleGL.start() : marbleGL.stop());
+}
+
+// ------------------------------------------------------------------ rendering
+const fmtTime = (ms: number) => new Date(ms).toTimeString().slice(0, 8);
+const shortHash = (h: string) => (h.length > 18 ? `${h.slice(0, 10)}…${h.slice(-6)}` : h);
+const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text; // text only: nothing here is ever parsed as HTML
+  return n;
+};
+const fmtValue = (v: unknown) => (typeof v === "string" ? v : v === null || v === undefined ? "—" : typeof v === "object" ? JSON.stringify(v, null, 2) : String(v));
+
+function approvalCard(a: ApprovalRequested): HTMLElement {
+  const box = el("div", "appr");
+  const head = el("div", "appr-head");
+  head.append(el("span", "appr-type", a.action_type));
+  const exp = el("span", "appr-exp");
+  exp.dataset.expires = a.expires_at ?? "";
+  head.append(exp);
+  box.append(el("div", "eyebrow", "Approval needed"), head);
+
+  const payload = el("div", "payload");
+  payload.append(el("div", "lbl", "Exact payload"));
+  const dl = el("dl");
+  for (const [k, v] of Object.entries(a.payload ?? {})) dl.append(el("dt", undefined, k), el("dd", undefined, fmtValue(v)));
+  payload.append(dl);
+  box.append(payload);
+
+  const meta = el("div", "meta");
+  const hash = el("span", "hash", shortHash(a.payload_hash));
+  hash.title = a.payload_hash;
+  const m1 = el("span");
+  m1.append(el("span", "k", "hash "), hash);
+  const m2 = el("span");
+  m2.append(el("span", "k", "reversible "), document.createTextNode(a.reversible ? "yes" : "no"));
+  meta.append(m1, m2);
+  box.append(meta);
+
+  if (a.agent_reason) {
+    const r = el("div", "reason");
+    r.append(el("div", "lbl", "Agent-authored, untrusted"));
+    const text = String(a.agent_reason);
+    const long = text.length > REASON_CAP;
+    const p = el("p", undefined, long && !reasonOpen ? `${text.slice(0, REASON_CAP)}…` : text);
+    r.append(p);
+    if (long) {
+      const more = el("button", "more", reasonOpen ? "Show less" : "Show all");
+      more.type = "button";
+      more.onclick = () => {
+        reasonOpen = !reasonOpen;
+        render();
+      };
+      r.append(more);
+    }
+    box.append(r);
+  }
+
+  const st = cardStatus.get(a.id);
+  const status = el("div", `status-line${st?.err ? " err" : ""}`, st?.text ?? "");
+  const actions = el("div", "actions");
+  const deny = el("button", "btn btn-deny", "Deny");
+  const approve = el("button", "btn btn-approve", "Approve");
+  deny.type = approve.type = "button";
+  const busy = st && !st.err;
+  deny.disabled = approve.disabled = !!busy || expired(a);
+  deny.onclick = () => decide(a, "deny");
+  // No keyboard path approves: only a real pointer click (detail >= 1) counts.
+  approve.onclick = (e) => {
+    if ((e as MouseEvent).detail >= 1) decide(a, "approve");
+  };
+  actions.append(deny, approve);
+  // Always reachable: the decision bar sticks to the bottom of the card while the payload scrolls.
+  const bar = el("div", "decide");
+  bar.append(actions, status);
+  if (queue.length > 1) bar.append(el("div", "queue", `${queue.length - 1} more waiting`));
+  box.append(bar);
+  return box;
+}
+
+const expired = (a: ApprovalRequested) => !!a.expires_at && Date.parse(a.expires_at) <= Date.now();
+
+function feedView(): HTMLElement {
+  const wrap = el("div");
+  const st = currentState();
+  const eb = el("div", "eyebrow", st === "offline" ? "Gatekeeper" : "Recent decisions");
+  const right = el("span", "right", st === "offline" ? "retrying" : paused ? "paused" : "");
+  eb.append(right);
+  wrap.append(eb);
+  if (st === "offline") {
+    wrap.append(el("p", "empty", "Not connected to the Gatekeeper. Karuna keeps trying quietly; start it and this connects on its own."));
+    return wrap;
+  }
+  if (!feed.length) {
+    wrap.append(el("p", "empty", "Nothing yet. Decisions show up here as your agents act."));
+    return wrap;
+  }
+  const list = el("div", "feed");
+  for (const { at, e } of feed.slice(0, 6)) {
+    const row = el("div", `row ${e.result}`);
+    row.append(el("span", "t", fmtTime(at)), el("span", "s", `${e.action_type} · ${e.summary}`), el("span", `verdict ${e.result}`, e.result));
+    list.append(row);
+  }
+  wrap.append(list);
+  return wrap;
+}
+
+function render() {
+  const st = currentState();
+  notch.dataset.state = st;
+  floater.dataset.state = st;
+  label.textContent = LABELS[st];
+  sub.textContent = st === "pending" ? queue[0].action_type : st === "offline" ? "retrying" : feed[0] ? feed[0].e.summary : "";
+  if (st === "approved") settleFrom = performance.now();
+
+  const floating = mode.mode === "floating";
+  notch.hidden = floating;
+  floater.hidden = !floating;
+  if (mode.mode === "floating") {
+    floater.style.left = `${mode.x}px`;
+    floater.style.top = `${mode.y}px`;
+  }
+
+  // Open: hovering, or an approval waiting (never auto-retracts while pending), or dragging.
+  const open = hovering || st === "pending" || dragging;
+  notch.classList.toggle("open", open && !floating);
+  const showCard = open && !dragging && (st === "pending" || hovering);
+  card.hidden = !showCard;
+  if (showCard) {
+    cardBody.replaceChildren(st === "pending" ? approvalCard(queue[0]) : feedView());
+    placeCard();
+    requestAnimationFrame(() => card.classList.add("show"));
+    tickExpiry();
+  } else {
+    card.classList.remove("show");
+  }
+  syncLive();
+  reportRects();
+}
+
+/** Under the pill, or next to the floating lotus, flipped so it stays on screen. */
+function placeCard() {
+  const w = card.offsetWidth || 360;
+  const h = card.offsetHeight || 320;
+  let x: number;
+  let y: number;
+  if (mode.mode === "notch") {
+    x = window.innerWidth / 2 - w / 2;
+    y = 52;
+  } else {
+    const L = { x: mode.x, y: mode.y, s: 56 };
+    x = L.x + L.s + 10;
+    if (x + w > window.innerWidth - 8) x = L.x - w - 10; // flip left
+    y = L.y;
+    if (y + h > window.innerHeight - 8) y = L.y + L.s - h; // flip up
+    x = Math.max(8, Math.min(x, window.innerWidth - w - 8));
+    y = Math.max(8, Math.min(y, window.innerHeight - h - 8));
+  }
+  card.style.left = `${Math.round(x)}px`;
+  card.style.top = `${Math.round(y)}px`;
+}
+
+let expiryTimer = 0;
+function tickExpiry() {
+  clearTimeout(expiryTimer);
+  const n = card.querySelector<HTMLElement>(".appr-exp");
+  if (!n) return;
+  const at = n.dataset.expires ? Date.parse(n.dataset.expires) : NaN;
+  if (Number.isNaN(at)) {
+    n.textContent = "no expiry";
+    return;
+  }
+  const left = Math.max(0, Math.round((at - Date.now()) / 1000));
+  n.textContent = left ? `expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` : "expired";
+  if (!left) {
+    card.querySelectorAll<HTMLButtonElement>(".btn").forEach((b) => (b.disabled = true));
+    return;
+  }
+  expiryTimer = window.setTimeout(tickExpiry, 1000);
+}
+
+// ------------------------------------------------------------------ click-through areas
+let lastRects = "";
+function reportRects() {
+  if (!visible) return;
+  const rects: { x: number; y: number; w: number; h: number }[] = [];
+  const add = (r: DOMRect, pad = 0) => rects.push({ x: r.left - pad, y: r.top - pad, w: r.width + pad * 2, h: r.height + pad * 2 });
+  if (mode.mode === "notch") {
+    const p = pill.getBoundingClientRect();
+    // Retracted, the hover target is the strip at the top edge (a little taller to be easy to find).
+    if (notch.classList.contains("open")) add(p);
+    else rects.push({ x: p.left, y: 0, w: p.width, h: 12 });
+  } else {
+    add(floater.getBoundingClientRect(), 4);
+  }
+  if (!card.hidden) add(card.getBoundingClientRect(), 6);
+  const key = JSON.stringify(rects.map((r) => [r.x, r.y, r.w, r.h].map(Math.round)));
+  if (key === lastRects) return;
+  lastRects = key;
+  void invoke("island_rects", { rects });
+}
+// The slide changes the pill's box over time: keep the hit area in step with it.
+pill.addEventListener("transitionend", reportRects);
+card.addEventListener("transitionend", reportRects);
+
+// ------------------------------------------------------------------ hover (told by the app)
+let retractTimer = 0;
+function setHover(inside: boolean) {
+  clearTimeout(retractTimer);
+  if (inside) {
+    if (!hovering) {
+      hovering = true;
+      render();
+    }
+    return;
+  }
+  retractTimer = window.setTimeout(() => {
+    hovering = false;
+    render();
+  }, RETRACT_MS);
+}
+
+// ------------------------------------------------------------------ drag: float / dock
+const hint = document.createElement("div");
+hint.className = "dock-hint";
+document.body.append(hint);
+const inDock = (x: number, y: number) => Math.abs(x + 28 - window.innerWidth / 2) < DOCK.halfWidth && y < DOCK.maxY;
+
+function startDrag(e: PointerEvent) {
+  if (e.button !== 0) return;
+  const target = e.currentTarget as HTMLElement;
+  target.setPointerCapture(e.pointerId);
+  const sx = e.clientX;
+  const sy = e.clientY;
+  let moved = false;
+  const move = (ev: PointerEvent) => {
+    if (!moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 6) return;
+    if (!moved) {
+      moved = true;
+      dragging = true;
+      void invoke("island_drag", { active: true });
+    }
+    // Dragging the lotus out of the pill detaches it.
+    mode = { mode: "floating", x: ev.clientX - 28, y: ev.clientY - 28 };
+    hint.classList.toggle("on", inDock(mode.x, mode.y));
+    render();
+  };
+  const up = () => {
+    target.removeEventListener("pointermove", move);
+    target.removeEventListener("pointerup", up);
+    target.removeEventListener("pointercancel", up);
+    hint.classList.remove("on");
+    if (!moved) {
+      // A click (no drag) on the lotus, docked or floating, opens the console.
+      void invoke("island_open_main");
+      return;
+    }
+    dragging = false;
+    void invoke("island_drag", { active: false });
+    if (mode.mode === "floating") {
+      if (inDock(mode.x, mode.y)) mode = { mode: "notch" };
+      else mode = { mode: "floating", x: Math.max(0, Math.min(mode.x, window.innerWidth - 56)), y: Math.max(0, Math.min(mode.y, window.innerHeight - 56)) };
+    }
+    saveMode();
+    render();
+  };
+  target.addEventListener("pointermove", move);
+  target.addEventListener("pointerup", up);
+  target.addEventListener("pointercancel", up);
+}
+sprite.addEventListener("pointerdown", (e) => startDrag(e));
+floater.addEventListener("pointerdown", (e) => startDrag(e));
+pill.addEventListener("click", (e) => {
+  if (e.target !== sprite) void invoke("island_open_main");
+});
+
+// ------------------------------------------------------------------ decisions
+async function decide(a: ApprovalRequested, decision: "approve" | "deny") {
+  cardStatus.set(a.id, { text: decision === "approve" ? "Signing approval in the console…" : "Signing denial in the console…", err: false });
+  render();
+  try {
+    await invoke("approval_decision", { id: a.id, payloadHash: a.payload_hash, decision });
+  } catch (err) {
+    cardStatus.set(a.id, { text: String(err), err: true });
+    render();
+  }
+}
+window.addEventListener("keydown", (e) => {
+  // Deny may have a shortcut. Nothing on the keyboard approves.
+  if (e.key === "Escape" && queue[0] && !cardStatus.get(queue[0].id)) void decide(queue[0], "deny");
+});
+
+function onEvent(ev: GkEvent) {
+  switch (ev.type) {
+    case "decision":
+      feed.unshift({ at: Date.now(), e: ev });
+      if (feed.length > 40) feed.length = 40;
+      if (ev.result === "deny") flash("denied", 1800);
+      else flash("working", 1600);
+      break;
+    case "approval_requested":
+      if (!queue.some((q) => q.id === ev.id)) queue.push(ev);
+      reasonOpen = false;
+      break;
+    case "approval_resolved": {
+      const i = queue.findIndex((q) => q.id === ev.id);
+      if (i !== -1) queue.splice(i, 1);
+      cardStatus.delete(ev.id);
+      flash(ev.result === "approved" ? "approved" : "denied", 2400);
+      break;
+    }
+    case "agent_paused":
+      paused = true;
+      break;
+    case "agent_resumed":
+      paused = false;
+      break;
+    case "error":
+      if (ev.id && queue.some((q) => q.id === ev.id)) cardStatus.set(ev.id, { text: ev.error, err: true });
+      break;
+  }
+  render();
+}
+
+// ------------------------------------------------------------------ wiring
+void listen<GkEvent>("gk-event", (e) => onEvent(e.payload));
+void listen<{ connected: boolean }>("gk-status", (e) => {
+  connected = e.payload.connected;
+  if (!connected) {
+    queue.length = 0;
+    cardStatus.clear();
+  }
+  render();
+});
+void listen<{ inside: boolean }>("island-hover", (e) => setHover(e.payload.inside));
+void listen<{ visible: boolean }>("island-visible", (e) => {
+  visible = e.payload.visible;
+  lastRects = "";
+  if (!visible) hovering = false;
+  render();
+});
+window.addEventListener("resize", () => {
+  lastRects = "";
+  render();
+});
+
+void (async () => {
+  try {
+    const s = await invoke<{ connected: boolean; paused: boolean; pending: ApprovalRequested[] }>("gk_status");
+    connected = s.connected;
+    paused = s.paused;
+    for (const p of s.pending) if (!queue.some((q) => q.id === p.id)) queue.push(p);
+  } catch {
+    /* not in the app (design preview) */
+  }
+  buildSprites();
+  requestAnimationFrame(drawSprite);
+  render();
+})();

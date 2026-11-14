@@ -176,3 +176,47 @@ VERIFY_WALLET=0x… pnpm --dir gatekeeper verify:phase6   # Swarm Stopper: trap 
 ```
 
 Tools: Node ≥ 22, pnpm, [Circle CLI](https://developers.circle.com/agent-stack/circle-cli/command-reference) (`npm i -g @circle-fin/cli`), [Foundry](https://getfoundry.sh).
+
+## Desktop app (Windows first): console + island
+`desktop/` is a Tauri 2 shell around the console. It does not copy the console: the `main` window
+loads `web/` from its dev server, and the island imports the site's visuals from `web/src/site/`.
+
+Needs: Node 22+, Rust (MSVC toolchain), Visual Studio Build Tools with the C++ workload + Windows SDK.
+```bash
+cd desktop && npm run tauri dev     # starts the console dev server if needed, then the app
+```
+- **`main`**: the console, 1280×800, with the site's marbled background behind it.
+- **island**: appears when `main` is minimized and hides when it's restored. A black notch at the
+  top center of that monitor retracts to a thin strip; hover the strip to slide it down; empty
+  areas are click-through. Click the pill to restore the console. Drag the lotus out to float it
+  anywhere; drag it back to the top center to dock. Mode and position persist. While an approval is
+  pending the island stays open. Tray: Open Karuna, Pause/Resume agents, Quit.
+- **States**: idle, working, pending approval, approved, denied, paused (plus offline when the
+  Gatekeeper isn't running; it retries quietly).
+
+### Pipe protocol: `\.\pipe\karuna`
+Newline-delimited JSON, served by the Gatekeeper (`gatekeeper/src/pipe.ts`).
+
+| Direction | Message |
+|---|---|
+| out | `decision` `{id, action_type, summary, result: "allow"\|"deny"}` |
+| out | `approval_requested` `{id, action_type, payload, payload_hash, reversible, agent_reason, expires_at}` |
+| out | `approval_resolved` `{id, result: "approved"\|"denied"\|"failed"}` |
+| out | `agent_paused` `{by, at}` · `agent_resumed` · `error` `{id?, error}` |
+| in | `approval_response` `{id, payload_hash, decision: "approve"\|"deny", signer, deadline, signature}` |
+| in | `pause` `{by}` · `resume` `{by}` (the local pause: instant, never onchain; not the Dharma freeze) |
+
+An approval over the pipe is never trusted on its own. The island asks the console window to sign
+the exact id + payload hash + decision with this member's key; the app forwards it only if it still
+matches the pending request; the Gatekeeper checks id and hash again and verifies the signature
+against Dharma's members. Stale or mismatched responses are ignored on both sides.
+
+### Testing the island without the engine
+```bash
+cd desktop && npm run mock          # stop the real Gatekeeper first: same pipe name
+cd desktop && npm run mock -- --loop
+```
+The mock plays a few auto decisions, one approval request (with a deliberately HTML-looking agent
+reason, which must render as plain text), one deny, then a pause and a resume. It checks id and
+hash on every approval response and requires a signature to be present (it can't verify one
+without the chain; the real Gatekeeper does).

@@ -119,6 +119,7 @@ interface State {
   tainted: Record<string, { at: string; secret: string }>; // agents that touched a trap
   swarmTrips: { id: string; at: string; reason: string; agents: string[]; txRef?: string }[];
   precedents: Precedent[]; // every human approve / deny on a payment (Learns From Your Choices)
+  paused?: { at: string; by: string } | null; // local pause: instant on/off, never onchain (unlike Freeze)
 }
 
 export interface ShieldAlert {
@@ -681,10 +682,13 @@ export class Gatekeeper extends EventEmitter {
     }
 
     // Panic button: nothing runs while frozen. Same blank denial as everything else.
+    // Pause (local, instant on and off) works the same way, without touching Dharma.
     const frozen = this.isFrozen();
-    if (frozen) {
+    if (frozen || this.state.paused) {
       const request: Request = { agent: agentId, tool: action.type === "action" ? action.tool : "payment" };
-      const decision: Decision = { outcome: "deny", ruleId: "panic-freeze", reason: "All agents are frozen" };
+      const decision: Decision = frozen
+        ? { outcome: "deny", ruleId: "panic-freeze", reason: "All agents are frozen" }
+        : { outcome: "deny", ruleId: "paused", reason: `Agents are paused (by ${this.state.paused!.by})` };
       this.logDecision(request, decision);
       this.state.proposals.push({ ...base, request, decision, facts: [], status: "denied" });
       this.save();
@@ -1005,6 +1009,7 @@ export class Gatekeeper extends EventEmitter {
     }
 
     if (this.isFrozen()) return deny("panic-freeze", "All agents are frozen");
+    if (this.state.paused) return deny("paused", `Agents are paused (by ${this.state.paused.by})`);
 
     // Keys: a placeholder may only travel to a host its key is bound to on Dharma.
     const wanted = SecretStore.placeholdersIn(`${r.url}\n${headerText}`);
@@ -1042,6 +1047,7 @@ export class Gatekeeper extends EventEmitter {
 
     if (decision.outcome === "allow") {
       this.logDecision(request, decision);
+      this.emit("egress-allowed", { agentId, method, url: r.url });
       return { verdict: "allow", keys: wanted };
     }
     if (decision.outcome === "deny") return deny(decision.ruleId, decision.reason);
@@ -1106,6 +1112,41 @@ export class Gatekeeper extends EventEmitter {
     if (!s) return { id: "", status: "denied" };
     return this.propose(s.agentId, { type: "x402", url: r.url, method: r.method, body: r.body }, "Paid API returned 402 inside the sandbox");
   }
+
+  /**
+   * Local pause: every new agent action and every request out of a box is denied until resumed.
+   * Not a governance action: nothing goes onchain, no vote to undo, boxes keep running. For "stop
+   * everything and make it stick", members use Freeze.
+   */
+  pause(by: string) {
+    if (this.state.paused) return this.state.paused;
+    this.state.paused = { at: this.now().toISOString(), by: String(by).slice(0, 60) || "someone" };
+    this.logEvent({ type: "paused", by: this.state.paused.by });
+    this.save();
+    this.emit("paused", this.state.paused);
+    return this.state.paused;
+  }
+
+  resume(by: string) {
+    if (!this.state.paused) return null;
+    this.state.paused = null;
+    this.logEvent({ type: "resumed", by: String(by).slice(0, 60) });
+    this.save();
+    this.emit("resumed");
+    return null;
+  }
+
+  get paused() {
+    return this.state.paused ?? null;
+  }
+
+  /** Recent proposals, newest last (cheap: no log verification, unlike snapshot()). */
+  recentProposals(n = 300): Readonly<Proposal>[] {
+    return this.state.proposals.slice(-n);
+  }
+
+  /** How long a held sandbox request waits before the box gets "pending" back. */
+  holdMs = 120_000;
 
   /** A key value was stored or rotated (the value itself is never logged). */
   noteKeyStored(name: string, envVar: string) {
@@ -1565,6 +1606,7 @@ export class Gatekeeper extends EventEmitter {
         })),
       },
       frozen: frozen && { ...frozen, by: frozen.by ? (L.member(frozen.by) ?? frozen.by) : null },
+      paused: this.state.paused ?? null,
       enrollments: this.org.enrollments,
       shield: {
         tests: this.state.tests.slice(-100).reverse(),

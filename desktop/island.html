@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Karuna island</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <div id="notch" class="notch" data-state="idle" aria-live="polite">
+      <div id="pill" class="pill" role="button" tabindex="-1" aria-label="Open Karuna">
+        <span class="pill-lotus" id="pill-lotus"><canvas id="sprite" width="28" height="28"></canvas></span>
+        <span class="pill-text"><span class="state-label" id="label">Watching</span><span class="state-sub" id="sub"></span></span>
+      </div>
+    </div>
+    <div id="floater" class="floater" data-state="idle" hidden aria-label="Karuna (drag to the top center to dock)">
+      <span class="floater-lotus" id="floater-lotus"><canvas id="fsprite" width="40" height="40"></canvas></span>
+    </div>
+    <section id="card" class="card" hidden>
+      <div class="card-marble" id="card-marble" aria-hidden="true"></div>
+      <div class="card-body" id="card-body"></div>
+    </section>
+    <script type="module" src="/src/island/main.ts"></script>
+  </body>
+</html>

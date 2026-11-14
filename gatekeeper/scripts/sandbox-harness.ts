@@ -16,6 +16,7 @@ import { SandboxCA } from "../src/ca.ts";
 import { SecretStore } from "../src/secrets.ts";
 import { EgressProxy } from "../src/proxy.ts";
 import { remoteListener } from "../src/remote.ts";
+import { PIPE_PATH, pipeServer } from "../src/pipe.ts";
 import type { WalletBackend } from "../src/wallet.ts";
 import type { OnchainPolicy } from "../src/chain.ts";
 
@@ -98,4 +99,5 @@ createServer(async (req, res) => {
   res.writeHead(404).end();
 }).listen(9799, "127.0.0.1");
 
-console.log(JSON.stringify({ caFile: join(dataDir, "sandbox-ca", "ca.cert.pem"), remote: "https://127.0.0.1:9443", dataDir, agentApi: `http://127.0.0.1:${AGENT_PORT}`, tokens: { tester: t1, tester2: t2 } }));
+if (process.env.HARNESS_PIPE) pipeServer(gk).listen(PIPE_PATH);
+console.log(JSON.stringify({ member: member.address, caFile: join(dataDir, "sandbox-ca", "ca.cert.pem"), remote: "https://127.0.0.1:9443", dataDir, agentApi: `http://127.0.0.1:${AGENT_PORT}`, tokens: { tester: t1, tester2: t2 } }));
