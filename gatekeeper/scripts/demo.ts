@@ -114,12 +114,12 @@ async function runOnce(run: number) {
     await act(owner, Kind.Propose, { op: "SetPayee", account: SELLER_ADDR, category: "data" }, { label: "Price feed" });
     await act(owner, Kind.Propose, { op: "SetPayee", account: SUPPLIER, category: "supplies" }, { label: "Supplier Co" });
     await act(owner, Kind.Propose, { op: "AddMember", member: manager.address }, { label: "Manager" });
+    await act(owner, Kind.Propose, { op: "SetThreshold", usd: 0.5 }); // two-person approval from $0.50 (voted on like every edit)
     say("Waiting out the 60s timelock…");
     await until("setup executed", async () => {
       const p = (await state()).policy;
-      return p.agents.filter((a: { active: boolean }) => a.active).length === 3 && p.payees.length === 2 && p.members.length === 2;
+      return p.agents.filter((a: { active: boolean }) => a.active).length === 3 && p.payees.length === 2 && p.members.length === 2 && p.thresholdUsd === 0.5;
     });
-    await act(owner, Kind.Tighten, { op: "SetThreshold", usd: 0.5 }); // two-person approval from $0.50 (a tightening: instant)
     const before = await usdc();
 
     // ---- 1. normal work
@@ -152,12 +152,17 @@ async function runOnce(run: number) {
     const ruleId = autoRuleId(agents.Bills.id, "supplies");
     await until("block rule onchain", async () => (await state()).policy.rules.some((r: { id: string; active: boolean }) => r.id === ruleId && r.active), 150_000);
     const blocked = await agents.Bills.c.pay(SUPPLIER, 0.01, "routine supplies");
-    say("   Owner adds 'supplies need approval' (instant) and both members vote to lift the block…");
+    say("   Owner proposes 'supplies need approval' + lifting the block; the Manager votes yes on both…");
     const apId = ruleId.replace(/^sh-/, "ap-");
-    await act(owner, Kind.Tighten, { op: "AddRule", id: apId, outcome: "Approval", agent: agents.Bills.id, scope: "payment:supplies" });
+    const approvalRule: Change = { op: "AddRule", id: apId, outcome: "Approval", agent: agents.Bills.id, scope: "payment:supplies" };
+    const ap = await act(owner, Kind.Propose, approvalRule);
+    await act(manager, Kind.Vote, approvalRule, { proposalId: Number(ap.proposalId), support: true }); // a vote signs the change itself
     const prop = await act(owner, Kind.Propose, { op: "RemoveRule", id: ruleId });
-    await act(manager, Kind.Vote, { op: "RemoveRule", id: ruleId }, { proposalId: Number(prop.proposalId), support: true }); // a vote signs the change itself
-    await until("restore executed", async () => !(await state()).policy.rules.some((r: { id: string; active: boolean }) => r.id === ruleId && r.active));
+    await act(manager, Kind.Vote, { op: "RemoveRule", id: ruleId }, { proposalId: Number(prop.proposalId), support: true });
+    await until("restore executed", async () => {
+      const rules = (await state()).policy.rules as { id: string; active: boolean }[];
+      return !rules.some((r) => r.id === ruleId && r.active) && rules.some((r) => r.id === apId && r.active);
+    });
     const restored = await agents.Bills.c.pay(SUPPLIER, 0.01, "routine supplies");
     record("3. Auto-Shield: falls for fake invoice → $0 moves → category blocked → vote restores with approval required",
       fell.status === "denied" && blocked.status === "denied" && restored.status === "pending",

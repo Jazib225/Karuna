@@ -81,6 +81,7 @@ contract Dharma {
     error BadSignature();
     error Expired();
     error NotTightening();
+    error MembersMustPropose();
     error UseTighten();
     error CoreBoundary();
     error Invalid(string why);
@@ -169,8 +170,10 @@ contract Dharma {
 
     // ------------------------------------------------------------------ member actions
 
-    /// @notice Apply a tightening right away. Signed by a member — or sent by the Gatekeeper with
-    ///         signer = 0 (Auto-Shield, Swarm Stopper), which can therefore only ever tighten.
+    /// @notice Apply a tightening right away. Only two paths are instant:
+    ///         - the Gatekeeper with signer = 0 (Auto-Shield, Swarm Stopper, learned blocks), tighten-only;
+    ///         - a member's panic button (Freeze).
+    ///         Every other change a member makes goes through propose → vote → timelock, even a tightening.
     function tighten(Op op, bytes calldata data, address signer, uint256 deadline, bytes calldata sig) external {
         address actor;
         if (signer == address(0)) {
@@ -178,6 +181,7 @@ contract Dharma {
             actor = gatekeeper;
         } else {
             _auth(Kind.Tighten, op, data, 0, false, signer, deadline, sig);
+            if (op != Op.Freeze) revert MembersMustPropose();
             actor = signer;
         }
         if (!isTightening(op, data)) revert NotTightening();
@@ -186,10 +190,10 @@ contract Dharma {
         emit Tightened(op, actor);
     }
 
-    /// @notice Propose a loosening. The proposer's signature also counts as their "yes" vote.
+    /// @notice Propose any change (members' edits always go to a vote). The proposer's signature also
+    ///         counts as their "yes" vote.
     function propose(Op op, bytes calldata data, address signer, uint256 deadline, bytes calldata sig) external returns (uint256 id) {
         _auth(Kind.Propose, op, data, 0, false, signer, deadline, sig);
-        if (isTightening(op, data)) revert UseTighten();
         _validate(op, data);
         id = _proposals.length;
         _proposals.push(Proposal(op, data, signer, uint64(block.timestamp), 0, 0, 0, Status.Open));

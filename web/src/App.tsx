@@ -163,7 +163,7 @@ function Setup({ s, me, run, busy }: { s: Snapshot; me: PrivateKeyAccount; run: 
         <div className="pad stack">
           <div>
             <h2 className="setup-title">Set up your organization</h2>
-            <p className="muted">Karuna deploys your organization's own <b>Dharma</b> rulebook on Arc. Tightening a rule takes effect at once; loosening one needs a vote and a waiting period. You'll be its first member.</p>
+            <p className="muted">Karuna deploys your organization's own <b>Dharma</b> rulebook on Arc. Every rule change needs your team's vote and a short waiting period; only the panic button acts instantly. You'll be its first member.</p>
           </div>
           <label className="field">
             <span>Organization name</span>
@@ -240,7 +240,7 @@ interface Ctx {
   me: PrivateKeyAccount;
   run: Run;
   busy: boolean;
-  /** Sign a change: applied now if it's a tightening, proposed for a vote otherwise. */
+  /** Sign a change. Every rule change is proposed for a vote; only the panic button (Freeze) applies at once. */
   change: (c: Change, label?: string) => Promise<boolean>;
   vote: (g: Governance, support: boolean) => Promise<boolean>;
   name: (address?: string | null) => string;
@@ -276,10 +276,10 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
   const ctx: Ctx = {
     s, me, run, busy, name,
     change: (c, label) => {
-      const now = isTightening(c, shape);
+      const now = c.op === "Freeze";
       return run(
         () => submitChange(me, dharma, { kind: now ? Kind.Tighten : Kind.Propose, change: c, label }),
-        now ? "Applied on Dharma — in effect now" : `Proposed on Dharma — needs ${pol.required} vote${pol.required > 1 ? "s" : ""}, then ${pol.timelock}s`,
+        now ? "All agents frozen — recorded on Dharma" : `Proposed — goes to Votes: needs ${pol.required} vote${pol.required > 1 ? "s" : ""}, then ${pol.timelock}s`,
       );
     },
     vote: (g, support) => run(() => submitChange(me, dharma, { kind: Kind.Vote, change: g.change as Change, proposalId: g.id, support }), support ? "Vote recorded" : "Voted against"),
@@ -611,7 +611,7 @@ function Dharma({ ctx }: { ctx: Ctx }) {
           <div><div className="k">To loosen</div><div className="mono">{pol.required} of {pol.members.length} votes + {pol.timelock}s</div></div>
           <div><div className="k">Signed log anchored</div><div className="mono">{pol.anchor.length} of {s.log.length} entries</div></div>
         </div>
-        <div className="log-foot"><span>tightening: instant, one member · loosening: proposal → majority vote → timelock</span><span>core boundaries: never</span></div>
+        <div className="log-foot"><span>every rule change: proposal → majority vote → timelock · panic button: instant</span><span>core boundaries: never</span></div>
       </div>
 
       <p className="section-title">In progress</p>
@@ -729,7 +729,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
         <label className="field"><span>Daily allowance (USD)</span><input required type="number" min="0" step="0.000001" value={form.cap} onChange={(e) => setForm({ ...form, cap: e.target.value })} /></label>
         <button className="btn btn-dark" type="submit" disabled={busy}>Propose agent</button>
       </form>
-      <p className="section-title">Lowering an allowance or removing an agent applies at once. Adding an agent or raising an allowance is a loosening — it goes to a vote.</p>
+      <p className="section-title">Adding an agent, removing one, or changing its allowance goes to a team vote.</p>
       {pol.agents.length === 0 ? (
         <div className="card"><div className="empty">No agents yet.</div></div>
       ) : (
@@ -751,7 +751,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
                     ) : (
                       <form className="cap-edit" onSubmit={(e) => { e.preventDefault(); ctx.change({ op: "SetAgent", id: a.id, capUsd: Number(ed) }).then((ok) => ok && setEditing(({ [a.id]: _, ...rest }) => rest)); }}>
                         <input autoFocus type="number" min="0" step="0.000001" value={ed} onChange={(e) => setEditing({ ...editing, [a.id]: e.target.value })} />
-                        <button className="btn btn-ghost btn-sm" disabled={busy}>{Number(ed) > a.capUsd ? "propose" : "apply"}</button>
+                        <button className="btn btn-ghost btn-sm" disabled={busy}>propose</button>
                       </form>
                     )}
                     <span className="tag">{a.hasToken ? "token issued" : "no token"}</span>
@@ -793,7 +793,7 @@ function Payees({ ctx }: { ctx: Ctx }) {
         <label className="field"><span>Category</span><input required value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="e.g. data, utilities" /></label>
         <button className="btn btn-dark" type="submit" disabled={busy}>Propose payee</button>
       </form>
-      <p className="section-title">Payments to any address not on Dharma's list are denied. Adding a payee is a loosening (vote + timelock); removing one applies at once.</p>
+      <p className="section-title">Payments to any address not on Dharma's list are denied. Adding or removing a payee goes to a team vote.</p>
       <div className="card">
         <div className="hd"><h2>Known payees</h2><span className="sub">{pol.payees.length} onchain</span></div>
         {pol.payees.length === 0 ? (
@@ -854,7 +854,7 @@ function Policy({ ctx }: { ctx: Ctx }) {
                   <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => ctx.change({ op: "RemoveRule", id: r.id })}>{r.outcome === "allow" ? "remove" : "propose removal"}</button>
                 )}
                 {!r.core && !r.active && r.builtin && (
-                  <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => ctx.change({ op: "AddRule", id: r.id, outcome: "Deny" })}>{r.outcome === "allow" ? "propose re-enable" : "re-enable"}</button>
+                  <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => ctx.change({ op: "AddRule", id: r.id, outcome: "Deny" })}>{"propose re-enable"}</button>
                 )}
               </span>
             </div>
@@ -882,7 +882,7 @@ function Policy({ ctx }: { ctx: Ctx }) {
             {pol.payees.map((p) => <option key={p.account} value={p.account}>{p.name ?? short(p.account)}</option>)}
           </select>
         </label>
-        <button className="btn btn-dark" disabled={busy}>Add — applies now</button>
+        <button className="btn btn-dark" disabled={busy}>Propose rule</button>
       </form>
 
       <div className="grid2">
@@ -890,7 +890,7 @@ function Policy({ ctx }: { ctx: Ctx }) {
           <div className="hd"><h2>Allowlisted domains</h2></div>
           <div className="pad stack">
             <div className="pills">
-              {pol.domains.map((d) => (<span className="pill" key={d}>{d} <a className="x" title="Block — applies now" onClick={() => !busy && ctx.change({ op: "RemoveDomain", domain: d })}>×</a></span>))}
+              {pol.domains.map((d) => (<span className="pill" key={d}>{d} <a className="x" title="Propose removing this domain" onClick={() => !busy && ctx.change({ op: "RemoveDomain", domain: d })}>×</a></span>))}
               {pol.domains.length === 0 && <span className="muted">None — all HTTP is denied.</span>}
             </div>
             <form className="row-form" onSubmit={(e) => { e.preventDefault(); ctx.change({ op: "AddDomain", domain: domain.trim().toLowerCase() }).then((ok) => ok && setDomain("")); }}>
@@ -902,11 +902,11 @@ function Policy({ ctx }: { ctx: Ctx }) {
         <div className="card">
           <div className="hd"><h2>Two-person approval</h2></div>
           <div className="pad stack">
-            <p className="muted">Payments at or above this need two members' signatures{pol.members.length < 2 ? " (once there are two members)" : ""}. Lowering it applies now; raising it goes to a vote.</p>
+            <p className="muted">Payments at or above this need two members' signatures{pol.members.length < 2 ? " (once there are two members)" : ""}. Changing it goes to a team vote.</p>
             <form className="row-form" onSubmit={(e) => { e.preventDefault(); ctx.change({ op: "SetThreshold", usd: Number(threshold) }); }}>
               <span className="mono">$</span>
               <input type="number" min="0" step="0.01" value={threshold} onChange={(e) => setThreshold(e.target.value)} />
-              <button className="btn btn-ghost btn-sm" disabled={busy}>{Number(threshold) > pol.thresholdUsd ? "Propose" : "Apply"}</button>
+              <button className="btn btn-ghost btn-sm" disabled={busy}>Propose</button>
             </form>
           </div>
         </div>
@@ -1205,7 +1205,7 @@ function Shield({ ctx, part }: { ctx: Ctx; part: "tests" | "messages" }) {
                     ) : (
                       <>
                         <button className="btn btn-ghost btn-sm" disabled={busy || hasApproval}
-                          title="Adds a rule that sends this agent's payments in this category to a human (applies now), then proposes lifting the block"
+                          title="Proposes two changes for a vote: send this agent's payments in this category to a human, and lift the block"
                           onClick={async () => {
                             const ok = await ctx.change({ op: "AddRule", id: approvalId, outcome: "Approval", agent: r.agent ?? undefined, scope: `payment:${r.category}` });
                             if (ok) await ctx.change({ op: "RemoveRule", id: r.id });
@@ -1221,7 +1221,7 @@ function Shield({ ctx, part }: { ctx: Ctx; part: "tests" | "messages" }) {
             })}
           </div>
         )}
-        <div className="log-foot"><span>lifting a block is a loosening: {pol.required} vote{pol.required > 1 ? "s" : ""} + {pol.timelock}s</span><span>tightening it further applies at once</span></div>
+        <div className="log-foot"><span>lifting a block is a loosening: {pol.required} vote{pol.required > 1 ? "s" : ""} + {pol.timelock}s</span><span>Auto-Shield's own blocks apply instantly</span></div>
       </div>
 
       <div>
@@ -1396,7 +1396,7 @@ function Learned({ ctx }: { ctx: Ctx }) {
         <div className="tr learn-tr" key={b.id}>
           <span className="chip allow">learned rule</span>
           <span className="small"><b>{b.agentName ?? "Every agent"}</b> pays <b>{who(b.targetName, b.target)}</b> up to {usd(b.maxUsd)} without asking</span>
-          <button className="btn btn-ghost btn-sm" disabled={busy} title="Revoking is a tightening: it applies at once" onClick={() => ctx.change({ op: "RemoveRule", id: b.id })}>Revoke</button>
+          <button className="btn btn-ghost btn-sm" disabled={busy} title="Proposes revoking this rule (team vote)" onClick={() => ctx.change({ op: "RemoveRule", id: b.id })}>Propose revoking</button>
         </div>
       ))}
       {L.precedents.length > 0 && (

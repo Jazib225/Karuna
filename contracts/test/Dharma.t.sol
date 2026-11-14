@@ -98,11 +98,24 @@ contract DharmaTest is Test {
 
     // ------------------------------------------------------------- ROADMAP: tighten is instant
 
-    function test_adding_a_block_rule_takes_effect_immediately() public {
+    function test_a_members_block_rule_goes_to_a_vote() public {
+        bytes memory sig = sign(aliceKey, Dharma.Kind.Tighten, Dharma.Op.AddRule, blockRule("no-supplies"), 0, false);
+        vm.prank(gk);
+        vm.expectRevert(Dharma.MembersMustPropose.selector);
+        dharma.tighten(Dharma.Op.AddRule, blockRule("no-supplies"), alice, block.timestamp + 1 hours, sig);
+
+        uint256 id = propose(aliceKey, Dharma.Op.AddRule, blockRule("no-supplies"));
+        assertFalse(ruleActive("no-supplies")); // not until the timelock passes
+        vm.warp(block.timestamp + TIMELOCK);
         vm.expectEmit(true, false, false, true);
         emit Dharma.RuleAdded(bytes32("no-supplies"), Dharma.Outcome.Deny, AGENT, "payment:supplies", "", 0);
-        tighten(aliceKey, Dharma.Op.AddRule, blockRule("no-supplies"));
+        dharma.execute(id);
         assertTrue(ruleActive("no-supplies"));
+    }
+
+    function gkTighten(Dharma.Op op, bytes memory data) internal {
+        vm.prank(gk);
+        dharma.tighten(op, data, address(0), 0, "");
     }
 
     function test_gatekeeper_can_tighten_alone_but_never_loosen() public {
@@ -135,22 +148,20 @@ contract DharmaTest is Test {
         bytes memory data = abi.encode(PAYEE, "data");
         bytes memory sig = sign(aliceKey, Dharma.Kind.Tighten, Dharma.Op.SetPayee, data, 0, false);
         vm.prank(gk);
-        vm.expectRevert(Dharma.NotTightening.selector);
+        vm.expectRevert(Dharma.MembersMustPropose.selector);
         dharma.tighten(Dharma.Op.SetPayee, data, alice, block.timestamp + 1 hours, sig);
     }
 
-    function test_a_tightening_cannot_be_proposed() public {
-        bytes memory data = blockRule("x");
-        bytes memory sig = sign(aliceKey, Dharma.Kind.Propose, Dharma.Op.AddRule, data, 0, false);
-        vm.expectRevert(Dharma.UseTighten.selector);
-        dharma.propose(Dharma.Op.AddRule, data, alice, block.timestamp + 1 hours, sig);
+    function test_a_tightening_can_be_proposed() public {
+        uint256 id = propose(aliceKey, Dharma.Op.AddRule, blockRule("x"));
+        assertEq(uint8(dharma.proposal(id).status), uint8(Dharma.Status.Queued)); // alice alone is a majority
     }
 
     // ------------------------------------------------------------- ROADMAP: loosen is slow + public
 
     function test_removing_a_rule_only_works_after_the_vote_and_the_wait() public {
         addMembers(); // alice, bob, carol → 2 of 3 needed
-        tighten(bobKey, Dharma.Op.AddRule, blockRule("no-supplies"));
+        gkTighten(Dharma.Op.AddRule, blockRule("no-supplies")); // e.g. Auto-Shield's block
 
         uint256 id = propose(aliceKey, Dharma.Op.RemoveRule, abi.encode(bytes32("no-supplies")));
         assertEq(uint8(dharma.proposal(id).status), uint8(Dharma.Status.Open));
@@ -203,7 +214,7 @@ contract DharmaTest is Test {
             // not through the fast path...
             bytes memory tsig = sign(aliceKey, Dharma.Kind.Tighten, Dharma.Op.RemoveRule, data, 0, false);
             vm.prank(gk);
-            vm.expectRevert(Dharma.NotTightening.selector);
+            vm.expectRevert(Dharma.MembersMustPropose.selector);
             dharma.tighten(Dharma.Op.RemoveRule, data, alice, block.timestamp + 1 hours, tsig);
             // ...and not through a vote either
             bytes memory psig = sign(aliceKey, Dharma.Kind.Propose, Dharma.Op.RemoveRule, data, 0, false);
@@ -216,8 +227,8 @@ contract DharmaTest is Test {
     function test_non_core_default_rules_can_be_removed_by_vote() public {
         pass(Dharma.Op.RemoveRule, abi.encode(bytes32("package-install")));
         assertFalse(ruleActive("package-install"));
-        // re-enabling a deny/approval default is a tightening
-        tighten(aliceKey, Dharma.Op.AddRule, abi.encode(bytes32("package-install"), uint8(0), bytes32(0), "", "", uint256(0)));
+        // re-enabling it is a member edit too: a vote
+        pass(Dharma.Op.AddRule, abi.encode(bytes32("package-install"), uint8(0), bytes32(0), "", "", uint256(0)));
         assertTrue(ruleActive("package-install"));
     }
 
@@ -228,7 +239,7 @@ contract DharmaTest is Test {
         assertEq(dharma.agentCap(AGENT), 10e6);
         assertTrue(dharma.isTightening(Dharma.Op.SetAgent, abi.encode(AGENT, uint256(5e6))));
         assertFalse(dharma.isTightening(Dharma.Op.SetAgent, abi.encode(AGENT, uint256(20e6))));
-        tighten(aliceKey, Dharma.Op.SetAgent, abi.encode(AGENT, uint256(5e6)));
+        pass(Dharma.Op.SetAgent, abi.encode(AGENT, uint256(5e6))); // lowering is a member edit: a vote
         assertEq(dharma.agentCap(AGENT), 5e6);
     }
 
@@ -241,7 +252,7 @@ contract DharmaTest is Test {
         pass(Dharma.Op.SetPayee, abi.encode(PAYEE, "data"));
         assertEq(dharma.payees().length, 1);
         assertEq(dharma.payees()[0].category, "data");
-        tighten(aliceKey, Dharma.Op.RemovePayee, abi.encode(PAYEE));
+        pass(Dharma.Op.RemovePayee, abi.encode(PAYEE));
         assertEq(dharma.payees().length, 0);
     }
 
@@ -284,15 +295,14 @@ contract DharmaTest is Test {
     }
 
     function test_signatures_cannot_be_replayed() public {
-        bytes memory data = blockRule("r1");
-        bytes memory sig = sign(aliceKey, Dharma.Kind.Tighten, Dharma.Op.AddRule, data, 0, false);
+        bytes memory sig = sign(aliceKey, Dharma.Kind.Tighten, Dharma.Op.Freeze, "", 0, false);
         uint256 deadline = block.timestamp + 1 hours;
         vm.prank(gk);
-        dharma.tighten(Dharma.Op.AddRule, data, alice, deadline, sig);
+        dharma.tighten(Dharma.Op.Freeze, "", alice, deadline, sig);
         // the same signed action, submitted again: the nonce moved on, so it no longer verifies
         vm.prank(gk);
         vm.expectRevert(Dharma.BadSignature.selector);
-        dharma.tighten(Dharma.Op.AddRule, data, alice, deadline, sig);
+        dharma.tighten(Dharma.Op.Freeze, "", alice, deadline, sig);
     }
 
     function test_expired_signatures_are_rejected() public {

@@ -1133,6 +1133,11 @@ export const DHARMA_ABI = [
   },
   {
     "type": "error",
+    "name": "MembersMustPropose",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "NotGatekeeper",
     "inputs": []
   },

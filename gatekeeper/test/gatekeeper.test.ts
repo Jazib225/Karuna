@@ -160,18 +160,22 @@ describe("setup deploys the org's own Dharma", () => {
   });
 });
 
-describe("ROADMAP Phase 3: tighten fast, loosen slow", () => {
-  it("adding a block rule takes effect immediately", async () => {
+describe("Rule changes: every member edit is voted on; only panic is instant", () => {
+  it("a member's block rule can't be applied instantly — it's proposed, then applies after the vote and the wait", async () => {
     const { token } = await activateAgent(10);
     await addPayee(SELLER, "data");
     const agent = gk.authenticateAgent(token)!;
     expect((await gk.propose(agent, { type: "x402", url: "http://seller.test/x" })).status).toBe("done");
 
-    await tighten(alice, { op: "AddRule", id: "no-data", outcome: "Deny", agent, scope: "payment:data" });
+    const rule: Change = { op: "AddRule", id: "no-data", outcome: "Deny", agent, scope: "payment:data" };
+    await expect(tighten(alice, rule)).rejects.toThrow(/go to a vote/);
+    await propose(alice, rule);
+    expect((await gk.propose(agent, { type: "x402", url: "http://seller.test/x" })).status).toBe("done"); // not yet
+    await waitTimelock();
     const r = await gk.propose(agent, { type: "x402", url: "http://seller.test/x" });
     expect(r.status).toBe("denied");
     expect(gk.snapshot().proposals[0].decision.ruleId).toBe("no-data");
-    expect(wallet.paid).toHaveLength(1);
+    expect(wallet.paid).toHaveLength(2);
   }, 30_000);
 
   it("removing a rule only works after the vote and the wait", async () => {
@@ -180,7 +184,10 @@ describe("ROADMAP Phase 3: tighten fast, loosen slow", () => {
     await waitTimelock();
     expect(gk.snapshot().policy!.members).toHaveLength(2);
 
-    await tighten(bob, { op: "AddRule", id: "no-data", outcome: "Deny", scope: "payment:data" });
+    const add: Change = { op: "AddRule", id: "no-data", outcome: "Deny", scope: "payment:data" };
+    const added = await propose(bob, add);
+    await vote(alice, added.proposalId!, add);
+    await waitTimelock();
     const removal: Change = { op: "RemoveRule", id: "no-data" };
     const { proposalId } = await propose(alice, removal);
     const prop = () => gk.snapshot().policy!.proposals.find((p) => p.id === proposalId)!;
@@ -202,7 +209,7 @@ describe("ROADMAP Phase 3: tighten fast, loosen slow", () => {
   it("removing a core boundary always fails", async () => {
     for (const id of ["core-boundary", "secrets-read", "unknown-recipient", "default-deny"]) {
       await expect(propose(alice, { op: "RemoveRule", id })).rejects.toThrow(/CoreBoundary/);
-      await expect(tighten(alice, { op: "RemoveRule", id })).rejects.toThrow(/NotTightening/);
+      await expect(tighten(alice, { op: "RemoveRule", id })).rejects.toThrow(/go to a vote/);
     }
   }, 30_000);
 
@@ -272,7 +279,10 @@ describe("payment approvals are signed by members (Exact Match)", () => {
   it("two-person approval needs two different members' keys", async () => {
     await propose(alice, { op: "AddMember", member: bob.address }, "Bob");
     await waitTimelock();
-    await tighten(bob, { op: "SetThreshold", usd: 2 }); // lowering it is a tightening
+    const lower: Change = { op: "SetThreshold", usd: 2 }; // even lowering it is voted on
+    const t = await propose(bob, lower);
+    await vote(alice, t.proposalId!, lower);
+    await waitTimelock();
     const { id, token } = gk.prepareAgent("Ops agent");
     const add: Change = { op: "SetAgent", id, capUsd: 0 };
     const { proposalId } = await propose(alice, add);

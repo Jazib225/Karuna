@@ -27,9 +27,11 @@ can be tricked into misusing it. **The agent proposes. Karuna decides. People se
 - **Three locks:** the Gatekeeper's policy engine, the Dharma contract (rules, allowances, payees,
   freeze, core boundaries), and the wallet itself, which only the Gatekeeper holds. Circle's wallet
   spending limits are mainnet only, so on testnet Dharma + the Gatekeeper enforce limits.
-- **Dharma** (`contracts/src/Dharma.sol`): one contract per organization. Tightening is instant
-  (any member, or the Gatekeeper on its own for Auto-Shield / Swarm Stopper). Loosening is a
-  proposal → majority vote → 60s timelock. Core boundaries (`core-boundary`, `secrets-read`,
+- **Dharma** (`contracts/src/Dharma.sol`): one contract per organization. **Every rule change a member
+  makes is a proposal → majority vote → 60s timelock**, even one that tightens. Only two things are
+  instant: a member's panic button (freeze all), and the Gatekeeper's own automatic safety blocks
+  (Auto-Shield, Swarm Stopper, learned blocks), which can only ever tighten. Dharma enforces both
+  (`MembersMustPropose`, `NotTightening`). Core boundaries (`core-boundary`, `secrets-read`,
   `unknown-recipient`, `default-deny`) can't be removed. Every action is an EIP-712 signature from
   a member's own key; the Gatekeeper only relays it.
 
@@ -67,7 +69,7 @@ which source delivered each alert. Setup: [`docs/QUICKNODE.md`](docs/QUICKNODE.m
 ## Safety rules enforced in code
 1. Agents hold no keys, wallet or money (`pnpm --dir agents check:no-keys`).
 2. Agents only propose; denials are blank (`denied`), never the reason.
-3. Tightening is instant; loosening is vote + timelock; core boundaries can't be removed (contract).
+3. Every member rule change is vote + timelock; automatic safety blocks and the panic button are instant and can only tighten; core boundaries can't be removed (contract).
 4. Auto-Shield and Swarm Stopper can only add blocks or freeze (`assertShieldSafe`, Dharma's `NotTightening`).
 5. What a human approved is exactly what executes (payload hash + re-quote, else refused).
 6. Every decision, test, block, trip and approval is in the signed log and anchored on Arc.
@@ -127,8 +129,8 @@ pnpm --dir web dev                    # console at http://127.0.0.1:5173
 ```
 A new install opens on **setup**: name your organization, pick the wallet, and Karuna deploys your
 organization's own **Dharma** contract on Arc with this browser's signing key as its first member.
-Then propose agents, payees, and teammates — loosenings pass by vote after a timelock; tightenings
-(blocks, lower limits, removals, panic) apply at once. Nothing about any organization is built in.
+Then propose agents, payees, and teammates — every change passes by vote after a timelock; only the
+panic button applies at once. Nothing about any organization is built in.
 
 Each member uses their own browser: it holds the key that signs their votes and approvals.
 

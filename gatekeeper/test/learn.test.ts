@@ -159,7 +159,8 @@ describe("Preview Before Loosening", () => {
   }, 30_000);
 
   it("counts a scam that would now reach an approval card instead of a block", async () => {
-    await gk.submitAction(await sign(Kind.Tighten, { op: "AddRule", id: "ap-bills-supplies", outcome: "Approval", agent: bills, scope: "payment:supplies" }));
+    await gk.submitAction(await sign(Kind.Propose, { op: "AddRule", id: "ap-bills-supplies", outcome: "Approval", agent: bills, scope: "payment:supplies" }));
+    await passTimelock();
     expect((await gk.propose(bills, { type: "transfer", to: NEW_ACCOUNT, amountUsd: 0.2, payeeName: "Supplier" })).status).toBe("denied");
     const res = await gk.submitAction(await sign(Kind.Propose, { op: "SetPayee", account: NEW_ACCOUNT, category: "supplies" }));
     const pv = gk.snapshot().policy!.proposals.find((g) => g.id === Number(res.proposalId))!.preview!;

@@ -456,6 +456,11 @@ export class Gatekeeper extends EventEmitter {
     } catch {
       throw new GatekeeperError("Malformed change");
     }
+    // Every member edit goes to a vote, even one that tightens; only the panic button is instant.
+    // (Dharma enforces this too: MembersMustPropose.) Automatic safety writes don't come through here.
+    if (a.kind === Kind.Tighten && change.op !== "Freeze") {
+      throw new GatekeeperError("Rule changes go to a vote: propose it instead. Only the panic button applies instantly.", 409);
+    }
 
     const nonce = await this.deps.client.readContract({ address: this.dharmaAddress(), abi: DHARMA_ABI, functionName: "nonces", args: [signer] });
     const typed = actionTypedData(this.dharmaAddress(), p.chainId, {
