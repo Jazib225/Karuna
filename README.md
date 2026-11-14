@@ -276,7 +276,3 @@ Dharma's members. `cd desktop && npm run mock` plays a scripted Gatekeeper for t
 | Explorer | https://testnet.arcscan.app |
 | Faucet | https://faucet.circle.com (20 USDC / 2h) or `circle wallet fund` |
 | Circle CLI chain id | `ARC-TESTNET` |
-
-## What existed before the hackathon
-Karuna's website (karunaprotocol.dev) and SDK preview. This repository was started on Nov 9, 2026;
-its git history shows what was built when. <!-- TODO before submitting: confirm the prior-work rule with the organizers and state it here. -->
