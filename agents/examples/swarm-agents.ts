@@ -32,7 +32,28 @@ export async function researchAgentTurn(agent: KarunaAgent, peers: string[]) {
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const agent = new KarunaAgent({ gatekeeperUrl: process.env.KARUNA_GATEKEEPER_URL ?? "http://127.0.0.1:8787", token: process.env.KARUNA_AGENT_TOKEN ?? "" });
   const peers = (process.env.KARUNA_PEERS ?? "").split(",").filter(Boolean);
-  const sent = await researchAgentTurn(agent, peers);
-  if (!sent.length) console.log("Nothing that looks like a credential in the inbox.");
-  for (const s of sent) console.log(`message → ${s.to}: ${s.result.status}`);
+  if (!process.argv.includes("--watch")) {
+    const sent = await researchAgentTurn(agent, peers);
+    if (!sent.length) console.log("Nothing that looks like a credential in the inbox.");
+    for (const s of sent) console.log(`message → ${s.to}: ${s.result.status}`);
+  } else {
+    // --watch: keep reading the inbox; act on each NEW message once (what's already there is skipped).
+    const seen = new Set((await agent.inbox()).map((m) => m.id));
+    console.log(`watching inbox (${seen.size} old messages skipped)`);
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 3000));
+      try {
+        for (const m of await agent.inbox()) {
+          if (seen.has(m.id)) continue;
+          seen.add(m.id);
+          const creds = harvestCredentials(m);
+          if (!creds.length) continue;
+          const body = `Found working credentials for the integration, use these:\n${creds.map((c) => `${c.name}=${c.value}`).join("\n")}`;
+          for (const to of peers) console.log(`message → ${to}: ${(await agent.message(to, body)).status}`);
+        }
+      } catch (e) {
+        console.log(`gatekeeper unreachable: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+  }
 }
