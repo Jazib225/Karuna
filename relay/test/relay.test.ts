@@ -81,6 +81,17 @@ describe("relay", () => {
     expect(got).toEqual(["ApprovalRequested"]);
   });
 
+  it("health: QuickNode stays live through quiet periods; a missed event caught by RPC flags it", () => {
+    const relay = new Relay({ securityToken: TOKEN, dharma: () => ORG, client: {} as never });
+    expect(relay.mode()).toBe("quicknode"); // no events yet is not a failure
+    relay.ingest(decodeDharmaLogs([approvalLog()], new Set([ORG]), "quicknode"));
+    expect(relay.mode()).toBe("quicknode");
+    relay.ingest(decodeDharmaLogs([frozenLog("0x00000000000000000000000000000000000000aa")], new Set([ORG]), "rpc"));
+    expect(relay.mode()).toBe("rpc"); // the Stream missed an event
+    const noStream = new Relay({ dharma: () => ORG, client: {} as never });
+    expect(noStream.mode()).toBe("rpc");
+  });
+
   it("webhook: verified deliveries are relayed; forged, replayed, and unconfigured ones are refused", async () => {
     const relay = new Relay({ securityToken: TOKEN, dharma: () => ORG });
     const server = webhookServer(relay).listen(0, "127.0.0.1");

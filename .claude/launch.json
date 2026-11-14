@@ -1,11 +1,81 @@
 {
   "version": "0.0.1",
   "configurations": [
-    { "name": "gatekeeper", "runtimeExecutable": "pnpm", "runtimeArgs": ["--dir", "gatekeeper", "start"], "port": 8788 },
-    { "name": "relay", "runtimeExecutable": "pnpm", "runtimeArgs": ["--dir", "relay", "start"], "port": 8790 },
-    { "name": "web", "runtimeExecutable": "pnpm", "runtimeArgs": ["--dir", "web", "dev"], "port": 5173, "url": "http://127.0.0.1:5173" },
-    { "name": "e2e-gatekeeper", "runtimeExecutable": "env", "runtimeArgs": ["KARUNA_DATA_DIR=/tmp/claude-1000/-home-jazibrq--config-Claude-scratch-workspaces-a4a66c6d-5ee0-414c-af60-29ad18472ccf-f2cd3371-adb3-4665-998b-07da83c5df21-scratch-2026-11-09-60b6bb/fa14816e-44e9-494b-a661-c3be8ec6d838/scratchpad/e2e4-data", "KARUNA_AGENT_PORT=9787", "KARUNA_CONSOLE_PORT=9788", "pnpm", "--dir", "gatekeeper", "start"], "port": 9788 },
-    { "name": "e2e-relay", "runtimeExecutable": "env", "runtimeArgs": ["KARUNA_DATA_DIR=/tmp/claude-1000/-home-jazibrq--config-Claude-scratch-workspaces-a4a66c6d-5ee0-414c-af60-29ad18472ccf-f2cd3371-adb3-4665-998b-07da83c5df21-scratch-2026-11-09-60b6bb/fa14816e-44e9-494b-a661-c3be8ec6d838/scratchpad/e2e4-data", "KARUNA_CONSOLE_PORT=9788", "RELAY_PORT=9790", "RELAY_WEBHOOK_PORT=9791", "pnpm", "--dir", "relay", "start"], "port": 9790 },
-    { "name": "e2e-web", "runtimeExecutable": "env", "runtimeArgs": ["KARUNA_DATA_DIR=/tmp/claude-1000/-home-jazibrq--config-Claude-scratch-workspaces-a4a66c6d-5ee0-414c-af60-29ad18472ccf-f2cd3371-adb3-4665-998b-07da83c5df21-scratch-2026-11-09-60b6bb/fa14816e-44e9-494b-a661-c3be8ec6d838/scratchpad/e2e4-data", "KARUNA_CONSOLE_PORT=9788", "RELAY_PORT=9790", "KARUNA_WEB_PORT=5174", "pnpm", "--dir", "web", "dev"], "port": 5174, "url": "http://127.0.0.1:5174" }
+    {
+      "name": "gatekeeper",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": [
+        "--dir",
+        "gatekeeper",
+        "start"
+      ],
+      "port": 8788
+    },
+    {
+      "name": "relay",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": [
+        "--dir",
+        "relay",
+        "start"
+      ],
+      "port": 8790
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": [
+        "--dir",
+        "web",
+        "dev"
+      ],
+      "port": 5173,
+      "url": "http://127.0.0.1:5173"
+    },
+    {
+      "name": "e2e-gatekeeper",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "KARUNA_DATA_DIR=/tmp/claude-1000/-home-jazibrq--config-Claude-scratch-workspaces-a4a66c6d-5ee0-414c-af60-29ad18472ccf-f2cd3371-adb3-4665-998b-07da83c5df21-scratch-2026-11-09-60b6bb/fa14816e-44e9-494b-a661-c3be8ec6d838/scratchpad/e2e4-data",
+        "KARUNA_AGENT_PORT=9787",
+        "KARUNA_CONSOLE_PORT=9788",
+        "pnpm",
+        "--dir",
+        "gatekeeper",
+        "start"
+      ],
+      "port": 9788
+    },
+    {
+      "name": "e2e-relay",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "KARUNA_DATA_DIR=/tmp/claude-1000/-home-jazibrq--config-Claude-scratch-workspaces-a4a66c6d-5ee0-414c-af60-29ad18472ccf-f2cd3371-adb3-4665-998b-07da83c5df21-scratch-2026-11-09-60b6bb/fa14816e-44e9-494b-a661-c3be8ec6d838/scratchpad/e2e4-data",
+        "KARUNA_CONSOLE_PORT=9788",
+        "RELAY_PORT=9790",
+        "RELAY_WEBHOOK_PORT=9791",
+        "pnpm",
+        "--dir",
+        "relay",
+        "start"
+      ],
+      "port": 9790
+    },
+    {
+      "name": "e2e-web",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "KARUNA_DATA_DIR=/tmp/claude-1000/-home-jazibrq--config-Claude-scratch-workspaces-a4a66c6d-5ee0-414c-af60-29ad18472ccf-f2cd3371-adb3-4665-998b-07da83c5df21-scratch-2026-11-09-60b6bb/fa14816e-44e9-494b-a661-c3be8ec6d838/scratchpad/e2e4-data",
+        "KARUNA_CONSOLE_PORT=9788",
+        "RELAY_PORT=9790",
+        "KARUNA_WEB_PORT=5174",
+        "pnpm",
+        "--dir",
+        "web",
+        "dev"
+      ],
+      "port": 5174,
+      "url": "http://127.0.0.1:5174"
+    }
   ]
 }

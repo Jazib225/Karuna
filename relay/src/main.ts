@@ -41,7 +41,9 @@ async function refreshDharma() {
 await refreshDharma();
 setInterval(refreshDharma, 10_000);
 
-const client = createPublicClient({ chain: arcTestnet, transport: http(process.env.ARC_RPC_URL || undefined, { retryCount: 4, retryDelay: 500 }) }) as PublicClient;
+// The fallback reads logs. QuickNode's free plan caps eth_getLogs at a 5-block range, so log
+// queries go to Arc's public RPC unless ARC_LOGS_RPC_URL says otherwise.
+const client = createPublicClient({ chain: arcTestnet, transport: http(process.env.ARC_LOGS_RPC_URL || undefined, { retryCount: 4, retryDelay: 500 }) }) as PublicClient;
 const relay = new Relay({
   securityToken: process.env.QUICKNODE_SECURITY_TOKEN || undefined,
   client,

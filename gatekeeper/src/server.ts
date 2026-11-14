@@ -8,7 +8,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { timingSafeEqual } from "node:crypto";
 import { defaultRules } from "@prekaruna/engine";
 import { ConfigError } from "./config.ts";
-import { isTransient } from "./chain.ts";
+import { isTransient, scrub } from "./chain.ts";
 import { GatekeeperError, type AgentAction, type Gatekeeper, type SignedAction, type SignedDecision } from "./gatekeeper.ts";
 import type { WalletBackend } from "./wallet.ts";
 
@@ -40,7 +40,7 @@ function fail(res: ServerResponse, e: unknown) {
   if (e instanceof GatekeeperError) return send(res, e.status, { error: e.message });
   if (e instanceof ConfigError) return send(res, 400, { error: e.message });
   if (isTransient(e)) return send(res, 503, { error: "The Arc RPC is busy (rate limited). Try again in a moment — or set ARC_RPC_URL to your QuickNode endpoint." });
-  console.error(e);
+  console.error("gatekeeper error:", scrub(e));
   send(res, 500, { error: "Internal error" });
 }
 

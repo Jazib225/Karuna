@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import type { Address } from "viem";
 import type { PrivateKeyAccount } from "viem/accounts";
-import { isTightening, isAddr, type Change } from "@prekaruna/dharma";
+import { isTightening, isAddr, decodeChange, describeChange, type Change } from "@prekaruna/dharma";
 import { api, useGatekeeper, type AgentView, type Governance, type LogEntry, type Proposal, type Rule, type Snapshot, type WalletInfo } from "./api.ts";
 import { Kind, SignerUnavailable, decidePayment, loadSigner, submitChange } from "./signer.ts";
 import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
@@ -996,8 +996,22 @@ function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string
       return { ...base, tone: "bad", sticky: true, title: "All agents frozen", body: `${name(String(a.by))} hit the panic button. Recorded on Dharma.` };
     case "AgentsUnfrozen":
       return { ...base, tone: "ok", sticky: false, title: "Agents unfrozen", body: "The vote passed and the timelock ended." };
-    case "ProposalCreated":
-      return { ...base, tone: "info", sticky: true, go: "dharma", cta: "Vote", title: `New Dharma proposal #${a.id}`, body: `${name(String(a.proposer))}: ${gov(a.id)?.description ?? "a policy change"}` };
+    case "ProposalCreated": {
+      // The event carries the change itself, so describe it even before the proposal list refreshes.
+      let what = gov(a.id)?.description;
+      if (!what) {
+        try {
+          what = describeChange(decodeChange(Number(a.op), a.data as `0x${string}`), {
+            member: (x) => pol?.members.find((m) => m.address === x)?.name ?? undefined,
+            agent: (id) => pol?.agents.find((g) => g.id === id)?.name,
+            payee: (x) => pol?.payees.find((p) => p.account === x)?.name ?? undefined,
+          });
+        } catch {
+          what = "a policy change";
+        }
+      }
+      return { ...base, tone: "info", sticky: true, go: "dharma", cta: "Vote", title: `New Dharma proposal #${a.id}`, body: `${name(String(a.proposer))}: ${what}` };
+    }
     case "VoteCast":
       return { ...base, tone: "info", sticky: false, title: `Vote on #${a.id}`, body: `${name(String(a.voter))} voted ${a.support ? "yes" : "no"} (${a.yes} yes · ${a.no} no)` };
     case "ProposalQueued":

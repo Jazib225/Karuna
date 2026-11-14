@@ -20,7 +20,7 @@ import {
   ConfigError, DEFAULT_ALLOWLISTED_DOMAINS, EXPLORER, USDC_TOKEN, WALLET_CHAIN, emptyOrg, isSetUp,
   requireAddress, requireText, slugId, type OrgFile,
 } from "./config.ts";
-import { readFingerprint, readPolicy, ChainError, type ChainWriter, type OnchainPolicy, type WriteFn } from "./chain.ts";
+import { readFingerprint, readPolicy, scrub, ChainError, type ChainWriter, type OnchainPolicy, type WriteFn } from "./chain.ts";
 import { payloadHash, shortHash, type PaymentPayload } from "./payload.ts";
 import type { Store } from "./store.ts";
 import type { WalletBackend } from "./wallet.ts";
@@ -171,8 +171,8 @@ export class Gatekeeper extends EventEmitter {
 
   /** Load the onchain policy, then keep it fresh and run governance housekeeping. */
   async start(intervalMs = 4000) {
-    await this.sync().catch((e) => console.error("dharma sync:", e instanceof Error ? e.message : e));
-    this.timer = setInterval(() => void this.housekeeping().catch((e) => console.error("gatekeeper:", e instanceof Error ? e.message : e)), intervalMs);
+    await this.sync().catch((e) => console.error("dharma sync:", scrub(e)));
+    this.timer = setInterval(() => void this.housekeeping().catch((e) => console.error("gatekeeper:", scrub(e))), intervalMs);
   }
 
   stop() {
@@ -300,7 +300,7 @@ export class Gatekeeper extends EventEmitter {
         await this.sync(true).catch(() => undefined);
         this.save();
       } catch (e) {
-        this.logEvent({ type: "dharma-execute-failed", proposalId: prop.id, detail: e instanceof Error ? e.message : String(e) });
+        this.logEvent({ type: "dharma-execute-failed", proposalId: prop.id, detail: scrub(e) });
         this.save();
       }
     }
@@ -369,7 +369,7 @@ export class Gatekeeper extends EventEmitter {
       await this.sync(true).catch(() => undefined);
       return { dharma: this.org.dharma };
     } catch (e) {
-      throw new GatekeeperError(`Could not deploy Dharma: ${e instanceof Error ? e.message : String(e)}`, 502);
+      throw new GatekeeperError(`Could not deploy Dharma: ${scrub(e)}`, 502);
     } finally {
       this.deploying = false;
       this.save();
@@ -438,7 +438,7 @@ export class Gatekeeper extends EventEmitter {
       else if (a.kind === Kind.Propose) res = await this.send("propose", [op, data, signer, deadline, a.signature]);
       else res = await this.send("vote", [BigInt(a.proposalId!), !!a.support, signer, deadline, a.signature]);
     } catch (e) {
-      const msg = e instanceof ChainError ? e.message : `Chain write failed: ${e instanceof Error ? e.message : String(e)}`;
+      const msg = e instanceof ChainError ? e.message : `Chain write failed: ${scrub(e)}`;
       this.logEvent({ type: "dharma-rejected", action: KIND_NAMES[a.kind], change: description, by: lower(signer), detail: msg });
       this.save();
       throw new GatekeeperError(msg, e instanceof ChainError && e.reason ? 409 : 502);
@@ -534,7 +534,7 @@ export class Gatekeeper extends EventEmitter {
     try {
       built = await this.build(agentId, action);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = scrub(e);
       const request: Request = { agent: agentId, tool: action.type === "action" ? action.tool : "payment" };
       const decision: Decision = { outcome: "deny", ruleId: "invalid-proposal", reason: msg };
       this.logDecision(request, decision);
@@ -572,7 +572,7 @@ export class Gatekeeper extends EventEmitter {
     if (p.status === "pending" && p.payload && p.payloadHash) {
       // Public signal for QuickNode Streams (Phase 4). Best effort; never blocks the agent.
       void this.send("requestApproval", [keccak256(stringToHex(p.id)), toBytes32(agentId), toMicro(p.payload.amountUsd), `0x${p.payloadHash}`])
-        .catch((e) => this.logEvent({ type: "approval-signal-failed", proposalId: p.id, detail: e instanceof Error ? e.message : String(e) }));
+        .catch((e) => this.logEvent({ type: "approval-signal-failed", proposalId: p.id, detail: scrub(e) }));
     }
     if (p.status === "executing") await this.execute(p, { requote: false });
     return this.agentView(agentId, id)!;
@@ -681,7 +681,7 @@ export class Gatekeeper extends EventEmitter {
         p.error = `Exact Match failed — ${e.message} Nothing was paid.`;
         this.logEvent({ type: "exact-match-refused", proposalId: p.id, payloadHash: p.payloadHash, detail: e.message });
       } else {
-        p.error = `Payment failed: ${e instanceof Error ? e.message : String(e)}`;
+        p.error = `Payment failed: ${scrub(e)}`;
         this.logEvent({ type: "execution-failed", proposalId: p.id, detail: p.error });
       }
     } finally {

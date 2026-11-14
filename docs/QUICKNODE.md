@@ -53,6 +53,14 @@ things only you can do, then one command:
    creates the Stream, generates the security token into `.env` (`QUICKNODE_SECURITY_TOKEN`), and
    saves the Stream id. Restart the relay; the console badge switches to **QuickNode live**.
 
+**If you restart `cloudflared`, it gets a new URL.** Put the new one in `.env` as
+`RELAY_PUBLIC_URL` and run `pnpm --dir relay stream:create` again — it updates the existing Stream
+(id in `relay/.stream.json`) instead of making a new one. A named Cloudflare tunnel keeps a fixed URL.
+
+**Free-plan note:** QuickNode's Discover plan caps `eth_getLogs` at a 5-block range, so log queries
+(the relay's safety net, the setup script) use Arc's public RPC; set `ARC_LOGS_RPC_URL` to override.
+Everything else uses your QuickNode endpoint (`ARC_RPC_URL`).
+
 ### The Stream's config (for the submission README)
 | Setting | Value | Why |
 |---|---|---|

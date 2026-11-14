@@ -19,9 +19,13 @@ export interface RelayOptions {
   client?: PublicClient; // Arc RPC, for the fallback
   dharma: () => string | null; // the org's Dharma address (only its events are relayed)
   notifyGatekeeper?: (events: DharmaEvent[]) => Promise<void>;
-  quietMs?: number; // fall back to RPC after this long without a QuickNode delivery
+  quietMs?: number; // show "rpc" for this long after the safety net caught a missed event
+  lagBlocks?: number; // with a Stream, the safety net trails the chain by this many blocks
   pollMs?: number;
 }
+
+/** Error text without URLs (RPC URLs can embed access tokens). */
+export const scrub = (e: unknown) => (e instanceof Error ? e.message : String(e)).split("\n")[0].replace(/https?:\/\/[^\s'"]+/g, "<url>");
 
 export class Relay extends EventEmitter {
   private seen = new Set<string>();
@@ -39,9 +43,15 @@ export class Relay extends EventEmitter {
     super();
   }
 
-  /** Where events currently come from. */
+  private lastRpcCatchAt = 0;
+
+  /**
+   * Where events come from. With a Stream configured it's QuickNode — unless the RPC safety net
+   * recently caught an event QuickNode never delivered, which means the Stream is unhealthy.
+   * (Dharma events are rare, so "no delivery lately" alone says nothing about health.)
+   */
   mode(): "quicknode" | "rpc" | "none" {
-    if (this.opts.securityToken && Date.now() - this.stats.lastQuickNodeAt < (this.opts.quietMs ?? 45_000)) return "quicknode";
+    if (this.opts.securityToken && Date.now() - this.lastRpcCatchAt > (this.opts.quietMs ?? 120_000)) return "quicknode";
     return this.opts.client ? "rpc" : "none";
   }
 
@@ -54,7 +64,10 @@ export class Relay extends EventEmitter {
       if (this.seenOrder.length > 5000) this.seen.delete(this.seenOrder.shift()!);
       this.recent.unshift(e);
       if (e.source === "quicknode") this.stats.quickNodeEvents++;
-      else this.stats.rpcEvents++;
+      else {
+        this.stats.rpcEvents++;
+        if (this.opts.securityToken) this.lastRpcCatchAt = Date.now(); // QuickNode missed this one
+      }
     }
     this.recent.splice(100);
     if (!fresh.length) return fresh;
@@ -64,7 +77,7 @@ export class Relay extends EventEmitter {
       if (this.notifyTimer) clearTimeout(this.notifyTimer);
       this.notifyTimer = setTimeout(() => {
         const batch = this.pendingNotify.splice(0);
-        void this.opts.notifyGatekeeper!(batch).catch((e) => (this.stats.lastError = `gatekeeper: ${e instanceof Error ? e.message : e}`));
+        void this.opts.notifyGatekeeper!(batch).catch((e) => (this.stats.lastError = `gatekeeper: ${scrub(e)}`));
       }, 200);
     }
     return fresh;
@@ -117,19 +130,24 @@ export class Relay extends EventEmitter {
   // ------------------------------------------------ direct RPC fallback
 
   start(pollMs = this.opts.pollMs ?? 3000) {
-    this.timer = setInterval(() => void this.poll().catch((e) => (this.stats.lastError = `rpc: ${e instanceof Error ? e.message.split("\n")[0] : e}`)), pollMs);
+    this.timer = setInterval(() => void this.poll().catch((e) => (this.stats.lastError = `rpc: ${scrub(e)}`)), pollMs);
   }
 
   stop() {
     if (this.timer) clearInterval(this.timer);
   }
 
-  /** Read new Dharma logs straight from Arc while QuickNode is quiet (ROADMAP backup plan). */
+  /**
+   * Safety net (ROADMAP backup plan): read Dharma's logs straight from Arc. With a Stream
+   * configured it trails the chain by `lagBlocks`, so QuickNode always gets the first chance and
+   * the net only catches what the Stream missed. Without a Stream it is the live source.
+   */
   async poll() {
     const client = this.opts.client;
     const dharma = this.opts.dharma();
-    if (!client || !dharma || this.mode() === "quicknode") return;
-    const latest = await client.getBlockNumber();
+    if (!client || !dharma) return;
+    const head = await client.getBlockNumber();
+    const latest = this.opts.securityToken ? head - BigInt(this.opts.lagBlocks ?? 40) : head;
     if (this.lastBlock === null) this.lastBlock = latest - 20n;
     if (latest <= this.lastBlock) return;
     const from = latest - this.lastBlock > 2000n ? latest - 2000n : this.lastBlock + 1n;

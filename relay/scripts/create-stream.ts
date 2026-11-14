@@ -43,7 +43,8 @@ const qn = async (path: string, init?: RequestInit) => {
 const filterB64 = Buffer.from(quickNodeFilterSource()).toString("base64");
 
 // ---- 1. test the filter against a real block that contains a Dharma event
-const client = createPublicClient({ chain: arcTestnet, transport: http(process.env.ARC_RPC_URL || undefined) });
+// Log queries use Arc's public RPC: QuickNode's free plan caps eth_getLogs at a 5-block range.
+const client = createPublicClient({ chain: arcTestnet, transport: http(process.env.ARC_LOGS_RPC_URL || undefined) });
 const orgFile = resolve(process.env.KARUNA_DATA_DIR ?? resolve(here, "../../gatekeeper/data"), "org.json");
 const orgDharma = existsSync(orgFile) ? JSON.parse(readFileSync(orgFile, "utf8")).dharma?.address : undefined;
 const probe = process.env.KARUNA_DHARMA_ADDRESS ?? orgDharma ?? "0xb7cfead9d160229f66f9532f1091a332e23b3bc0"; // a verified test Dharma

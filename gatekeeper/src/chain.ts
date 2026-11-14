@@ -52,6 +52,9 @@ export function revertReason(e: unknown): string | undefined {
 export const publicClient = (rpcUrl?: string, chain: Chain = arcTestnet): PublicClient =>
   createPublicClient({ chain, transport: http(rpcUrl || undefined, { retryCount: 6, retryDelay: 500 }) }) as PublicClient;
 
+/** Error text safe to log: first line only, URLs removed (RPC URLs can embed access tokens). */
+export const scrub = (e: unknown) => (e instanceof Error ? e.message : String(e)).split("\n")[0].replace(/https?:\/\/[^\s'"]+/g, "<url>");
+
 /** True for transient RPC trouble (rate limits, timeouts) as opposed to a real revert. */
 export const isTransient = (e: unknown) => /rate limit|429|timed? ?out|ECONNRESET|fetch failed|Request exceeds/i.test(e instanceof Error ? `${e.message} ${String((e as { cause?: unknown }).cause ?? "")}` : String(e));
 
@@ -112,7 +115,7 @@ async function simulate(client: PublicClient, from: Address, contract: Address, 
     await client.simulateContract({ address: contract, abi: DHARMA_ABI, functionName: fn, args: args as never, account: from });
   } catch (e) {
     const reason = revertReason(e);
-    throw new ChainError(reason ? `Dharma rejected this: ${reason}` : `Simulation failed: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}`, reason);
+    throw new ChainError(reason ? `Dharma rejected this: ${reason}` : `Simulation failed: ${scrub(e)}`, reason);
   }
 }
 
