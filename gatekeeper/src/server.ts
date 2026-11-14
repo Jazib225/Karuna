@@ -143,6 +143,8 @@ export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: 
         return send(res, 200, { ok: true });
       }
       if (method === "POST" && path === "/inbox") return send(res, 200, gk.postMessage(body as never));
+      if (method === "POST" && path === "/traps") return send(res, 200, gk.mintTrapSet(body.agentId));
+      if (method === "POST" && (m = path.match(/^\/traps\/([\w-]+)\/plant$/))) return send(res, 200, gk.plantTrapInInbox(m[1], body.agentId));
       if (method === "POST" && path === "/shield/test") return send(res, 200, gk.runTest(body as never));
       if (method === "POST" && path === "/setup") return send(res, 200, await gk.setup(body as never));
       if (method === "PATCH" && path === "/settings") return send(res, 200, (gk.renameOrg(body.orgName), { ok: true }));

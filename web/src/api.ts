@@ -82,6 +82,13 @@ export interface Snapshot {
     testsPerDay: number;
     windowMinutes: number;
   };
+  swarm: {
+    traps: (TrapSet & { agentName: string | null; envFile: string })[];
+    tainted: { agentId: string; agentName: string; at: string; secret: string }[];
+    trips: { id: string; at: string; reason: string; agents: string[]; txRef?: string }[];
+    agentsToTrip: number;
+    windowSeconds: number;
+  };
   inbox: (InboxMessage & { test: { id: string; status: ShieldTest["status"]; template: string } | null })[];
   proposals: Proposal[];
   log: { length: number; head: string; verified: boolean; brokenAt: number | null; publicKeyPem: string };
@@ -93,7 +100,8 @@ export interface ShieldTest {
   bait: { address: string; ref: string; amountUsd: number };
   sentAt: string; status: "pending" | "passed" | "failed"; resolvedAt?: string; resolution?: string; proposalIds: string[]; ruleId?: string;
 }
-export interface ShieldAlert { id: string; kind: "shield-failed" | "shield-passed" | "changed-bank-account" | "agent-reported"; agentId: string; title: string; body: string; at: string }
+export interface TrapSet { id: string; agentId: string | null; createdAt: string; secrets: { name: string; value: string }[] }
+export interface ShieldAlert { id: string; kind: "shield-failed" | "shield-passed" | "changed-bank-account" | "agent-reported" | "trap-touched" | "swarm-stopped"; agentId: string; title: string; body: string; at: string }
 
 export interface LogEntry {
   seq: number;

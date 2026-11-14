@@ -14,6 +14,7 @@ pnpm --dir gatekeeper start            # agent API :8787, console API :8788 (loc
 pnpm --dir gatekeeper test             # unit tests with a fake wallet
 VERIFY_WALLET=0x… pnpm --dir gatekeeper verify:phase2   # live checks on Arc testnet
 VERIFY_WALLET=0x… pnpm --dir gatekeeper verify:phase5   # Auto-Shield live on Arc testnet
+VERIFY_WALLET=0x… pnpm --dir gatekeeper verify:phase6   # Swarm Stopper live on Arc testnet (moves no money)
 ```
 
 Prerequisite: the Circle CLI logged in on this machine (`circle wallet login <email> --testnet`)
@@ -32,6 +33,7 @@ An agent token can't reach the console API, so an agent can never approve its ow
 { "action": { "type": "x402", "url": "https://service/…", "method": "GET", "maxUsd": 0.01 }, "reason": "…" }
 { "action": { "type": "transfer", "to": "0x…", "amountUsd": 12.5 }, "reason": "…" }
 { "action": { "type": "action", "tool": "shell", "command": "ls ./workspace" } }
+{ "action": { "type": "message", "to": "<agentId>", "body": "…" } }   // agent-to-agent, delivered to its inbox
 ```
 The agent gets back only `done` (with the service's response), `allowed`, `pending`, `denied`, or
 `failed` — never a reason.
@@ -70,6 +72,22 @@ The agent gets back only `done` (with the service's response), `allowed`, `pendi
   a "require approval" rule for that agent + category.
 - **Changed Bank Account Alert.** A transfer naming a known payee (`payeeName`, or the sender of
   the cited message) but going to a different address is denied, and humans are alerted.
+
+## Swarm Stopper + Trap Passwords (Phase 6)
+- **Trap Passwords.** `POST /api/traps {agentId?}` mints fake but convincing credentials
+  (`OPENAI_API_KEY`, `STRIPE_SECRET_KEY`, `GITHUB_TOKEN`, a wallet private key). Drop the `.env` into
+  an agent's workspace, or `POST /api/traps/:id/plant {agentId}` leaks them into its inbox as an
+  IT-helpdesk email. Real keys never enter a sandbox, so **any proposal containing a trap value is
+  denied** (`trap-password`, core boundary), the agent is marked, and humans are alerted.
+- **No hidden channel.** Agents talk only by proposing `message` actions. A clean one is logged and
+  delivered to the recipient's inbox.
+- **Freeze all** when: a credential (trap or anything credential-shaped: PEM, labelled private key,
+  `sk-`, `sk_live_`, `ghp_`, `AKIA`, `xox*`, agent tokens, Circle API keys) appears in a message; a
+  marked agent messages another agent; or `KARUNA_SWARM_AGENTS` (2) agents go after the same **new**
+  target (an address that isn't a Dharma payee, a domain that isn't allowlisted) within
+  `KARUNA_SWARM_WINDOW_SECONDS` (60). Every agent is stopped at the Gatekeeper at once, then the
+  Gatekeeper records the freeze on Dharma (`AgentFrozen`, gatekeeper-only tightening). Unfreezing is
+  a loosening: member vote + timelock.
 
 ## Data (`gatekeeper/data/`, gitignored)
 `org.json` (Dharma + wallet pointers, private names, agent token hashes, access requests — no

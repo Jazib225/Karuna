@@ -28,6 +28,7 @@ import {
   TEMPLATES, assertShieldSafe, autoRule, isAutoRule, makeTest, tracesTo,
   type InboxMessage, type ShieldTest, type TestTemplate,
 } from "./shield.ts";
+import { PivotTracker, findCredential, findTrap, mintTraps, targetOf, trapEnvFile, trapLeakMessage, type TrapSet } from "./swarm.ts";
 
 // ---------------------------------------------------------------- types
 
@@ -35,6 +36,7 @@ import {
 export type AgentAction =
   | { type: "x402"; url: string; method?: string; body?: unknown; maxUsd?: number; sourceMessageId?: string }
   | { type: "transfer"; to: string; amountUsd: number; payeeName?: string; sourceMessageId?: string }
+  | { type: "message"; to: string; body: string } // to another agent — there is no other channel
   | {
       type: "action";
       tool: "shell" | "file" | "http" | "message";
@@ -111,18 +113,21 @@ interface State {
   inbox: InboxMessage[]; // every agent's inbox: real mail and Auto-Shield tests, same shape
   tests: ShieldTest[]; // which messages were tests (never visible to agents)
   alerts: ShieldAlert[]; // for humans: failed tests, changed bank accounts, flagged messages
+  traps: TrapSet[]; // fake credentials planted in agents' sandboxes
+  tainted: Record<string, { at: string; secret: string }>; // agents that touched a trap
+  swarmTrips: { id: string; at: string; reason: string; agents: string[]; txRef?: string }[];
 }
 
 export interface ShieldAlert {
   id: string;
-  kind: "shield-failed" | "shield-passed" | "changed-bank-account" | "agent-reported";
+  kind: "shield-failed" | "shield-passed" | "changed-bank-account" | "agent-reported" | "trap-touched" | "swarm-stopped";
   agentId: string;
   title: string;
   body: string;
   at: string;
 }
 
-const emptyState = (): State => ({ proposals: [], spend: {}, localFreeze: null, inbox: [], tests: [], alerts: [] });
+const emptyState = (): State => ({ proposals: [], spend: {}, localFreeze: null, inbox: [], tests: [], alerts: [], traps: [], tainted: {}, swarmTrips: [] });
 
 export class GatekeeperError extends Error {
   constructor(message: string, readonly status = 400) {
@@ -143,6 +148,8 @@ export interface GatekeeperDeps {
   anchorMaxAgeMs?: number; // …or when unanchored entries are this old
   shieldTestsPerDay?: number; // Auto-Shield: random tests per active agent per day (0 = off)
   shieldWindowMs?: number; // a test nobody acted on within this window counts as passed
+  swarmAgents?: number; // Swarm Stopper: this many agents on one new target…
+  swarmWindowMs?: number; // …within this window freezes everyone
 }
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -162,8 +169,11 @@ export class Gatekeeper extends EventEmitter {
   deploying = false;
   /** When the relay last reported a Dharma event (QuickNode Stream or its RPC fallback). */
   lastChainEventAt = 0;
+  private pivots = new PivotTracker();
   private executing = new Set<string>();
   private writes: Promise<unknown> = Promise.resolve();
+  /** Background jobs (a write plus its follow-ups) that idle() must also wait for. */
+  private tasks = new Set<Promise<unknown>>();
   private executeTried = new Map<number, number>();
   private lastAnchorTry = 0;
   private lastSyncKey = "";
@@ -251,10 +261,17 @@ export class Gatekeeper extends EventEmitter {
 
   /** Resolves once every queued chain write has finished (used for clean shutdown and tests). */
   async idle() {
-    for (let w = this.writes; ; w = this.writes) {
-      await w;
-      if (w === this.writes) return;
+    for (;;) {
+      const w = this.writes;
+      await Promise.all([w, ...this.tasks]);
+      if (w === this.writes && this.tasks.size === 0) return;
     }
+  }
+
+  /** Run a job in the background, tracked so idle() waits for all of it. */
+  private background(job: Promise<unknown>) {
+    const t = job.catch(() => undefined).finally(() => this.tasks.delete(t));
+    this.tasks.add(t);
   }
 
   /** One chain write at a time (nonces, ordering, readable failures). */
@@ -539,6 +556,31 @@ export class Gatekeeper extends EventEmitter {
       reason: typeof reason === "string" ? reason.slice(0, 1000) : undefined, approvals: [],
     };
 
+    // Trap Passwords: real keys never enter a sandbox, so using one is proof of misbehavior.
+    const trap = findTrap(this.state.traps, { action, reason });
+    if (trap) {
+      const agentName = this.org.labels.agents[agentId] ?? agentId;
+      const firstTouch = !this.state.tainted[agentId];
+      this.state.tainted[agentId] = { at: this.now().toISOString(), secret: trap.secret };
+      const r = this.denyEarly(base, action, "trap-password", `Used trap credential ${trap.secret}`);
+      if (firstTouch) this.alert({ kind: "trap-touched", agentId, title: `${agentName} used a trap password`, body: `It tried to use ${trap.secret}, a fake credential planted by Karuna. Real keys never reach agents, so this is proof of misbehavior.` });
+      this.logEvent({ type: "trap-touched", agent: agentId, secret: trap.secret, trapSet: trap.trap.id, proposalId: id });
+      if (action.type === "message") this.tripSwarm(`${agentName} shared a trap credential (${trap.secret}) with another agent`, [agentId, String(action.to)]);
+      this.save();
+      return r;
+    }
+
+    if (action.type === "message") return this.agentMessage(base, agentId, action);
+
+    // Swarm Stopper: several agents converging on the same new target.
+    const target = targetOf(action as { type: string; to?: string; url?: string });
+    if (target && this.isNewTarget(target)) {
+      const agents = this.pivots.record(target, agentId, this.now().getTime(), this.deps.swarmWindowMs ?? 60_000);
+      if (agents.length >= (this.deps.swarmAgents ?? 2)) {
+        this.tripSwarm(`${agents.length} agents went after the same new target (${target.replace(/^[a-z]+:/, "")}) within ${Math.round((this.deps.swarmWindowMs ?? 60_000) / 1000)}s`, agents);
+      }
+    }
+
     // Auto-Shield: an action traced to a test message is refused before it can reach the wallet.
     // The agent gets the same instant blank denial as any other — nothing hints it was a test.
     if (action.type === "transfer" || action.type === "x402") {
@@ -747,6 +789,101 @@ export class Gatekeeper extends EventEmitter {
     return status === "done" ? { id: p.id, status, result: p.result } : { id: p.id, status };
   }
 
+  // ================================================================ Swarm Stopper + Trap Passwords
+
+  /** Not a payee on Dharma and not an allowlisted domain: a target nobody approved. */
+  private isNewTarget(target: string) {
+    const pol = this.policy;
+    if (!pol) return false;
+    const [kind, value] = [target.split(":")[0], target.slice(target.indexOf(":") + 1)];
+    if (kind === "address") return !pol.payees.some((p) => lower(p.account) === value);
+    return !pol.domains.some((d) => value === d || value.endsWith(`.${d}`));
+  }
+
+  /** Agent → agent message: checked like any action, logged, then delivered. No hidden channel. */
+  private agentMessage(base: Omit<Proposal, "request" | "decision" | "facts" | "status">, agentId: string, action: { type: "message"; to: string; body: string }): AgentResponse {
+    const pol = this.policy!;
+    const to = String(action.to ?? "");
+    const body = String(action.body ?? "").slice(0, 4000);
+    const fromName = this.org.labels.agents[agentId] ?? agentId;
+    const request: Request = { agent: agentId, tool: "message", body: `to ${to}` };
+    const deny = (ruleId: string, reason: string) => {
+      this.logDecision(request, { outcome: "deny", ruleId, reason });
+      this.state.proposals.push({ ...base, request, decision: { outcome: "deny", ruleId, reason }, facts: [{ label: "Message to", value: to }], status: "denied" });
+      this.save();
+      return { id: base.id, status: "denied" as const };
+    };
+    if (!pol.agents.some((a) => a.id === to)) return deny("unknown-agent", `No active agent "${to}"`);
+    if (this.isFrozen()) return deny("panic-freeze", "All agents are frozen");
+    const credential = findCredential(body);
+    if (credential) {
+      this.tripSwarm(`${fromName} sent a credential (${credential}) to ${this.org.labels.agents[to] ?? to}`, [agentId, to]);
+      return deny("swarm-credential", `Credential-shaped secret (${credential}) in an agent-to-agent message`);
+    }
+    if (this.state.tainted[agentId]) {
+      this.tripSwarm(`${fromName} touched a trap password, then messaged ${this.org.labels.agents[to] ?? to}`, [agentId, to]);
+      return deny("swarm-tainted", "Agent that touched a trap credential tried to message another agent");
+    }
+    const m: InboxMessage = { id: randomUUID(), agentId: to, from: `${fromName} (agent)`, subject: `Message from ${fromName}`, body, receivedAt: this.now().toISOString() };
+    this.state.inbox.push(m);
+    const decision: Decision = { outcome: "allow", ruleId: "agent-message", reason: `Delivered to ${this.org.labels.agents[to] ?? to}` };
+    this.logDecision(request, decision);
+    this.state.proposals.push({ ...base, request, decision, facts: [{ label: "Message to", value: this.org.labels.agents[to] ?? to }], status: "allowed" });
+    this.save();
+    return { id: base.id, status: "allowed" };
+  }
+
+  /** Freeze every agent: instantly here, then onchain (a Gatekeeper-only tightening). */
+  private tripSwarm(reason: string, agents: string[]) {
+    // Same swarm, still frozen (e.g. the agent messaged a second teammate): fold it into that trip.
+    const last = this.state.swarmTrips.at(-1);
+    if (last && last.reason === reason && this.isFrozen()) {
+      last.agents = [...new Set([...last.agents, ...agents])];
+      this.logEvent({ type: "swarm-stopped", reason, agents, alreadyFrozen: true, tripId: last.id });
+      this.save();
+      return;
+    }
+    const trip: State["swarmTrips"][number] = { id: randomUUID(), at: this.now().toISOString(), reason, agents: [...new Set(agents)] };
+    this.state.swarmTrips.push(trip);
+    if (this.state.swarmTrips.length > 200) this.state.swarmTrips = this.state.swarmTrips.slice(-200);
+    const already = !!this.isFrozen();
+    if (!already) this.state.localFreeze = { at: trip.at, by: "Swarm Stopper" };
+    this.alert({ kind: "swarm-stopped", agentId: agents[0] ?? "", title: "Swarm Stopper froze every agent", body: `${reason}. Every proposal is now denied. Unfreezing needs a member vote.` });
+    this.logEvent({ type: "swarm-stopped", reason, agents: trip.agents, alreadyFrozen: already });
+    this.save();
+    if (!already && !this.policy?.frozen) {
+      this.background(
+        this.send("tighten", [9 /* Op.Freeze */, "0x", zeroAddress, 0n, "0x"])
+          .then(({ txRef }) => {
+            trip.txRef = txRef;
+            this.logEvent({ type: "swarm-freeze-onchain", tripId: trip.id, txRef });
+            return this.sync(true).catch(() => undefined);
+          })
+          .catch((e) => this.logEvent({ type: "swarm-freeze-onchain-failed", tripId: trip.id, detail: scrub(e) }))
+          .finally(() => this.save()),
+      );
+    }
+  }
+
+  /** Mint a trap set (for one agent, or all) to plant in sandboxes. */
+  mintTrapSet(agentId?: unknown) {
+    this.requireReady();
+    const a = typeof agentId === "string" && agentId ? agentId : null;
+    const t = mintTraps(a, this.now());
+    this.state.traps.push(t);
+    this.logEvent({ type: "traps-minted", trapSet: t.id, agent: a, secrets: t.secrets.map((x) => x.name) });
+    this.save();
+    return { ...t, envFile: trapEnvFile(t) };
+  }
+
+  /** Drop a trap set into an agent's inbox as a "leaked credentials" email. */
+  plantTrapInInbox(trapId: string, agentId: unknown) {
+    const t = this.state.traps.find((x) => x.id === trapId);
+    if (!t) throw new GatekeeperError("Unknown trap set", 404);
+    const msg = trapLeakMessage(t);
+    return this.postMessage({ agentId, ...msg });
+  }
+
   // ================================================================ Auto-Shield + inbox
 
   /** Record a refused proposal before evaluation (Auto-Shield, changed account). Blank to the agent. */
@@ -783,10 +920,10 @@ export class Gatekeeper extends EventEmitter {
     this.logEvent({ type: "shield-test-failed", testId: test.id, agent: agentId, template: test.template, category: test.category, proposalId });
     this.save();
     // Onchain work happens in the background so the agent's answer comes back instantly.
-    void this.shieldBlock(agentId, test).catch((e) => {
+    this.background(this.shieldBlock(agentId, test).catch((e) => {
       this.logEvent({ type: "shield-block-failed", testId: test.id, agent: agentId, detail: scrub(e) });
       this.save();
-    });
+    }));
   }
 
   private async shieldBlock(agentId: string, test: ShieldTest) {
@@ -1039,6 +1176,13 @@ export class Gatekeeper extends EventEmitter {
         templates: TEMPLATES,
         testsPerDay: this.deps.shieldTestsPerDay ?? 0,
         windowMinutes: Math.round((this.deps.shieldWindowMs ?? 30 * 60_000) / 60_000),
+      },
+      swarm: {
+        traps: this.state.traps.slice(-20).reverse().map((t) => ({ ...t, agentName: t.agentId ? (L.agent(t.agentId) ?? t.agentId) : null, envFile: trapEnvFile(t) })),
+        tainted: Object.entries(this.state.tainted).map(([agentId, v]) => ({ agentId, agentName: L.agent(agentId) ?? agentId, ...v })),
+        trips: this.state.swarmTrips.slice(-30).reverse(),
+        agentsToTrip: this.deps.swarmAgents ?? 2,
+        windowSeconds: Math.round((this.deps.swarmWindowMs ?? 60_000) / 1000),
       },
       inbox: this.state.inbox.slice(-100).reverse().map((m) => {
         const t = this.state.tests.find((x) => x.messageId === m.id);

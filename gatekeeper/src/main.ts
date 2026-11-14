@@ -29,6 +29,8 @@ const gk = new Gatekeeper({
   anchorEvery: Number(process.env.KARUNA_ANCHOR_EVERY ?? 20),
   shieldTestsPerDay: Number(process.env.KARUNA_SHIELD_TESTS_PER_DAY ?? 2),
   shieldWindowMs: Number(process.env.KARUNA_SHIELD_WINDOW_MINUTES ?? 30) * 60_000,
+  swarmAgents: Number(process.env.KARUNA_SWARM_AGENTS ?? 2),
+  swarmWindowMs: Number(process.env.KARUNA_SWARM_WINDOW_SECONDS ?? 60) * 1000,
 });
 const consoleToken = store.loadOrCreateConsoleToken();
 

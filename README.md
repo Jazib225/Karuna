@@ -9,10 +9,11 @@ Read [`CLAUDE.md`](CLAUDE.md) for the product and [`ROADMAP.md`](ROADMAP.md) for
 | `engine/` | Deterministic first-match policy engine + signed log (Phase 1) ✅ |
 | `gatekeeper/` | The only process that holds the wallet: proposals, approvals, payments, Exact Match (Phase 2) ✅ |
 | Auto-Shield (in `gatekeeper/`) | Fake-scam tests → per-agent, per-category block rules on Dharma; changed-bank-account alerts (Phase 5) ✅ |
+| Swarm Stopper + Trap Passwords (in `gatekeeper/`) | Fake keys planted in sandboxes; agent-to-agent messages checked like any proposal; credential sharing or agents converging → freeze all, recorded on Dharma (Phase 6) ✅ |
 | `contracts/` | **Dharma** — the org's onchain rulebook on Arc + shared TS vocabulary (Phase 3) ✅ |
 | `relay/` | QuickNode Stream → verified Dharma events → every member's console + Gatekeeper refresh; direct-RPC fallback (Phase 4) ✅ |
 | `web/` | Karuna Console — the product frontend (setup, approvals, agents, payees, policy, signed log) |
-| `agents/` | Agent-side client: propose, read inbox, flag scams; no keys. `examples/payables-agent.ts` (gullible / `--careful`) |
+| `agents/` | Agent-side client: propose, read inbox, flag scams; no keys. `examples/payables-agent.ts` (gullible / `--careful`), `examples/swarm-agents.ts` (shares keys it finds) |
 | `services/test-seller/` | **Test fixture only** — a local x402 seller used to verify payments |
 
 ## Arc testnet facts (verified Nov 9, 2026)
@@ -60,6 +61,7 @@ TEST_SELLER_ADDRESS=0x… pnpm --dir services/test-seller start
 VERIFY_WALLET=0x… pnpm --dir gatekeeper verify:phase2   # payments (needs the test seller)
 VERIFY_WALLET=0x… pnpm --dir gatekeeper verify:phase3   # Dharma: tighten / loosen / core / explorer
 VERIFY_WALLET=0x… pnpm --dir gatekeeper verify:phase5   # Auto-Shield: fake invoice → block onchain → vote restores
+VERIFY_WALLET=0x… pnpm --dir gatekeeper verify:phase6   # Swarm Stopper: trap key shared → all 3 agents frozen → freeze on explorer
 ```
 
 Tools: Node ≥ 22, pnpm, [Circle CLI](https://developers.circle.com/agent-stack/circle-cli/command-reference) (`npm i -g @circle-fin/cli`), [Foundry](https://getfoundry.sh).

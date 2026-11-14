@@ -8,7 +8,8 @@
     "test": "vitest run",
     "verify:phase2": "tsx scripts/verify-phase2.ts",
     "verify:phase3": "tsx scripts/verify-phase3.ts",
-    "verify:phase5": "tsx scripts/verify-phase5.ts"
+    "verify:phase5": "tsx scripts/verify-phase5.ts",
+    "verify:phase6": "tsx scripts/verify-phase6.ts"
   },
   "dependencies": {
     "@prekaruna/dharma": "workspace:*",

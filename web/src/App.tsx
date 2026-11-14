@@ -7,12 +7,12 @@ import { Kind, SignerUnavailable, decidePayment, loadSigner, submitChange } from
 import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
 import { keccak256, stringToHex } from "viem";
 
-type View = "overview" | "approvals" | "dharma" | "shield" | "agents" | "payees" | "policy" | "activity" | "team";
+type View = "overview" | "approvals" | "dharma" | "shield" | "swarm" | "agents" | "payees" | "policy" | "activity" | "team";
 const TITLES: Record<View, string> = {
-  overview: "Overview", approvals: "Approvals", dharma: "Dharma", shield: "Auto-Shield", agents: "Agents", payees: "Payees & services",
+  overview: "Overview", approvals: "Approvals", dharma: "Dharma", shield: "Auto-Shield", swarm: "Swarm & traps", agents: "Agents", payees: "Payees & services",
   policy: "Policy", activity: "Signed log", team: "Team",
 };
-const ICON: Record<View, string> = { overview: "▦", approvals: "◷", dharma: "⚖", shield: "⛨", agents: "◉", payees: "⇄", policy: "☰", activity: "≋", team: "☺" };
+const ICON: Record<View, string> = { overview: "▦", approvals: "◷", dharma: "⚖", shield: "⛨", swarm: "⌬", agents: "◉", payees: "⇄", policy: "☰", activity: "≋", team: "☺" };
 const AGENT_API = "http://127.0.0.1:8787";
 
 const usd = (n: number) => `$${n > 0 && n < 0.01 ? n.toFixed(4).replace(/0+$/, "") : n.toFixed(2)}`;
@@ -287,10 +287,15 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
     fresh.forEach((a) => seenShield.current!.add(a.id));
     if (fresh.length) {
       setAlerts((prev) => [
-        ...fresh.map((a): Alert => ({
-          id: a.id, title: a.title, body: a.body, source: "rpc", at: Date.now(), sticky: a.kind === "changed-bank-account",
-          tone: a.kind === "changed-bank-account" ? "bad" : a.kind === "shield-passed" ? "ok" : "warn", go: "shield", cta: "Auto-Shield",
-        })),
+        ...fresh.map((a): Alert => {
+          const swarm = a.kind === "swarm-stopped" || a.kind === "trap-touched";
+          const bad = swarm || a.kind === "changed-bank-account";
+          return {
+            id: a.id, title: a.title, body: a.body, source: "rpc", at: Date.now(), sticky: bad,
+            tone: bad ? "bad" : a.kind === "shield-passed" ? "ok" : "warn",
+            go: swarm ? "swarm" : "shield", cta: swarm ? "Swarm & traps" : "Auto-Shield",
+          };
+        }),
         ...prev,
       ].slice(0, 6));
     }
@@ -313,6 +318,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
               {v === "approvals" && pending.length > 0 && <span className="count warn">{pending.length}</span>}
               {v === "dharma" && ballots.length > 0 && <span className="count warn">{ballots.length}</span>}
               {v === "team" && s.enrollments.length > 0 && <span className="count">{s.enrollments.length}</span>}
+              {v === "swarm" && s.swarm.tainted.length > 0 && <span className="count warn">{s.swarm.tainted.length}</span>}
               {v === "shield" && s.shield.autoRules.some((r) => r.active) && <span className="count warn">{s.shield.autoRules.filter((r) => r.active).length}</span>}
             </a>
           ))}
@@ -377,6 +383,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
           {view === "approvals" && <Approvals ctx={ctx} dharma={dharma} />}
           {view === "dharma" && <Dharma ctx={ctx} />}
           {view === "shield" && <Shield ctx={ctx} />}
+          {view === "swarm" && <Swarm ctx={ctx} />}
           {view === "agents" && <Agents ctx={ctx} />}
           {view === "payees" && <Payees ctx={ctx} />}
           {view === "policy" && <Policy ctx={ctx} />}
@@ -1018,6 +1025,8 @@ function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string
         body: `${agentName(a.agent)} wants to pay $${Number(a.amountUsd).toFixed(2)}${who ? ` to ${who}` : ""}` };
     }
     case "AgentFrozen":
+      if (s.frozen && s.frozen.by === "Swarm Stopper")
+        return { ...base, tone: "bad", sticky: true, go: "swarm", cta: "Swarm & traps", title: "Swarm freeze recorded on Dharma", body: "Swarm Stopper froze every agent. Unfreezing needs a member vote." };
       return { ...base, tone: "bad", sticky: true, title: "All agents frozen", body: `${name(String(a.by))} hit the panic button. Recorded on Dharma.` };
     case "AgentsUnfrozen":
       return { ...base, tone: "ok", sticky: false, title: "Agents unfrozen", body: "The vote passed and the timelock ended." };
@@ -1216,6 +1225,116 @@ function Shield({ ctx }: { ctx: Ctx }) {
             ))}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================== Swarm Stopper + Trap Passwords
+
+function Swarm({ ctx }: { ctx: Ctx }) {
+  const { s, busy, run } = ctx;
+  const pol = s.policy!;
+  const sw = s.swarm;
+  const active = pol.agents.filter((a) => a.active);
+  const [target, setTarget] = useState("");
+  const [plantTo, setPlantTo] = useState<Record<string, string>>({});
+  const [shown, setShown] = useState<string | null>(null);
+  const agentName = (id: string) => pol.agents.find((a) => a.id === id)?.name ?? id;
+  const unfreezing = pol.proposals.some((g) => g.change?.op === "Unfreeze" && (g.status === "open" || g.status === "queued"));
+
+  return (
+    <div className="stack">
+      <div className="card rise">
+        <div className="pad stack">
+          <p>Agents never get real keys, so <b>any key an agent uses is bait</b>. Plant trap credentials in their sandboxes; touching one is denied and marks the agent. Agent-to-agent messages are proposals like any other, so there is no hidden channel.</p>
+          <p className="muted small">
+            Swarm Stopper freezes <b>every</b> agent when a credential shows up in an agent-to-agent message, when a marked agent messages another agent,
+            or when {sw.agentsToTrip} agents go after the same new target within {sw.windowSeconds}s. Freezing is instant and then recorded on Dharma; unfreezing needs a vote.
+          </p>
+        </div>
+      </div>
+
+      {s.frozen && (
+        <div className="card rise">
+          <div className="pad row-between">
+            <span><b className="bad-text">All agents are frozen</b> <span className="muted small">by {s.frozen.by ?? "a member"} · {ago(s.frozen.at)} · {s.frozen.confirmed ? "recorded on Dharma" : "recording on Dharma…"}</span></span>
+            {unfreezing ? <span className="tag">unfreeze proposed → vote on Dharma</span> : (
+              <button className="btn btn-dark btn-sm" disabled={busy || !s.frozen.confirmed} onClick={() => ctx.change({ op: "Unfreeze" })}>Propose unfreeze</button>
+            )}
+          </div>
+        </div>
+      )}
+
+      <div className="grid2">
+        <div className="card">
+          <div className="hd"><h2>Swarm trips</h2><span className="sub">{sw.trips.length}</span></div>
+          {sw.trips.length === 0 ? <div className="empty">No swarm detected.</div> : (
+            <div className="resolved">
+              {sw.trips.map((t) => (
+                <div className="res" key={t.id}>
+                  <span className="chip deny">froze all</span>
+                  <span className="small">{t.reason} <span className="muted">· {t.agents.map(agentName).join(", ")}</span></span>
+                  <span className="muted small">
+                    {t.txRef && s.org.dharma ? <a href={`${s.org.dharma.explorer.replace(/\/address\/.*$/, "")}/tx/${t.txRef}`} target="_blank" rel="noreferrer">onchain ↗</a> : "local"} · {ago(t.at)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="card">
+          <div className="hd"><h2>Agents that touched a trap</h2><span className="sub">{sw.tainted.length}</span></div>
+          {sw.tainted.length === 0 ? <div className="empty">None. Any agent that uses a trap credential shows up here.</div> : (
+            <div className="resolved">
+              {sw.tainted.map((t) => (
+                <div className="res" key={t.agentId}>
+                  <span className="chip deny">marked</span>
+                  <span className="small"><b>{t.agentName}</b> used <span className="mono">{t.secret}</span></span>
+                  <span className="muted small">{ago(t.at)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="hd"><h2>Trap credentials</h2><span className="sub">fake keys that work nowhere and are watched everywhere</span></div>
+        <form className="pad row-form" onSubmit={(e) => { e.preventDefault(); run(() => api("/traps", { agentId: target || undefined }), "Trap credentials minted. Plant them where the agent can find them."); }}>
+          <select value={target} onChange={(e) => setTarget(e.target.value)}>
+            <option value="">For every agent</option>
+            {active.map((a) => <option key={a.id} value={a.id}>For {a.name}</option>)}
+          </select>
+          <button className="btn btn-dark" disabled={busy}>Mint trap set</button>
+        </form>
+        {sw.traps.length === 0 ? <div className="empty">No traps yet.</div> : (
+          <div className="table">
+            {sw.traps.map((t) => {
+              const to = plantTo[t.id] ?? t.agentId ?? active[0]?.id ?? "";
+              return (
+                <div className="tr stack" key={t.id}>
+                  <div className="row-between">
+                    <span className="small"><b>{t.secrets.map((x) => x.name).join(", ")}</b> <span className="muted">· {t.agentName ?? "every agent"} · {ago(t.createdAt)}</span></span>
+                    <span className="shield-actions">
+                      <button className="btn btn-ghost btn-sm" onClick={() => setShown(shown === t.id ? null : t.id)}>{shown === t.id ? "Hide" : "Show .env"}</button>
+                      <select value={to} onChange={(e) => setPlantTo({ ...plantTo, [t.id]: e.target.value })}>
+                        {active.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                      </select>
+                      <button className="btn btn-dark btn-sm" disabled={busy || !to}
+                        title="Delivers an IT-helpdesk email to the agent that 'accidentally' contains these credentials"
+                        onClick={() => run(() => api(`/traps/${t.id}/plant`, { agentId: to }), "Planted: a 'leaked credentials' email is in the agent's inbox")}>
+                        Leak into inbox
+                      </button>
+                    </span>
+                  </div>
+                  {shown === t.id && <pre className="snippet">{t.envFile}</pre>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <div className="log-foot"><span>drop the .env into the agent's workspace, or leak it by email</span><span>real keys stay with the Gatekeeper</span></div>
       </div>
     </div>
   );

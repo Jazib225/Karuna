@@ -14,6 +14,7 @@ export interface ProposalResult {
 export type Action =
   | { type: "x402"; url: string; method?: string; body?: unknown; maxUsd?: number; sourceMessageId?: string }
   | { type: "transfer"; to: string; amountUsd: number; payeeName?: string; sourceMessageId?: string }
+  | { type: "message"; to: string; body: string }
   | { type: "action"; tool: "shell" | "file" | "http" | "message"; command?: string; path?: string; fileOp?: "read" | "write"; method?: string; url?: string; body?: string };
 
 /** A message in this agent's inbox (invoices, emails). */
@@ -56,6 +57,11 @@ export class KarunaAgent {
    */
   pay(to: string, amountUsd: number, reason?: string, opts: { payeeName?: string; sourceMessageId?: string } = {}) {
     return this.propose({ type: "transfer", to, amountUsd, ...opts }, reason);
+  }
+
+  /** Message another agent. It goes through Karuna like everything else; there's no other channel. */
+  message(toAgentId: string, body: string) {
+    return this.propose({ type: "message", to: toAgentId, body });
   }
 
   /** This agent's inbox, newest first. */
