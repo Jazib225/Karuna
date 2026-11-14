@@ -111,6 +111,15 @@ export interface Snapshot {
   inbox: (InboxMessage & { test: { id: string; status: ShieldTest["status"]; template: string } | null })[];
   proposals: Proposal[];
   log: { length: number; head: string; verified: boolean; brokenAt: number | null; publicKeyPem: string };
+  sandbox: SandboxView;
+}
+
+/** Karuna sandboxes: live runs, the org's keys (names only, never values), and exemptions. */
+export interface SandboxView {
+  requireSandbox: boolean;
+  sessions: { id: string; agentId: string; agentName: string; startedAt: string; lastSeen: string; host: string | null; requests: number; denied: number; lastRequest: string | null; stopRequested: boolean }[];
+  keys: { name: string; envVar: string; placeholder: string; boundTo: string[]; createdAt: string; rotatedAt?: string }[];
+  unsandboxed: string[];
 }
 
 export interface InboxMessage { id: string; agentId: string; from: string; subject: string; body: string; receivedAt: string; reportedAt?: string; reportReason?: string }

@@ -9,7 +9,7 @@ import { EventEmitter } from "node:events";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { keccak256, stringToHex, verifyTypedData, zeroAddress, type Address, type Hex, type PublicClient } from "viem";
 import {
-  SignedLog, buildContext, buildRuleset, evaluate,
+  SignedLog, buildContext, buildRuleset, evaluate, httpTargetMatches,
   type Decision, type LogEntry, type LogEvent, type Request,
 } from "@prekaruna/engine";
 import {
@@ -30,6 +30,7 @@ import {
 } from "./shield.ts";
 import { band, bandLabel, learnedDenyRule, previewLoosening, suggestions, LOOSENING_OPS, type PastRequest, type Precedent, type Preview } from "./learn.ts";
 import { PivotTracker, findCredential, findTrap, mintTraps, targetOf, trapEnvFile, trapLeakMessage, type TrapSet } from "./swarm.ts";
+import { SecretStore } from "./secrets.ts";
 
 // ---------------------------------------------------------------- types
 
@@ -152,7 +153,39 @@ export interface GatekeeperDeps {
   shieldWindowMs?: number; // a test nobody acted on within this window counts as passed
   swarmAgents?: number; // Swarm Stopper: this many agents on one new target…
   swarmWindowMs?: number; // …within this window freezes everyone
+  secrets?: SecretStore; // the org's API keys; only the egress proxy ever sees values
+  requireSandbox?: boolean; // agent tokens only work from inside a Karuna sandbox (unless voted otherwise)
 }
+
+/** One `karuna run`: an agent in a box, reachable only through the egress proxy. */
+export interface SandboxSession {
+  id: string;
+  token: string; // what the box holds instead of the agent's kag_ token
+  agentId: string;
+  startedAt: string;
+  lastSeen: number;
+  host: string | null; // machine the runner reported
+  requests: number;
+  denied: number;
+  lastRequest: string | null;
+  stopRequested: boolean;
+}
+
+/** One HTTP(S) request leaving a box, as the proxy saw it. */
+export interface EgressRequest {
+  method: string;
+  url: string;
+  headers: Record<string, string>;
+  body: Buffer;
+}
+
+export type EgressVerdict =
+  | { verdict: "allow"; keys: string[] }
+  | { verdict: "pending"; proposalId: string }
+  | { verdict: "deny"; proposalId?: string };
+
+const SESSION_IDLE_MS = 45_000;
+const GRANT_MS = 10 * 60_000;
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
@@ -185,6 +218,10 @@ export class Gatekeeper extends EventEmitter {
   private lastFullRead = 0;
   private timer: NodeJS.Timeout | null = null;
   private readonly now: () => Date;
+  /** Live sandbox runs, by session token. In memory: a Gatekeeper restart ends every run. */
+  private sessions = new Map<string, SandboxSession>();
+  /** One-time passes for HTTP requests a member approved: request hash -> expiry. */
+  private grants = new Map<string, number>();
 
   constructor(private readonly deps: GatekeeperDeps) {
     super();
@@ -558,9 +595,19 @@ export class Gatekeeper extends EventEmitter {
   // ================================================================ agent side
 
   authenticateAgent(token: string | undefined): string | null {
+    return this.authAgent(token)?.agentId ?? null;
+  }
+
+  /** Who is calling the agent API: an agent's own kag_ token, or a sandbox run's session token. */
+  authAgent(token: string | undefined): { agentId: string; session: SandboxSession | null } | null {
     if (!token) return null;
+    if (token.startsWith("ksess_")) {
+      const s = this.session(token);
+      return s ? { agentId: s.agentId, session: s } : null;
+    }
     const h = sha256(token);
-    return Object.entries(this.org.agentTokens).find(([, v]) => v === h)?.[0] ?? null;
+    const agentId = Object.entries(this.org.agentTokens).find(([, v]) => v === h)?.[0];
+    return agentId ? { agentId, session: null } : null;
   }
 
   async propose(agentId: string, action: AgentAction, reason?: string): Promise<AgentResponse> {
@@ -796,6 +843,272 @@ export class Gatekeeper extends EventEmitter {
       p.resolvedAt ??= this.now().toISOString();
       this.save();
     }
+  }
+
+  // ================================================================ Sandbox (egress proxy)
+
+  /** Rules that grant a capability rather than decide a request: key:<name>, mount, unsandboxed. */
+  private capabilityRules(scope: string) {
+    return (this.policy?.rules ?? []).filter((r) => r.active && !r.builtin && r.outcome === "allow" && r.scope === scope);
+  }
+
+  /** Voted onchain: this agent may use its token outside a sandbox ("partially enforced"). */
+  isUnsandboxed(agentId: string) {
+    return this.capabilityRules("unsandboxed").some((r) => r.target === agentId);
+  }
+
+  /** Voted onchain: this agent may mount `hostPath` writable. Read-only mounts need no rule. */
+  mayMountWritable(agentId: string, hostPath: string) {
+    const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    return this.capabilityRules("mount").some((r) => (!r.agent || r.agent === agentId) && norm(r.target) === norm(hostPath));
+  }
+
+  /** Hosts each key is bound to (Dharma rules with scope key:<name>). */
+  keyBindings(): Record<string, string[]> {
+    const out: Record<string, string[]> = {};
+    for (const r of (this.policy?.rules ?? []).filter((x) => x.active && !x.builtin && x.outcome === "allow" && x.scope.startsWith("key:"))) {
+      (out[r.scope.slice(4)] ??= []).push(r.target);
+    }
+    return out;
+  }
+
+  get requireSandbox() {
+    return this.deps.requireSandbox ?? false;
+  }
+
+  /** `karuna run` asks for a box. The agent must be on Dharma and the org not frozen. */
+  startSession(agentId: string, host?: unknown): SandboxSession {
+    const pol = this.requireReady();
+    if (!pol.agents.some((a) => a.id === agentId)) throw new GatekeeperError("This agent is not active in Dharma yet", 403);
+    if (this.isFrozen()) throw new GatekeeperError("All agents are frozen", 423);
+    const s: SandboxSession = {
+      id: randomUUID().slice(0, 8), token: `ksess_${randomBytes(24).toString("base64url")}`, agentId,
+      startedAt: this.now().toISOString(), lastSeen: Date.now(), host: typeof host === "string" ? host.slice(0, 80) : null,
+      requests: 0, denied: 0, lastRequest: null, stopRequested: false,
+    };
+    this.sessions.set(s.token, s);
+    this.logEvent({ type: "sandbox-started", agent: agentId, session: s.id, host: s.host });
+    this.save();
+    return s;
+  }
+
+  /** The live session behind a box's token, or null (unknown, idle too long, or ended). */
+  session(token: string | undefined): SandboxSession | null {
+    if (!token) return null;
+    const s = this.sessions.get(token);
+    if (!s) return null;
+    if (Date.now() - s.lastSeen > SESSION_IDLE_MS) {
+      this.endSession(token, "idle");
+      return null;
+    }
+    return s;
+  }
+
+  /** Runner heartbeat. Tells the runner to stop the box when frozen, removed, or stopped. */
+  heartbeat(token: string): { stop: boolean; reason?: string } {
+    const s = this.session(token);
+    if (!s) return { stop: true, reason: "session ended" };
+    s.lastSeen = Date.now();
+    if (this.isFrozen()) return { stop: true, reason: "all agents are frozen" };
+    if (!this.policy?.agents.some((a) => a.id === s.agentId)) return { stop: true, reason: "agent removed from Dharma" };
+    if (s.stopRequested) return { stop: true, reason: "stopped from the console" };
+    return { stop: false };
+  }
+
+  endSession(token: string, why = "ended") {
+    const s = this.sessions.get(token);
+    if (!s) return;
+    this.sessions.delete(token);
+    this.logEvent({ type: "sandbox-ended", agent: s.agentId, session: s.id, why, requests: s.requests, denied: s.denied });
+    this.emit("session-end", token);
+    this.save();
+  }
+
+  /** Console: stop one box (the runner kills it on its next heartbeat; egress stops now). */
+  stopSession(id: string) {
+    const s = [...this.sessions.values()].find((x) => x.id === id);
+    if (!s) throw new GatekeeperError("No such sandbox run", 404);
+    s.stopRequested = true;
+    this.logEvent({ type: "sandbox-stop-requested", agent: s.agentId, session: s.id });
+    this.save();
+  }
+
+  /**
+   * Decide one request leaving a box. Same checks as a proposal (traps, swarm, freeze, Dharma
+   * rules, signed log), plus key bindings. Approvals become cards; a member's yes is a one-time
+   * pass for exactly this request (method + URL + body hash) for 10 minutes.
+   */
+  egress(token: string, r: EgressRequest): EgressVerdict {
+    const s = this.session(token);
+    if (!s) return { verdict: "deny" };
+    s.lastSeen = Date.now();
+    s.requests++;
+    s.lastRequest = `${r.method} ${r.url}`.slice(0, 200);
+    const agentId = s.agentId;
+    const method = r.method.toUpperCase();
+    const bodyText = r.body.length ? r.body.subarray(0, 64 * 1024).toString("utf8") : "";
+    const headerText = Object.entries(r.headers).map(([k, v]) => `${k}: ${v}`).join("\n");
+    const request: Request = { agent: agentId, tool: "http", method, url: r.url };
+    const hash = sha256(`${method} ${r.url}\n${createHash("sha256").update(r.body).digest("hex")}`);
+    const base = {
+      id: randomUUID(), agentId, createdAt: this.now().toISOString(),
+      action: { type: "action" as const, tool: "http" as const, method, url: r.url, body: bodyText.slice(0, 2000) || undefined },
+      approvals: [],
+    };
+    const host = (() => {
+      try {
+        return new URL(r.url).host;
+      } catch {
+        return r.url;
+      }
+    })();
+    const deny = (ruleId: string, reason: string, record = true): EgressVerdict => {
+      s.denied++;
+      this.logDecision(request, { outcome: "deny", ruleId, reason });
+      if (!record) return { verdict: "deny" };
+      this.state.proposals.push({ ...base, request, decision: { outcome: "deny", ruleId, reason }, facts: [{ label: "Request", value: `${method} ${r.url}`.slice(0, 300) }], status: "denied" });
+      this.save();
+      return { verdict: "deny", proposalId: base.id };
+    };
+
+    if (!this.policy?.agents.some((a) => a.id === agentId)) return deny("agent-inactive", "Agent is no longer on Dharma");
+    if (s.stopRequested) return deny("sandbox-stopped", "This run was stopped from the console");
+
+    // Trap Passwords: a planted fake key anywhere in the request is proof of misbehavior.
+    const trap = findTrap(this.state.traps, { url: r.url, headers: headerText, body: bodyText });
+    if (trap) {
+      const first = !this.state.tainted[agentId];
+      this.state.tainted[agentId] = { at: this.now().toISOString(), secret: trap.secret };
+      const name = this.org.labels.agents[agentId] ?? agentId;
+      if (first) this.alert({ kind: "trap-touched", agentId, title: `${name} used a trap password`, body: `From inside its sandbox it sent ${trap.secret}, a fake credential planted by Karuna, to ${host}.` });
+      this.logEvent({ type: "trap-touched", agent: agentId, secret: trap.secret, trapSet: trap.trap.id, via: "egress", host });
+      return deny("trap-password", `Used trap credential ${trap.secret}`);
+    }
+
+    if (this.isFrozen()) return deny("panic-freeze", "All agents are frozen");
+
+    // Keys: a placeholder may only travel to a host its key is bound to on Dharma.
+    const wanted = SecretStore.placeholdersIn(`${r.url}\n${headerText}`);
+    const bindings = this.keyBindings();
+    for (const k of wanted) {
+      if (!this.deps.secrets?.list().some((x) => x.name === k)) return deny("key-unknown", `Placeholder for unknown key "${k}"`);
+      if (!(bindings[k] ?? []).some((t) => httpTargetMatches(r.url, t))) return deny("key-not-bound", `Key "${k}" is not bound to ${host}`);
+    }
+
+    // A member already approved exactly this request.
+    const grant = this.grants.get(hash);
+    if (grant && grant > Date.now()) {
+      this.grants.delete(hash);
+      this.logDecision(request, { outcome: "allow", ruleId: "human-approved", reason: "One-time pass from a member's approval" });
+      return { verdict: "allow", keys: wanted };
+    }
+
+    const pol = this.policy!;
+    const ctx = buildContext(
+      { agents: pol.agents.map((a) => ({ id: a.id, dailyAllowanceUsd: a.capUsd })), recipients: [], allowlistedDomains: pol.domains },
+      this.spentToday(),
+    );
+    const decision = evaluate(request, ctx, buildRuleset(pol.rules));
+
+    // Swarm Stopper: agents converging on a host nobody approved.
+    if (decision.outcome !== "allow") {
+      const target = targetOf({ type: "action", url: r.url });
+      if (target && this.isNewTarget(target)) {
+        const agents = this.pivots.record(target, agentId, this.now().getTime(), this.deps.swarmWindowMs ?? 60_000);
+        if (agents.length >= (this.deps.swarmAgents ?? 2)) {
+          this.tripSwarm(`${agents.length} sandboxed agents went after the same new host (${target.replace(/^[a-z]+:/, "")}) within ${Math.round((this.deps.swarmWindowMs ?? 60_000) / 1000)}s`, agents);
+        }
+      }
+    }
+
+    if (decision.outcome === "allow") {
+      this.logDecision(request, decision);
+      return { verdict: "allow", keys: wanted };
+    }
+    if (decision.outcome === "deny") return deny(decision.ruleId, decision.reason);
+
+    // Approval: one card per distinct request; repeats while it's pending join the same card.
+    const open = this.state.proposals.find((p) => p.status === "pending" && p.agentId === agentId && p.payloadHash === hash);
+    if (open) return { verdict: "pending", proposalId: open.id };
+    this.logDecision(request, decision);
+    const facts: Fact[] = [
+      { label: "Request", value: `${method} ${host}` },
+      { label: "Path", value: (() => { try { const u = new URL(r.url); return `${u.pathname}${u.search}`.slice(0, 300) || "/"; } catch { return "/"; } })() },
+      { label: "Body", value: r.body.length ? `${r.body.length.toLocaleString()} bytes${bodyText ? ` · ${bodyText.replace(/\s+/g, " ").slice(0, 160)}` : ""}` : "none" },
+      ...(wanted.length ? [{ label: "Key attached on approval", value: wanted.join(", ") }] : []),
+      { label: "From", value: `sandbox run ${s.id}${s.host ? ` on ${s.host}` : ""}` },
+    ];
+    this.state.proposals.push({ ...base, request, decision, facts, payloadHash: hash, status: "pending" });
+    this.save();
+    return { verdict: "pending", proposalId: base.id };
+  }
+
+  /** Wait (up to `ms`) for a held request's card to be decided. */
+  waitForDecision(proposalId: string, ms: number): Promise<"allowed" | "denied" | "pending"> {
+    const check = () => {
+      const p = this.state.proposals.find((x) => x.id === proposalId);
+      if (!p) return "denied" as const;
+      return p.status === "allowed" ? ("allowed" as const) : p.status === "pending" ? ("pending" as const) : ("denied" as const);
+    };
+    const now = check();
+    if (now !== "pending") return Promise.resolve(now);
+    return new Promise((resolve) => {
+      const done = (v: "allowed" | "denied" | "pending") => {
+        clearTimeout(t);
+        this.off("change", onChange);
+        resolve(v);
+      };
+      const onChange = () => {
+        const v = check();
+        if (v !== "pending") done(v);
+      };
+      const t = setTimeout(() => done("pending"), ms);
+      this.on("change", onChange);
+    });
+  }
+
+  /** Consume the one-time pass a member's approval created for this exact request. */
+  takeGrant(proposalId: string): boolean {
+    const p = this.state.proposals.find((x) => x.id === proposalId);
+    if (!p?.payloadHash || p.status !== "allowed") return false;
+    const ok = (this.grants.get(p.payloadHash) ?? 0) > Date.now();
+    this.grants.delete(p.payloadHash);
+    return ok;
+  }
+
+  /** The real value for a key placeholder. Only the egress proxy calls this, per request. */
+  revealKey(name: string): string | null {
+    return this.deps.secrets?.reveal(name) ?? null;
+  }
+
+  /** An x402 seller answered 402 to a boxed agent: run it as a normal Karuna payment proposal. */
+  async payForBox(token: string, r: { url: string; method: string; body?: string }): Promise<AgentResponse> {
+    const s = this.session(token);
+    if (!s) return { id: "", status: "denied" };
+    return this.propose(s.agentId, { type: "x402", url: r.url, method: r.method, body: r.body }, "Paid API returned 402 inside the sandbox");
+  }
+
+  /** A key value was stored or rotated (the value itself is never logged). */
+  noteKeyStored(name: string, envVar: string) {
+    this.logEvent({ type: "key-stored", key: name, envVar });
+    this.save();
+  }
+
+  noteKeyRemoved(name: string) {
+    this.logEvent({ type: "key-removed", key: name });
+    this.save();
+  }
+
+  sandboxView() {
+    const L = this.labels();
+    return {
+      requireSandbox: this.requireSandbox,
+      sessions: [...this.sessions.values()]
+        .filter((s) => Date.now() - s.lastSeen <= SESSION_IDLE_MS)
+        .map(({ token: _t, ...s }) => ({ ...s, agentName: L.agent(s.agentId) ?? s.agentId, lastSeen: new Date(s.lastSeen).toISOString() })),
+      keys: (this.deps.secrets?.list() ?? []).map((k) => ({ ...k, placeholder: `karuna_key_${k.name}`, boundTo: this.keyBindings()[k.name] ?? [] })),
+      unsandboxed: this.capabilityRules("unsandboxed").map((r) => r.target),
+    };
   }
 
   agentView(agentId: string, proposalId: string): AgentResponse | null {
@@ -1180,6 +1493,8 @@ export class Gatekeeper extends EventEmitter {
     if (!p.payload) {
       p.status = "allowed";
       p.resolvedAt = this.now().toISOString();
+      // A held sandbox request: this approval is a one-time pass for exactly that request.
+      if (p.request.tool === "http" && p.payloadHash) this.grants.set(p.payloadHash, Date.now() + GRANT_MS);
       this.save();
       return { status: "allowed" as const };
     }
@@ -1267,6 +1582,7 @@ export class Gatekeeper extends EventEmitter {
         return { ...m, test: t ? { id: t.id, status: t.status, template: t.template } : null };
       }),
       proposals: this.state.proposals.slice(-300).reverse().map((p) => ({ ...p, approvalsNeeded: this.approvalsNeeded(p) })),
+      sandbox: this.sandboxView(),
       log: { length: this.log.length, head: this.log.head(), verified: v.ok, brokenAt: v.brokenAt ?? null, publicKeyPem: this.log.publicKeyPem() },
     };
   }

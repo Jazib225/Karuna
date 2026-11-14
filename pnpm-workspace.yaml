@@ -4,5 +4,6 @@ packages:
   - relay
   - web
   - agents
+  - runner
   - services/*
   - contracts

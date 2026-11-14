@@ -180,6 +180,19 @@ export const previewSnapshot: Snapshot = {
     },
   ],
   log: { length: 46, head: hash(46), verified: true, brokenAt: null, publicKeyPem: "" },
+  sandbox: {
+    requireSandbox: true,
+    sessions: [
+      { id: "ee02b031", agentId: "payables", agentName: "Bills agent", startedAt: iso(1800), lastSeen: iso(2), host: "bakery-mini", requests: 214, denied: 3, lastRequest: "POST https://api.openai.com/v1/chat/completions", stopRequested: false },
+      { id: "9c1d77aa", agentId: "supplies", agentName: "Supplies agent", startedAt: iso(420), lastSeen: iso(4), host: "bakery-mini", requests: 37, denied: 0, lastRequest: "GET https://api.grainfeed.dev/v2/flour", stopRequested: false },
+    ],
+    keys: [
+      { name: "openai", envVar: "OPENAI_API_KEY", placeholder: "karuna_key_openai", boundTo: ["api.openai.com"], createdAt: iso(86400 * 3) },
+      { name: "gmail", envVar: "GMAIL_TOKEN", placeholder: "karuna_key_gmail", boundTo: ["gmail.googleapis.com"], createdAt: iso(86400 * 2) },
+      { name: "github", envVar: "GITHUB_TOKEN", placeholder: "karuna_key_github", boundTo: [], createdAt: iso(600) },
+    ],
+    unsandboxed: ["research"],
+  },
 };
 
 export const previewLog: LogEntry[] = [

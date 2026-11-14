@@ -1,0 +1,91 @@
+// `karuna run` arguments. Kept separate (and pure) so it can be tested without Docker.
+
+export interface Mount {
+  host: string;
+  container: string;
+  writable: boolean;
+}
+
+export interface RunArgs {
+  agent: string;
+  gatekeeper: string;
+  token: string;
+  image?: string;
+  dir?: string;
+  mounts: Mount[];
+  command: string[];
+  memory: string;
+  cpus: string;
+}
+
+export const USAGE = `karuna run --agent <id> [options] [DIR] -- <command…>
+
+Runs an agent in a Karuna sandbox: no network except Karuna's egress proxy, no host files except
+the folders you mount, no real keys (placeholders the proxy swaps), wiped when it exits.
+
+  --agent <id>          the agent's id on Dharma (required)
+  --token <kag_…>       the agent's token (default: $KARUNA_AGENT_TOKEN)
+  --gatekeeper <url>    agent API (default: $KARUNA_GATEKEEPER_URL or http://127.0.0.1:8787)
+  --image <image>       run this image instead of building DIR
+  --mount <host[:container][:rw]>
+                        share a host folder (read-only unless :rw, which needs a Dharma "mount" rule)
+  --memory <2g>  --cpus <2>
+
+Examples
+  karuna run --agent invoice-bot ./invoice-bot -- python main.py
+  karuna run --agent supplies --mount ./reports:/data ./agents -- npx tsx examples/supplies-agent.ts`;
+
+/** Split "C:\\data:/data:rw" style specs; Windows drive letters are part of the host path. */
+export function parseMount(spec: string): Mount {
+  let rest = spec;
+  let writable = false;
+  if (/:rw$/i.test(rest)) {
+    writable = true;
+    rest = rest.slice(0, -3);
+  } else if (/:ro$/i.test(rest)) {
+    rest = rest.slice(0, -3);
+  }
+  // A container path is the part after the last ":" that starts with "/".
+  const m = rest.match(/^(.*):(\/[^:]*)$/);
+  const host = m ? m[1] : rest;
+  const container = m ? m[2] : `/mnt/${host.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "data"}`;
+  if (!host) throw new Error(`Bad --mount "${spec}"`);
+  if (!container.startsWith("/") || container === "/" || /^\/(app|etc|proc|sys|dev|usr|bin|lib)(\/|$)/.test(container)) {
+    throw new Error(`--mount: can't mount over ${container}`);
+  }
+  return { host, container, writable };
+}
+
+export function parseArgs(argv: string[], env: Record<string, string | undefined>): RunArgs {
+  const dash = argv.indexOf("--");
+  const opts = dash === -1 ? argv : argv.slice(0, dash);
+  const command = dash === -1 ? [] : argv.slice(dash + 1);
+  const out: RunArgs = {
+    agent: "", gatekeeper: env.KARUNA_GATEKEEPER_URL ?? "http://127.0.0.1:8787", token: env.KARUNA_AGENT_TOKEN ?? "",
+    mounts: [], command, memory: "2g", cpus: "2",
+  };
+  for (let i = 0; i < opts.length; i++) {
+    const a = opts[i];
+    const next = () => {
+      const v = opts[++i];
+      if (v === undefined) throw new Error(`${a} needs a value`);
+      return v;
+    };
+    if (a === "--agent") out.agent = next();
+    else if (a === "--token") out.token = next();
+    else if (a === "--gatekeeper") out.gatekeeper = next();
+    else if (a === "--image") out.image = next();
+    else if (a === "--mount") out.mounts.push(parseMount(next()));
+    else if (a === "--memory") out.memory = next();
+    else if (a === "--cpus") out.cpus = next();
+    else if (a.startsWith("--")) throw new Error(`Unknown option ${a}`);
+    else if (!out.dir) out.dir = a;
+    else throw new Error(`Unexpected argument ${a} (put the agent's command after --)`);
+  }
+  if (!out.agent) throw new Error("--agent is required");
+  if (!/^[\w-]{1,40}$/.test(out.agent)) throw new Error("--agent: letters, digits, - and _ only");
+  if (!out.token) throw new Error("No agent token: pass --token or set KARUNA_AGENT_TOKEN");
+  if (!out.image && !out.dir) throw new Error("Give the agent's folder (DIR) or --image");
+  if (!out.command.length && !out.image) throw new Error("Give the agent's start command after --");
+  return out;
+}

@@ -208,6 +208,28 @@ export interface OnchainRule {
   maxUsd: number; // custom allow rules: upper bound (0 = none)
 }
 
+/**
+ * Does a URL fall under an HTTP rule target?
+ *   "stripe.com"              any host under stripe.com (registrable domain, as before)
+ *   "api.openai.com"          that host and its subdomains
+ *   "api.openai.com/v1/"      that host, and only paths starting with /v1/
+ */
+export function httpTargetMatches(url: string, target: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  const t = target.toLowerCase();
+  const slash = t.indexOf("/");
+  const host = slash === -1 ? t : t.slice(0, slash);
+  const path = slash === -1 ? "" : t.slice(slash);
+  const h = u.hostname.toLowerCase();
+  const hostOk = h === host || h.endsWith(`.${host}`);
+  return hostOk && (!path || u.pathname.toLowerCase().startsWith(path));
+}
+
 /** A custom (non-default) Dharma rule as an engine rule. Unknown scopes never match. */
 export function customRule(r: OnchainRule): Rule {
   const [kind, sub] = r.scope.split(":");
@@ -231,8 +253,11 @@ export function customRule(r: OnchainRule): Rule {
       }
       if (kind === "http") {
         if (req.tool !== "http" || !req.url) return false;
-        return !target || registrableDomain(req.url) === target;
+        // "http:POST" limits the rule to one method; plain "http" covers every method.
+        if (sub && (req.method ?? "GET").toUpperCase() !== sub.toUpperCase()) return false;
+        return !target || httpTargetMatches(req.url, target);
       }
+      // key:<name>, mount, unsandboxed: capability grants the Gatekeeper reads, never request rules.
       return false;
     },
   };

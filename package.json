@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "check:arc": "tsx gatekeeper/scripts/check-arc.ts",
-    "balance": "tsx gatekeeper/scripts/balance.ts"
+    "balance": "tsx gatekeeper/scripts/balance.ts",
+    "karuna": "tsx runner/src/cli.ts"
   },
   "dependencies": {
     "dotenv": "^18.0.10",

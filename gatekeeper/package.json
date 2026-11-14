@@ -16,10 +16,12 @@
     "@prekaruna/dharma": "workspace:*",
     "@prekaruna/engine": "workspace:*",
     "dotenv": "^18.0.10",
+    "node-forge": "1.3.1",
     "viem": "2.57.17"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
+    "@types/node-forge": "1.3.11",
     "tsx": "4.23.15",
     "typescript": "5.9.3",
     "vitest": "3.2.4"

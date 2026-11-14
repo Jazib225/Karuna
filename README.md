@@ -134,6 +134,19 @@ panic button applies at once. Nothing about any organization is built in.
 
 Each member uses their own browser: it holds the key that signs their votes and approvals.
 
+### Running agents: always in a Karuna sandbox
+Agent tokens only work from inside a box (`KARUNA_REQUIRE_SANDBOX=0` turns that off for local demos;
+per agent, a voted `unsandboxed` rule does, and the console shows it as "partially enforced").
+Needs Docker. From the repo root:
+```bash
+KARUNA_AGENT_TOKEN=kag_… pnpm karuna run --agent invoice-bot ./invoice-bot -- python main.py
+```
+The box has no network except the Gatekeeper's egress proxy (every request checked against Dharma),
+no host files unless `--mount`ed (read-only by default), and no real keys: add keys on the console's
+**Keys** page and the proxy swaps the placeholder for the real value only on the service it's bound
+to. An x402 seller's 402 becomes a Karuna payment. The panic button stops every box. See
+[docs/SANDBOX_PLAN.md](docs/SANDBOX_PLAN.md).
+
 For x402 services the wallet also needs a Gateway balance:
 `circle gateway deposit --amount 1 --address 0x… --chain ARC-TESTNET --method direct`.
 

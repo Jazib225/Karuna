@@ -11,20 +11,20 @@ import { Badge, Icon, type IconName } from "./icons.tsx";
 
 // One job per page. The menu groups them: everyday work first, then the automatic safety systems,
 // settings, and a testing tool. Older names (pop-ups, saved state) still resolve.
-type Page = "overview" | "approvals" | "votes" | "agents" | "payees" | "activity" | "shield" | "swarm" | "rules" | "team" | "inbox";
+type Page = "overview" | "approvals" | "votes" | "agents" | "payees" | "activity" | "shield" | "swarm" | "rules" | "keys" | "team" | "inbox";
 type View = Page | "dharma" | "safety" | "policy";
 const PAGE_OF: Record<View, Page> = {
   overview: "overview", approvals: "approvals", votes: "votes", agents: "agents", payees: "payees", activity: "activity",
-  shield: "shield", swarm: "swarm", rules: "rules", team: "team", inbox: "inbox",
+  shield: "shield", swarm: "swarm", rules: "rules", keys: "keys", team: "team", inbox: "inbox",
   dharma: "votes", safety: "shield", policy: "rules",
 };
 const TITLES: Record<Page, string> = {
   overview: "Home", approvals: "Approvals", votes: "Votes", agents: "Agents", payees: "Payees", activity: "Activity",
-  shield: "Auto-Shield", swarm: "Swarm Stopper", rules: "Rules", team: "Team", inbox: "Test inbox",
+  shield: "Auto-Shield", swarm: "Swarm Stopper", rules: "Rules", keys: "Keys", team: "Team", inbox: "Test inbox",
 };
 const ICON: Record<Page, IconName> = {
   overview: "home", approvals: "approvals", votes: "votes", agents: "agents", payees: "payees", activity: "activity",
-  shield: "shield", swarm: "swarm", rules: "rules", team: "team", inbox: "inbox",
+  shield: "shield", swarm: "swarm", rules: "rules", keys: "key", team: "team", inbox: "inbox",
 };
 /** One line under each page title: what the page is for. */
 const LEDE: Record<Page, string> = {
@@ -37,13 +37,14 @@ const LEDE: Record<Page, string> = {
   shield: "Fake scam messages that test your agents, and the blocks they earn.",
   swarm: "Bait credentials and the trip-wire that freezes every agent at once.",
   rules: "The policy on Dharma. First matching rule decides.",
+  keys: "API keys your agents use. Boxes only ever see placeholders; Karuna adds the real key on the way out.",
   team: "Members sign approvals and votes with keys in their own browsers.",
   inbox: "Hand an agent work the way a supplier or teammate would.",
 };
 const NAV: { label: string | null; hint?: string; pages: Page[] }[] = [
   { label: null, pages: ["overview", "approvals", "votes", "agents", "payees", "activity"] },
   { label: "Safety", hint: "runs on its own", pages: ["shield", "swarm"] },
-  { label: "Settings", pages: ["rules", "team"] },
+  { label: "Settings", pages: ["rules", "keys", "team"] },
   { label: "Testing", hint: "demos only", pages: ["inbox"] },
 ];
 /** Arc explorer link for a transaction hash (payments, Dharma writes, freezes, anchors). */
@@ -61,7 +62,6 @@ function Backdrop() {
 function Loading({ text }: { text: string }) {
   return <div className="center"><Backdrop /><div className="loading"><img src="/brand/lotus.png" alt="" /><span className="shimmer mono small">{text}</span></div></div>;
 }
-const AGENT_API = "http://127.0.0.1:8787";
 
 const usd = (n: number) => `$${n > 0 && n < 0.01 ? n.toFixed(4).replace(/0+$/, "") : n.toFixed(2)}`;
 const short = (s?: string | null) => (s ? `${s.slice(0, 6)}…${s.slice(-4)}` : "—");
@@ -514,6 +514,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
           {view === "swarm" && <Swarm ctx={ctx} />}
           {view === "rules" && <div className="stack"><Policy ctx={ctx} /><Learned ctx={ctx} /></div>}
           {view === "team" && <Team ctx={ctx} />}
+          {view === "keys" && <Keys ctx={ctx} />}
           {view === "inbox" && <Shield ctx={ctx} part="messages" />}
           {view === "activity" && <Activity ctx={ctx} log={log} />}
         </div>
@@ -792,22 +793,27 @@ function Meter({ a, frozen, label }: { a: AgentView; frozen?: boolean; label?: b
   );
 }
 
-function TokenReveal({ token, agent, onDone }: { token: string; agent: string; onDone: () => void }) {
+function TokenReveal({ token, agent, agentId, onDone }: { token: string; agent: string; agentId: string; onDone: () => void }) {
   const [copied, setCopied] = useState(false);
   return (
     <div className="card reveal-token rise">
       <div className="hd"><h2>Token for {agent}</h2><span className="badge badge-approval">shown once</span></div>
       <div className="pad stack">
-        <p className="muted">Give this to the agent's runtime as <span className="mono">KARUNA_AGENT_TOKEN</span>. It only lets the agent <b>propose</b>, and only once Dharma has added the agent. Karuna stores just its hash, so copy it now.</p>
+        <p className="muted">Give this to the agent's runtime as <span className="mono">KARUNA_AGENT_TOKEN</span>. It only starts sandbox runs (the box itself never sees it), and only once Dharma has added the agent. Karuna stores just its hash, so copy it now.</p>
         <div className="token-row">
           <code className="token">{token}</code>
           <button className="btn btn-ghost" onClick={() => { navigator.clipboard?.writeText(token); setCopied(true); }}><Icon name={copied ? "check" : "copy"} /> {copied ? "Copied" : "Copy"}</button>
         </div>
-        <pre className="snippet">{`import { KarunaAgent } from "@prekaruna/agents";
+        <pre className="snippet">{`# run the agent in a Karuna sandbox (from the repo root)
+KARUNA_AGENT_TOKEN=${token} \
+  pnpm karuna run --agent ${agentId} ./my-agent -- python main.py
+
+// inside the box, pay or buy through Karuna:
+import { KarunaAgent } from "@prekaruna/agents";
 
 const karuna = new KarunaAgent({
-  gatekeeperUrl: "${AGENT_API}",
-  token: process.env.KARUNA_AGENT_TOKEN!,
+  gatekeeperUrl: process.env.KARUNA_GATEKEEPER_URL!, // http://karuna.internal
+  token: process.env.KARUNA_AGENT_TOKEN!,           // this run's session, set by karuna run
 });
 
 const r = await karuna.buy(serviceUrl, { maxUsd: 0.01, reason: "why" });
@@ -822,7 +828,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
   const { s, run, busy } = ctx;
   const pol = s.policy!;
   const [form, setForm] = useState({ name: "", cap: "1" });
-  const [reveal, setReveal] = useState<{ token: string; agent: string } | null>(null);
+  const [reveal, setReveal] = useState<{ token: string; agent: string; agentId: string } | null>(null);
   const [editing, setEditing] = useState<Record<string, string>>({});
 
   const add = (e: FormEvent) => {
@@ -830,7 +836,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
     run(async () => {
       const r = await api<{ id: string; token: string }>("/agents/prepare", { name: form.name });
       await submitChange(ctx.me, s.org.dharma!.address as Address, { kind: Kind.Propose, change: { op: "SetAgent", id: r.id, capUsd: Number(form.cap) } });
-      setReveal({ token: r.token, agent: form.name });
+      setReveal({ token: r.token, agent: form.name, agentId: r.id });
       setForm({ name: "", cap: "1" });
     }, `Proposed on Dharma — the agent works after ${pol.required} vote${pol.required > 1 ? "s" : ""} and ${pol.timelock}s`);
   };
@@ -843,6 +849,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
         <label className="field"><span>Daily allowance (USD)</span><input required type="number" min="0" step="0.000001" value={form.cap} onChange={(e) => setForm({ ...form, cap: e.target.value })} /></label>
         <button className="btn btn-dark" type="submit" disabled={busy}><Icon name="plus" /> Propose agent</button>
       </form>
+      <SandboxRuns ctx={ctx} />
       <p className="section-title">Adding, removing or changing an allowance goes to a team vote</p>
       {pol.agents.length === 0 ? (
         <div className="card"><Empty icon="agents">No agents yet. Propose one above; it can ask for money once Dharma adds it.</Empty></div>
@@ -871,6 +878,10 @@ function Agents({ ctx }: { ctx: Ctx }) {
                       </form>
                     )}
                     <span className="tag">{a.hasToken ? "token issued" : "no token"}</span>
+                    {s.sandbox.unsandboxed.includes(a.id)
+                      ? <span className="tag warn-tag" title="Voted to run outside a sandbox: only money and keys are enforced">partially enforced</span>
+                      : <span className="tag" title="Only works inside a Karuna sandbox: network, files, keys and money are all enforced"><Icon name="lock" size={11} /> sandboxed</span>}
+                    {s.sandbox.sessions.some((x) => x.agentId === a.id) && <span className="tag"><span className="live-dot" aria-hidden /> running</span>}
                     {(() => {
                       const n = s.shield.autoRules.filter((r) => r.active && r.agent === a.id).length;
                       return n ? <span className="tag warn-tag">{n} auto-rule{n > 1 ? "s" : ""}</span> : null;
@@ -878,7 +889,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
                   </div>
                 )}
                 <div className="agent-actions">
-                  <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => run(async () => { const r = await api<{ token: string }>(`/agents/${a.id}/rotate-token`, {}); setReveal({ token: r.token, agent: a.name }); })}>{a.hasToken ? "Rotate token" : "Issue token"}</button>
+                  <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => run(async () => { const r = await api<{ token: string }>(`/agents/${a.id}/rotate-token`, {}); setReveal({ token: r.token, agent: a.name, agentId: a.id }); })}>{a.hasToken ? "Rotate token" : "Issue token"}</button>
                   {a.active && <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => confirm(`Propose removing ${a.name} from Dharma? It goes to a team vote.`) && ctx.change({ op: "RemoveAgent", id: a.id })}>Propose removal</button>}
                 </div>
               </div>
@@ -1549,6 +1560,109 @@ function PreviewBox({ p, ctx }: { p: LooseningPreview; ctx: Ctx }) {
           {agentName(x.agent)} → {payee(x.to)}{x.amountUsd != null ? ` ${usd(x.amountUsd)}` : ""} · {x.was} → {x.now}{x.flagged ? <span className="bad-text"> · flagged: {x.flagged}</span> : null} · {ago(x.at)}
         </div>
       ))}
+    </div>
+  );
+}
+
+// ============================================================== Keys (sandbox credentials)
+
+/** A short, stable Dharma rule id (bytes32: 32 chars max). */
+const ruleId = (prefix: string) => `${prefix}-${Date.now().toString(36)}`.slice(0, 32);
+
+function Keys({ ctx }: { ctx: Ctx }) {
+  const { s, run, busy } = ctx;
+  const sb = s.sandbox;
+  const [form, setForm] = useState({ name: "", envVar: "", value: "", host: "", llm: true });
+  const [bind, setBind] = useState<Record<string, string>>({});
+  const proposing = (scope: string) =>
+    s.policy!.proposals.some((g) => (g.status === "open" || g.status === "queued") && g.change?.op === "AddRule" && g.change.scope === scope);
+
+  const add = (e: FormEvent) => {
+    e.preventDefault();
+    const name = form.name.trim().toLowerCase();
+    const host = form.host.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+    run(async () => {
+      await api("/keys", { name, envVar: form.envVar.trim(), value: form.value });
+      // Where the key may travel is policy: a Dharma rule, voted like any loosening.
+      await submitChange(ctx.me, s.org.dharma!.address as Address, { kind: Kind.Propose, change: { op: "AddRule", id: ruleId(`k-${name}`), outcome: "Allow", scope: `key:${name}`, target: host } });
+      if (form.llm) await submitChange(ctx.me, s.org.dharma!.address as Address, { kind: Kind.Propose, change: { op: "AddRule", id: ruleId(`p-${name}`), outcome: "Allow", scope: "http:POST", target: host } });
+      setForm({ name: "", envVar: "", value: "", host: "", llm: true });
+    }, `Key stored. Proposed on Dharma: ${name} may be sent to ${host}${form.llm ? ", and POSTs there skip approval" : ""}`);
+  };
+
+  return (
+    <div className="stack">
+      <div className="card rise">
+        <div className="intro">
+          <span className="intro-mark"><Icon name="key" size={18} /></span>
+          <p>Paste a key once. Karuna encrypts it and never shows it again. Boxed agents read a placeholder like <span className="mono">karuna_key_openai</span> from the variable they always used, and the egress proxy swaps in the real key only on requests to the services you bind it to. <b>A compromised agent can't leak a key it never had.</b></p>
+        </div>
+      </div>
+
+      <form className="card" onSubmit={add}>
+        <div className="hd"><h2>Add a key</h2><span className="sub">value is write-only</span></div>
+        <div className="inline-form">
+          <label className="field"><span>Name</span><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="openai" pattern="[a-zA-Z0-9\-]{1,40}" /></label>
+          <label className="field"><span>Variable name</span><input required className="mono" value={form.envVar} onChange={(e) => setForm({ ...form, envVar: e.target.value.toUpperCase() })} placeholder="OPENAI_API_KEY" /></label>
+          <label className="field grow"><span>Key value</span><input required type="password" autoComplete="off" className="mono" value={form.value} onChange={(e) => setForm({ ...form, value: e.target.value })} placeholder="sk-…" /></label>
+        </div>
+        <div className="inline-form" style={{ paddingTop: 0 }}>
+          <label className="field grow"><span>Allowed service</span><input required className="mono" value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} placeholder="api.openai.com" /></label>
+          <label className="check"><input type="checkbox" checked={form.llm} onChange={(e) => setForm({ ...form, llm: e.target.checked })} /> <span>POSTs to it skip approval <small>(needed for LLM APIs)</small></span></label>
+          <button className="btn btn-dark" disabled={busy}><Icon name="plus" /> Store &amp; propose</button>
+        </div>
+      </form>
+
+      <div className="card">
+        <div className="hd"><h2>Keys</h2><span className="sub">{sb.keys.length}</span></div>
+        {sb.keys.length === 0 ? <Empty icon="key">No keys yet. Boxed agents can't call a private API until you add its key here.</Empty> : (
+          <div className="table">
+            {sb.keys.map((k) => (
+              <div className="tr key-tr" key={k.name}>
+                <span className="intro-mark"><Icon name="key" size={15} /></span>
+                <span className="b">{k.name}<div className="muted small mono">{k.envVar}={k.placeholder}</div></span>
+                <span className="pills">
+                  {k.boundTo.length ? k.boundTo.map((h) => <span className="tag" key={h}><Icon name="lock" size={11} /> {h}</span>)
+                    : proposing(`key:${k.name}`) ? <Badge v="approval">binding proposed</Badge> : <span className="badge badge-quiet">not bound · unusable</span>}
+                </span>
+                <span className="shield-actions">
+                  {!k.boundTo.length && !proposing(`key:${k.name}`) && <>
+                    <input className="select-sm mono bind-input" aria-label={`Bind ${k.name} to a host`} placeholder="api.example.com" value={bind[k.name] ?? ""} onChange={(e) => setBind({ ...bind, [k.name]: e.target.value })} />
+                    <button className="btn btn-ghost btn-sm" disabled={busy || !bind[k.name]} onClick={() => ctx.change({ op: "AddRule", id: ruleId(`k-${k.name}`), outcome: "Allow", scope: `key:${k.name}`, target: bind[k.name].trim().toLowerCase() })}>Propose binding</button>
+                  </>}
+                  <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => confirm(`Delete key ${k.name}? Boxes using it start failing at once.`) && run(() => api(`/keys/${k.name}`, undefined, "DELETE"), "Key deleted")}>Delete</button>
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="log-foot"><span>binding a key to a service: {s.policy!.required} vote{s.policy!.required > 1 ? "s" : ""} + {s.policy!.timelock}s</span><span>deleting a key is instant</span></div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================== Sandbox runs (Agents page)
+
+function SandboxRuns({ ctx }: { ctx: Ctx }) {
+  const { s, run, busy } = ctx;
+  const sb = s.sandbox;
+  return (
+    <div className="card">
+      <div className="hd"><h2>Running in a sandbox</h2><span className="sub">{sb.sessions.length} live · {sb.requireSandbox ? "sandbox required" : "sandbox optional"}</span></div>
+      {sb.sessions.length === 0 ? <Empty icon="agents">No boxes running. Start one with <span className="mono">pnpm karuna run --agent &lt;id&gt; ./folder -- &lt;command&gt;</span>.</Empty> : (
+        <div className="table">
+          {sb.sessions.map((x) => (
+            <div className="tr run-tr" key={x.id}>
+              <span className="live-dot" aria-hidden />
+              <span className="b">{x.agentName}<div className="muted small mono">run {x.id}{x.host ? ` · ${x.host}` : ""} · started {ago(x.startedAt)}</div></span>
+              <span className="mono small muted" title={x.lastRequest ?? ""}>{x.requests} requests · {x.denied} blocked{x.lastRequest ? ` · last ${x.lastRequest}` : ""}</span>
+              {x.stopRequested ? <Badge v="approval">stopping</Badge> : <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => run(() => api(`/sandbox/${x.id}/stop`, {}), "Stopping the box")}>Stop</button>}
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="log-foot"><span>no network except Karuna · no host files unless mounted · no real keys · wiped on exit</span><span>panic button stops every box</span></div>
     </div>
   );
 }

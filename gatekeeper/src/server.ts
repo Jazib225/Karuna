@@ -11,6 +11,15 @@ import { ConfigError } from "./config.ts";
 import { isTransient, scrub } from "./chain.ts";
 import { GatekeeperError, type AgentAction, type Gatekeeper, type SignedAction, type SignedDecision } from "./gatekeeper.ts";
 import type { WalletBackend } from "./wallet.ts";
+import type { EgressProxy } from "./proxy.ts";
+import type { SecretStore } from "./secrets.ts";
+
+/** What the agent API needs to hand out sandbox runs. Absent = sandboxes not available. */
+export interface SandboxDeps {
+  proxy: EgressProxy;
+  caPem: string;
+  secrets: SecretStore;
+}
 
 const MAX_BODY = 1024 * 1024;
 
@@ -52,14 +61,41 @@ const safeEq = (a: string, b: string) => {
 
 // ---------------------------------------------------------------- agent API
 
-export function agentApi(gk: Gatekeeper): Server {
+export function agentApi(gk: Gatekeeper, sandbox?: SandboxDeps): Server {
   return createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", "http://x");
       if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true });
       const token = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
-      const agentId = gk.authenticateAgent(token);
-      if (!agentId) return send(res, 401, { error: "Unknown agent token" });
+      const who = gk.authAgent(token);
+      if (!who) return send(res, 401, { error: "Unknown agent token" });
+      const agentId = who.agentId;
+
+      // ---- sandbox runs (karuna run). Only an agent's own kag_ token can start one.
+      if (req.method === "POST" && url.pathname === "/v1/sessions") {
+        if (who.session) return send(res, 403, { error: "Start runs from outside the sandbox" });
+        if (!sandbox) return send(res, 501, { error: "This Gatekeeper has no sandbox support" });
+        const body = await readBody(req);
+        const s = gk.startSession(agentId, body.host);
+        const proxyPort = await sandbox.proxy.open(s.token);
+        return send(res, 200, {
+          session: s.token, id: s.id, agentId, proxyPort, caPem: sandbox.caPem,
+          env: sandbox.secrets.placeholderEnv(),
+          writableMounts: (Array.isArray(body.mounts) ? body.mounts : []).filter((m: unknown) => typeof m === "string" && gk.mayMountWritable(agentId, m)),
+        });
+      }
+      if (req.method === "POST" && url.pathname === "/v1/sessions/heartbeat") {
+        if (!who.session) return send(res, 400, { error: "Heartbeat with the run's session token" });
+        return send(res, 200, gk.heartbeat(token));
+      }
+      if (req.method === "DELETE" && url.pathname === "/v1/sessions") {
+        if (who.session) gk.endSession(token, "runner exited");
+        return send(res, 200, { ok: true });
+      }
+      // Sandbox required: an agent's own token can only start runs, unless Dharma says otherwise.
+      if (!who.session && gk.requireSandbox && !gk.isUnsandboxed(agentId)) {
+        return send(res, 403, { error: "This agent must run in a Karuna sandbox (karuna run)" });
+      }
 
       if (req.method === "POST" && url.pathname === "/v1/proposals") {
         const body = await readBody(req);
@@ -87,7 +123,7 @@ export function agentApi(gk: Gatekeeper): Server {
 
 // ---------------------------------------------------------------- console API
 
-export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: string): Server {
+export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: string, secrets?: SecretStore): Server {
   let walletCache: { at: number; value: unknown } | null = null;
 
   return createServer(async (req, res) => {
@@ -151,6 +187,23 @@ export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: 
       if (method === "POST" && path === "/dharma/action") return send(res, 200, await gk.submitAction(body as unknown as SignedAction));
       if (method === "POST" && path === "/agents/prepare") return send(res, 200, gk.prepareAgent(body.name));
       if (method === "POST" && (m = path.match(/^\/agents\/([\w-]+)\/rotate-token$/))) return send(res, 200, gk.rotateAgentToken(m[1]));
+      if (method === "POST" && path === "/keys") {
+        if (!secrets) return send(res, 501, { error: "No key store" });
+        try {
+          const k = secrets.put(String(body.name ?? "").trim().toLowerCase(), String(body.envVar ?? "").trim(), String(body.value ?? ""));
+          gk.noteKeyStored(k.name, k.envVar);
+          return send(res, 200, k);
+        } catch (e) {
+          return send(res, 400, { error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      if (method === "DELETE" && (m = path.match(/^\/keys\/([a-z0-9-]+)$/))) {
+        if (!secrets) return send(res, 501, { error: "No key store" });
+        secrets.remove(m[1]);
+        gk.noteKeyRemoved(m[1]);
+        return send(res, 200, { ok: true });
+      }
+      if (method === "POST" && (m = path.match(/^\/sandbox\/([\w-]+)\/stop$/))) return send(res, 200, (gk.stopSession(m[1]), { ok: true }));
       if (method === "POST" && path === "/access-request") return send(res, 200, (gk.requestAccess(body.address, body.name), { ok: true }));
       if (method === "POST" && (m = path.match(/^\/proposals\/([\w-]+)\/decide$/))) return send(res, 200, await gk.decide(m[1], body as unknown as SignedDecision));
 

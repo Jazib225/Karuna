@@ -54,3 +54,36 @@ describe("buildRuleset (Dharma → engine)", () => {
     expect(evaluate({ tool: "http", method: "GET", url: "https://github.com/x" }, ctx, rules).outcome).toBe("allow");
   });
 });
+
+describe("HTTP rules for sandbox egress (method + path)", () => {
+  const ctxHttp = { ...ctx, allowlistedDomains: [...ctx.allowlistedDomains, "openai.com"] };
+  const http = (method: string, url: string) => ({ tool: "http", agent: "buyer", method, url }) as const;
+
+  it("by default, a POST to an allowlisted domain needs approval (http-mutations)", () => {
+    const rules = buildRuleset(builtins());
+    expect(evaluate(http("POST", "https://api.openai.com/v1/chat/completions"), ctxHttp, rules).ruleId).toBe("http-mutations");
+  });
+
+  it("an http:POST allow rule with a path lets model calls through, and only there", () => {
+    const rules = buildRuleset([...builtins(), custom({ id: "llm", outcome: "allow", scope: "http:POST", target: "api.openai.com/v1/" })]);
+    expect(evaluate(http("POST", "https://api.openai.com/v1/chat/completions"), ctxHttp, rules)).toMatchObject({ outcome: "allow", ruleId: "llm" });
+    expect(evaluate(http("POST", "https://api.openai.com/admin/keys"), ctxHttp, rules).ruleId).toBe("http-mutations"); // other path
+    expect(evaluate(http("DELETE", "https://api.openai.com/v1/files/x"), ctxHttp, rules).ruleId).toBe("http-mutations"); // other method
+    expect(evaluate(http("POST", "https://evil-openai.com/v1/x"), ctxHttp, rules).ruleId).toBe("unlisted-domain"); // look-alike host
+  });
+
+  it("a path-scoped deny blocks one endpoint on an otherwise allowed domain", () => {
+    const rules = buildRuleset([...builtins(), custom({ id: "no-payouts", outcome: "deny", scope: "http", target: "api.stripe.com/v1/payouts" })]);
+    expect(evaluate(http("GET", "https://api.stripe.com/v1/payouts"), ctx, rules).ruleId).toBe("no-payouts");
+    expect(evaluate(http("GET", "https://api.stripe.com/v1/balance"), ctx, rules).ruleId).toBe("allowlisted-domain");
+  });
+
+  it("capability scopes (key:, mount, unsandboxed) never decide a request", () => {
+    const rules = buildRuleset([
+      ...builtins(),
+      custom({ id: "key-openai", outcome: "allow", scope: "key:openai", target: "api.openai.com" }),
+      custom({ id: "unsb", outcome: "allow", scope: "unsandboxed", target: "buyer" }),
+    ]);
+    expect(evaluate(http("GET", "https://api.openai.com/v1/models"), ctxHttp, rules).ruleId).toBe("allowlisted-domain");
+  });
+});

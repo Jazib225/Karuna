@@ -1,0 +1,17 @@
+{
+  "name": "@prekaruna/runner",
+  "private": true,
+  "type": "module",
+  "description": "The karuna CLI: runs an agent in a Karuna sandbox whose only way out is the Gatekeeper.",
+  "bin": { "karuna": "src/cli.ts" },
+  "scripts": {
+    "karuna": "tsx src/cli.ts",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  }
+}
