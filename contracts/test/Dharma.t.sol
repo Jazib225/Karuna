@@ -8,7 +8,7 @@ import {DharmaProxy} from "../src/DharmaProxy.sol";
 /// Stand-in for a future Dharma version, to test upgrades.
 contract DharmaNext is Dharma {
     function version() external pure override returns (uint256) {
-        return 3;
+        return 4;
     }
 }
 
@@ -341,7 +341,7 @@ contract DharmaTest is Test {
     // ------------------------------------------------------------- v2: proxy + setup
 
     function test_runs_behind_a_proxy_that_nobody_can_reinitialize() public {
-        assertEq(dharma.version(), 2);
+        assertEq(dharma.version(), 3);
         assertEq(dharma.timelock(), TIMELOCK);
         assertEq(dharma.coreTimelock(), CORE);
         string[] memory d = new string[](0);
@@ -528,7 +528,7 @@ contract DharmaTest is Test {
         dharma.execute(id);
 
         assertEq(dharma.implementation(), next);
-        assertEq(dharma.version(), 3);
+        assertEq(dharma.version(), 4);
         // same address, same org: members, rules, payees and signatures all carry over
         assertEq(dharma.members().length, 3);
         assertEq(dharma.rules().length, 13);
@@ -549,5 +549,148 @@ contract DharmaTest is Test {
         vote(bobKey, id, true);
         vote(carolKey, id, true);
         dharma.execute(id);
+    }
+
+    // ------------------------------------------------------------- v3: trust levels
+
+    function lvl(bytes32 agent, uint8 level, string memory reason) internal pure returns (bytes memory) {
+        return abi.encode(agent, level, reason);
+    }
+
+    function withAgent() internal {
+        pass(Dharma.Op.SetAgent, abi.encode(AGENT, uint256(0)));
+    }
+
+    function test_agents_start_at_level_0_with_default_limits() public {
+        withAgent();
+        assertEq(dharma.agentLevel(AGENT), 0);
+        Dharma.LevelLimits memory l0 = dharma.levelLimits(0);
+        assertEq(l0.perPaymentMicroUsd, 0.1e6);
+        assertEq(l0.dailyMicroUsd, 1e6);
+        assertEq(dharma.levelLimits(3).dailyMicroUsd, 50e6);
+        (bytes32[] memory ids, uint8[] memory ls) = dharma.levels();
+        assertEq(ids.length, 1);
+        assertEq(ls[0], 0);
+        vm.expectRevert(abi.encodeWithSelector(Dharma.Invalid.selector, "bad level"));
+        dharma.levelLimits(4);
+    }
+
+    function test_raising_a_level_needs_a_vote_and_the_wait() public {
+        withAgent();
+        bytes memory up = lvl(AGENT, 2, "vote");
+        assertFalse(dharma.isTightening(Dharma.Op.SetLevel, up));
+        bytes memory sig = sign(aliceKey, Dharma.Kind.Tighten, Dharma.Op.SetLevel, up, 0, false);
+        vm.prank(gk);
+        vm.expectRevert(Dharma.NotTightening.selector);
+        dharma.tighten(Dharma.Op.SetLevel, up, alice, block.timestamp + 1 hours, sig);
+        vm.prank(gk);
+        vm.expectRevert(Dharma.NotTightening.selector); // nor the Gatekeeper
+        dharma.tighten(Dharma.Op.SetLevel, up, address(0), 0, "");
+
+        uint256 id = propose(aliceKey, Dharma.Op.SetLevel, up);
+        assertEq(dharma.agentLevel(AGENT), 0);
+        vm.warp(block.timestamp + TIMELOCK);
+        vm.expectEmit(true, true, false, true);
+        emit Dharma.LevelSet(AGENT, 2, alice, "vote");
+        dharma.execute(id);
+        assertEq(dharma.agentLevel(AGENT), 2);
+    }
+
+    function test_any_member_or_the_gatekeeper_lowers_a_level_instantly() public {
+        withAgent();
+        pass(Dharma.Op.SetLevel, lvl(AGENT, 3, "vote"));
+        addMembers();
+        tighten(bobKey, Dharma.Op.SetLevel, lvl(AGENT, 2, "member")); // one member, no vote
+        assertEq(dharma.agentLevel(AGENT), 2);
+        vm.expectEmit(true, true, false, true);
+        emit Dharma.LevelSet(AGENT, 0, gk, "tripwire");
+        gkTighten(Dharma.Op.SetLevel, lvl(AGENT, 0, "tripwire"));
+        assertEq(dharma.agentLevel(AGENT), 0);
+    }
+
+    function test_levels_are_validated() public {
+        bytes memory noAgent = lvl(AGENT, 1, "vote");
+        bytes memory sig = sign(aliceKey, Dharma.Kind.Propose, Dharma.Op.SetLevel, noAgent, 0, false);
+        vm.expectRevert(abi.encodeWithSelector(Dharma.Invalid.selector, "no such agent"));
+        dharma.propose(Dharma.Op.SetLevel, noAgent, alice, block.timestamp + 1 hours, sig);
+        withAgent();
+        bytes memory tooHigh = lvl(AGENT, 4, "vote");
+        sig = sign(aliceKey, Dharma.Kind.Propose, Dharma.Op.SetLevel, tooHigh, 0, false);
+        vm.expectRevert(abi.encodeWithSelector(Dharma.Invalid.selector, "bad level"));
+        dharma.propose(Dharma.Op.SetLevel, tooHigh, alice, vm.getBlockTimestamp() + 1 hours, sig);
+        bytes memory same = lvl(AGENT, 0, "member");
+        vm.prank(gk);
+        vm.expectRevert(Dharma.NotTightening.selector); // already 0: nothing to lower
+        dharma.tighten(Dharma.Op.SetLevel, same, address(0), 0, "");
+    }
+
+    function test_level_limits_lower_fast_raise_slow() public {
+        bytes memory lower = abi.encode(uint8(1), uint256(0.2e6), uint256(2e6));
+        bytes memory raise = abi.encode(uint8(1), uint256(1e6), uint256(10e6));
+        assertTrue(dharma.isTightening(Dharma.Op.SetLevelLimits, lower));
+        assertFalse(dharma.isTightening(Dharma.Op.SetLevelLimits, raise));
+        gkTighten(Dharma.Op.SetLevelLimits, lower);
+        assertEq(dharma.levelLimits(1).dailyMicroUsd, 2e6);
+        // a member's lower still goes to a vote (only Freeze and level drops are instant for members)
+        bytes memory sig = sign(aliceKey, Dharma.Kind.Tighten, Dharma.Op.SetLevelLimits, lower, 0, false);
+        vm.prank(gk);
+        vm.expectRevert(Dharma.MembersMustPropose.selector);
+        dharma.tighten(Dharma.Op.SetLevelLimits, lower, alice, block.timestamp + 1 hours, sig);
+        bytes memory bad = abi.encode(uint8(1), uint256(5e6), uint256(1e6));
+        sig = sign(aliceKey, Dharma.Kind.Propose, Dharma.Op.SetLevelLimits, bad, 0, false);
+        vm.expectRevert(abi.encodeWithSelector(Dharma.Invalid.selector, "bad level limits"));
+        dharma.propose(Dharma.Op.SetLevelLimits, bad, alice, block.timestamp + 1 hours, sig);
+        pass(Dharma.Op.SetLevelLimits, raise);
+        assertEq(dharma.levelLimits(1).perPaymentMicroUsd, 1e6);
+    }
+
+    function test_removing_an_agent_clears_its_level() public {
+        withAgent();
+        pass(Dharma.Op.SetLevel, lvl(AGENT, 2, "vote"));
+        gkTighten(Dharma.Op.RemoveAgent, abi.encode(AGENT));
+        assertEq(dharma.agentLevel(AGENT), 0);
+    }
+
+    function test_the_record_is_anchored_with_the_log_by_the_gatekeeper_only() public {
+        bytes32[] memory ids = new bytes32[](2);
+        ids[0] = AGENT;
+        ids[1] = bytes32("research");
+        uint64[] memory done = new uint64[](2);
+        done[0] = 12;
+        done[1] = 3;
+        uint64[] memory denied = new uint64[](2);
+        denied[1] = 1;
+        vm.expectRevert(Dharma.NotGatekeeper.selector);
+        dharma.anchorWithRecord(bytes32("h"), 10, ids, done, denied);
+        vm.prank(gk);
+        vm.expectEmit(true, false, false, true);
+        emit Dharma.ActionsRecorded(AGENT, 12, 0);
+        dharma.anchorWithRecord(bytes32("h"), 10, ids, done, denied);
+        assertEq(dharma.logLength(), 10);
+        vm.prank(gk);
+        vm.expectRevert(abi.encodeWithSelector(Dharma.Invalid.selector, "log cannot shrink"));
+        dharma.anchorWithRecord(bytes32("h0"), 5, ids, done, denied);
+        uint64[] memory short = new uint64[](1);
+        vm.prank(gk);
+        vm.expectRevert(abi.encodeWithSelector(Dharma.Invalid.selector, "length mismatch"));
+        dharma.anchorWithRecord(bytes32("h2"), 11, ids, short, denied);
+    }
+
+    function test_tripwires_are_reported_per_agent_by_the_gatekeeper_only() public {
+        vm.expectRevert(Dharma.NotGatekeeper.selector);
+        dharma.reportTripwire(AGENT, "trap password");
+        vm.prank(gk);
+        vm.expectEmit(true, false, false, true);
+        emit Dharma.TripwireFired(AGENT, "trap password");
+        dharma.reportTripwire(AGENT, "trap password");
+    }
+
+    function test_unapproved_transfers_are_reported_by_the_gatekeeper_only() public {
+        vm.expectRevert(Dharma.NotGatekeeper.selector);
+        dharma.reportUnapprovedTransfer(bytes32("tx"), PAYEE, 5e6);
+        vm.prank(gk);
+        vm.expectEmit(true, true, false, true);
+        emit Dharma.UnapprovedTransfer(bytes32("tx"), PAYEE, 5e6);
+        dharma.reportUnapprovedTransfer(bytes32("tx"), PAYEE, 5e6);
     }
 }

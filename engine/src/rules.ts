@@ -1,7 +1,7 @@
 // The default policy: the 12 website rules (CLAUDE.md §1) + the per-agent allowance rule.
 // Organization-specific values (agents, allowances, payees, domains) come from buildContext().
 // Rules are evaluated in order; the FIRST matching rule decides (CLAUDE.md §1).
-import type { Outcome, Rule, Request, PolicyContext } from "./types.ts";
+import type { AgentLevel, Outcome, Rule, Request, PolicyContext } from "./types.ts";
 
 // --- helpers ---------------------------------------------------------------
 
@@ -77,7 +77,10 @@ export const defaultRules: Rule[] = [
       if (r.tool !== "payment" || !r.to || r.amountUsd == null) return false;
       if (!ctx.knownRecipients[r.to.toLowerCase()]) return false;
       if (!r.agent) return false;
-      const cap = ctx.allowances[r.agent];
+      // A trust level (Dharma v3) sets both limits: per payment and per day.
+      const lvl = ctx.levels?.[r.agent];
+      if (lvl && Math.round(r.amountUsd * 1e6) > Math.round(lvl.perPaymentUsd * 1e6)) return false;
+      const cap = lvl ? lvl.dailyUsd : ctx.allowances[r.agent];
       if (cap == null) return false;
       const spent = ctx.spentTodayUsd[r.agent] ?? 0;
       return Math.round((spent + r.amountUsd) * 1e6) <= Math.round(cap * 1e6);
@@ -176,9 +179,74 @@ export const DEFAULT_ALLOWLISTED_DOMAINS = ["github.com", "stripe.com", "pypi.or
 
 /** The policy-relevant slice of an organization's configuration. */
 export interface OrgPolicyConfig {
-  agents: { id: string; dailyAllowanceUsd: number }[];
+  /** `level` is set on Dharma v3 orgs; then `levelLimits` says what each level may pay. */
+  agents: { id: string; dailyAllowanceUsd: number; level?: number }[];
   recipients: { address: string; name: string; category?: string }[];
   allowlistedDomains: string[];
+  levelLimits?: { perPaymentUsd: number; dailyUsd: number }[];
+}
+
+// ---------------------------------------------------------------- trust levels (Dharma v3)
+
+/** At or above `min`, an agent may do this without asking, unless a core rule or the org's own
+ *  block or approval rule says otherwise (those come first). The same ladder for every org. */
+export const LEVEL_GRANTS: { id: string; min: number; what: string }[] = [
+  { id: "level-messages", min: 1, what: "Messages to other agents" },
+  { id: "level-workspace-writes", min: 1, what: "File writes in ./workspace" },
+  { id: "level-http-mutations", min: 2, what: "POST/PUT/DELETE to allowlisted domains" },
+  { id: "level-package-install", min: 2, what: "Package installs" },
+  { id: "level-file-writes", min: 3, what: "File writes anywhere in the sandbox" },
+];
+
+const levelOf = (r: Request, ctx: PolicyContext): AgentLevel | undefined => (r.agent ? ctx.levels?.[r.agent] : undefined);
+const minFor = (id: string) => LEVEL_GRANTS.find((g) => g.id === id)!.min;
+const atLeast = (r: Request, ctx: PolicyContext, id: string) => (levelOf(r, ctx)?.level ?? -1) >= minFor(id);
+const inWorkspace = (p: string) => /^(\.\/)?workspace(\/|$)/i.test(p.trim().replace(/\\/g, "/"));
+
+/** The level grants as engine rules (allow). They match only agents that have a level. */
+export const levelRules: Rule[] = [
+  {
+    id: "level-workspace-writes",
+    description: `Level ${minFor("level-workspace-writes")}+: file writes in ./workspace`,
+    outcome: "allow",
+    match: (r, ctx) => r.tool === "file" && r.fileOp === "write" && inWorkspace(r.path ?? "") && atLeast(r, ctx, "level-workspace-writes"),
+  },
+  {
+    id: "level-file-writes",
+    description: `Level ${minFor("level-file-writes")}+: file writes anywhere in the sandbox`,
+    outcome: "allow",
+    match: (r, ctx) => r.tool === "file" && r.fileOp === "write" && atLeast(r, ctx, "level-file-writes"),
+  },
+  {
+    id: "level-http-mutations",
+    description: `Level ${minFor("level-http-mutations")}+: POST/PUT/DELETE to allowlisted domains`,
+    outcome: "allow",
+    match: (r, ctx) =>
+      r.tool === "http" &&
+      ["POST", "PUT", "DELETE", "PATCH"].includes((r.method ?? "").toUpperCase()) &&
+      !!r.url &&
+      isAllowlisted(r.url, ctx) &&
+      atLeast(r, ctx, "level-http-mutations"),
+  },
+  {
+    id: "level-package-install",
+    description: `Level ${minFor("level-package-install")}+: package installs`,
+    outcome: "allow",
+    match: (r, ctx) => r.tool === "shell" && PKG_INSTALL.test(cmd(r)) && !RM_RF_ANY.test(cmd(r)) && atLeast(r, ctx, "level-package-install"),
+  },
+];
+
+/**
+ * Agent-to-agent messages that no rule of the org's own covers: on a levels org, Level 0 needs
+ * approval and Level 1+ is delivered. Null = no level opinion (a v2 org: delivered, as before).
+ */
+export function messageLevelDecision(req: Request, ctx: PolicyContext): { outcome: Outcome; ruleId: string; reason: string } | null {
+  const lvl = levelOf(req, ctx);
+  if (!lvl) return null;
+  const min = minFor("level-messages");
+  return lvl.level >= min
+    ? { outcome: "allow", ruleId: "level-messages", reason: `Level ${min}+: messages to other agents` }
+    : { outcome: "approval", ruleId: "level-messages", reason: `Level ${lvl.level}: messages to other agents need approval` };
 }
 
 /** Build the engine context from an org's config plus today's spend. No built-in data. */
@@ -190,6 +258,17 @@ export function buildContext(cfg: OrgPolicyConfig, spentTodayUsd: Record<string,
     ),
     allowances: Object.fromEntries(cfg.agents.map((a) => [a.id, a.dailyAllowanceUsd])),
     spentTodayUsd: { ...spentTodayUsd },
+    ...(cfg.levelLimits
+      ? {
+          levels: Object.fromEntries(
+            cfg.agents.map((a) => {
+              const level = a.level ?? 0;
+              const lim = cfg.levelLimits![level] ?? { perPaymentUsd: 0, dailyUsd: 0 };
+              return [a.id, { level, perPaymentUsd: lim.perPaymentUsd, dailyUsd: lim.dailyUsd }];
+            }),
+          ),
+        }
+      : {}),
   };
 }
 
@@ -340,8 +419,10 @@ export function matchCustomRules(req: Request, onchain: OnchainRule[]): { outcom
  *   1. core-boundary, secrets-read           (core, always)
  *   2. custom deny rules                     (blocks beat everything below)
  *   3. unknown-recipient                     (core, always)
- *   4. custom approval rules, then custom allow rules
- *   5. every other default rule still active (in default order; default-deny last)
+ *   4. custom approval rules
+ *   5. trust-level grants (Dharma v3; only agents with a level)
+ *   6. custom allow rules
+ *   7. every other default rule still active (in default order; default-deny last)
  * A default rule the chain doesn't mention at all is kept (fail closed). Core rules can be turned
  * off only by a core change on Dharma (every member + the core wait); when one is, it stops applying.
  * The final no-match denial in evaluate() still fails closed even without default-deny.
@@ -362,6 +443,7 @@ export function buildRuleset(onchain: OnchainRule[]): Rule[] {
     ...custom.filter((r) => r.outcome === "deny"),
     ...ifActive("unknown-recipient"),
     ...custom.filter((r) => r.outcome === "approval"),
+    ...levelRules,
     ...custom.filter((r) => r.outcome === "allow"),
     ...rest,
   ];

@@ -22,7 +22,8 @@ contract Dharma {
     enum Op {
         AddRule, RemoveRule, SetPayee, RemovePayee, SetAgent, RemoveAgent,
         AddDomain, RemoveDomain, SetThreshold, Freeze, Unfreeze, AddMember, RemoveMember,
-        SetTimelock, SetCoreTimelock, Upgrade
+        SetTimelock, SetCoreTimelock, Upgrade,
+        SetLevel, SetLevelLimits // v3: trust levels
     }
     enum Outcome { Allow, Deny, Approval }
     enum Status { None, Open, Queued, Executed, Defeated, Cancelled }
@@ -58,6 +59,12 @@ contract Dharma {
         uint64 eta; // when it can be executed (set when it passes)
     }
 
+    /// What an agent at a level may pay without asking (the policy engine adds the non-payment grants).
+    struct LevelLimits {
+        uint256 perPaymentMicroUsd;
+        uint256 dailyMicroUsd;
+    }
+
     // ------------------------------------------------------------------ events
 
     event RuleAdded(bytes32 indexed id, Outcome outcome, bytes32 agent, string scope, string target, uint256 maxMicroUsd);
@@ -87,6 +94,16 @@ contract Dharma {
     event LogAnchored(bytes32 head, uint64 length);
     event ApprovalRequested(bytes32 indexed requestId, bytes32 indexed agent, uint256 amountMicroUsd, bytes32 payloadHash);
     event TestFailed(bytes32 indexed agent, string category);
+    // v3
+    event LevelSet(bytes32 indexed agent, uint8 level, address indexed by, string reason);
+    event LevelLimitsSet(uint8 level, uint256 perPaymentMicroUsd, uint256 dailyMicroUsd);
+    /// Running totals per agent, written with each log anchor: the onchain record trust levels read.
+    event ActionsRecorded(bytes32 indexed agent, uint64 completed, uint64 denied);
+    /// The wallet watchdog saw USDC leave the org's wallet that Karuna never approved.
+    event UnapprovedTransfer(bytes32 indexed txHash, address indexed to, uint256 amountMicroUsd);
+    /// An agent tripped a Tripwire (a trap password, or joining a swarm). Recorded per agent, so its
+    /// record shows it even when the agent is already at Level 0.
+    event TripwireFired(bytes32 indexed agent, string reason);
 
     // ------------------------------------------------------------------ errors
 
@@ -110,6 +127,7 @@ contract Dharma {
     uint64 public constant MAX_TIMELOCK = 7 days; // normal wait: 0 (a team's choice) … 7 days
     uint64 public constant MIN_CORE_TIMELOCK = 60; // core wait: never 0
     uint64 public constant MAX_CORE_TIMELOCK = 30 days;
+    uint8 public constant MAX_LEVEL = 3;
     /// ERC-1967 implementation slot: keccak256("eip1967.proxy.implementation") - 1
     bytes32 internal constant IMPLEMENTATION_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
 
@@ -147,6 +165,12 @@ contract Dharma {
     Proposal[] internal _proposals;
     mapping(uint256 => mapping(address => bool)) public hasVoted;
     uint256[] internal _pendingCore; // core proposals a Freeze would cancel
+
+    // v3 (appended): trust levels. Every agent starts at Level 0. A level's limits fall back to the
+    // defaults below until members change them by vote, so upgraded orgs need no migration.
+    mapping(bytes32 => uint8) public agentLevel;
+    mapping(uint8 => LevelLimits) internal _levelLimits;
+    mapping(uint8 => bool) internal _levelLimitsSet;
 
     // ------------------------------------------------------------------ setup
 
@@ -203,9 +227,9 @@ contract Dharma {
 
     // ------------------------------------------------------------------ member actions
 
-    /// @notice Apply a tightening right away. Only two paths are instant:
-    ///         - the Gatekeeper with signer = 0 (Auto-Shield, Swarm Stopper, learned blocks), tighten-only;
-    ///         - a member's panic button (Freeze).
+    /// @notice Apply a tightening right away. Only these paths are instant:
+    ///         - the Gatekeeper with signer = 0 (Drills, Tripwire, learned blocks, level drops), tighten-only;
+    ///         - a member's panic button (Freeze), or a member lowering one agent's level.
     ///         Every other change a member makes goes through propose → vote → timelock, even a tightening.
     function tighten(Op op, bytes calldata data, address signer, uint256 deadline, bytes calldata sig) external {
         address actor;
@@ -214,7 +238,7 @@ contract Dharma {
             actor = gatekeeper;
         } else {
             _auth(Kind.Tighten, op, data, 0, false, signer, deadline, sig);
-            if (op != Op.Freeze) revert MembersMustPropose();
+            if (op != Op.Freeze && op != Op.SetLevel) revert MembersMustPropose();
             actor = signer;
         }
         if (!isTightening(op, data)) revert NotTightening();
@@ -334,6 +358,31 @@ contract Dharma {
         emit TestFailed(agent, category);
     }
 
+    /// @notice Anchor the log and publish each agent's running totals in the same transaction.
+    function anchorWithRecord(bytes32 head, uint64 length, bytes32[] calldata agents_, uint64[] calldata completed, uint64[] calldata denied)
+        external
+    {
+        if (msg.sender != gatekeeper) revert NotGatekeeper();
+        if (length < logLength) revert Invalid("log cannot shrink");
+        if (agents_.length != completed.length || agents_.length != denied.length) revert Invalid("length mismatch");
+        logHead = head;
+        logLength = length;
+        emit LogAnchored(head, length);
+        for (uint256 i; i < agents_.length; i++) emit ActionsRecorded(agents_[i], completed[i], denied[i]);
+    }
+
+    /// @notice Public record that an agent tripped a Tripwire.
+    function reportTripwire(bytes32 agent, string calldata reason) external {
+        if (msg.sender != gatekeeper) revert NotGatekeeper();
+        emit TripwireFired(agent, reason);
+    }
+
+    /// @notice Public record that USDC left the org's wallet without Karuna's approval.
+    function reportUnapprovedTransfer(bytes32 txHash, address to, uint256 amountMicroUsd) external {
+        if (msg.sender != gatekeeper) revert NotGatekeeper();
+        emit UnapprovedTransfer(txHash, to, amountMicroUsd);
+    }
+
     // ------------------------------------------------------------------ classification
 
     /// @notice True when applying this change can only make the policy stricter.
@@ -352,6 +401,16 @@ contract Dharma {
             return _agentIdx[id] != 0 && cap <= agentCap[id];
         }
         if (op == Op.SetThreshold) return abi.decode(data, (uint256)) <= thresholdMicroUsd;
+        if (op == Op.SetLevel) {
+            (bytes32 id, uint8 level,) = abi.decode(data, (bytes32, uint8, string));
+            return _agentIdx[id] != 0 && level < agentLevel[id];
+        }
+        if (op == Op.SetLevelLimits) {
+            (uint8 level, uint256 per, uint256 daily) = abi.decode(data, (uint8, uint256, uint256));
+            if (level > MAX_LEVEL) return false;
+            LevelLimits memory cur = levelLimits(level);
+            return per <= cur.perPaymentMicroUsd && daily <= cur.dailyMicroUsd;
+        }
         return op == Op.RemovePayee || op == Op.RemoveAgent || op == Op.RemoveDomain || op == Op.Freeze;
         // SetPayee, AddDomain, Unfreeze, AddMember, RemoveMember, and the waits and upgrades are
         // never instant: they always go to a vote.
@@ -402,6 +461,13 @@ contract Dharma {
         } else if (op == Op.RemoveMember) {
             address m = abi.decode(data, (address));
             if (_memberIdx[m] == 0 || _members.length == 1) revert Invalid("cannot remove");
+        } else if (op == Op.SetLevel) {
+            (bytes32 id, uint8 level,) = abi.decode(data, (bytes32, uint8, string));
+            if (_agentIdx[id] == 0) revert Invalid("no such agent");
+            if (level > MAX_LEVEL || level == agentLevel[id]) revert Invalid("bad level");
+        } else if (op == Op.SetLevelLimits) {
+            (uint8 level, uint256 per, uint256 daily) = abi.decode(data, (uint8, uint256, uint256));
+            if (level > MAX_LEVEL || per > daily) revert Invalid("bad level limits");
         }
     }
 
@@ -456,6 +522,7 @@ contract Dharma {
             _agentIds.pop();
             delete _agentIdx[id];
             delete agentCap[id];
+            delete agentLevel[id];
             emit AgentRemoved(id);
         } else if (op == Op.AddDomain) {
             _addDomain(abi.decode(data, (string)));
@@ -505,6 +572,15 @@ contract Dharma {
             address m = abi.decode(data, (address));
             _removeAddr(_members, _memberIdx, m);
             emit MemberRemoved(m);
+        } else if (op == Op.SetLevel) {
+            (bytes32 id, uint8 level, string memory reason) = abi.decode(data, (bytes32, uint8, string));
+            agentLevel[id] = level;
+            emit LevelSet(id, level, actor, reason);
+        } else if (op == Op.SetLevelLimits) {
+            (uint8 level, uint256 per, uint256 daily) = abi.decode(data, (uint8, uint256, uint256));
+            _levelLimits[level] = LevelLimits(per, daily);
+            _levelLimitsSet[level] = true;
+            emit LevelLimitsSet(level, per, daily);
         }
     }
 
@@ -582,7 +658,24 @@ contract Dharma {
 
     /// @notice The code version behind this org's address.
     function version() external pure virtual returns (uint256) {
-        return 2;
+        return 3;
+    }
+
+    /// @notice A level's payment limits: the members' values if they set them, else the defaults.
+    function levelLimits(uint8 level) public view returns (LevelLimits memory) {
+        if (level > MAX_LEVEL) revert Invalid("bad level");
+        if (_levelLimitsSet[level]) return _levelLimits[level];
+        if (level == 0) return LevelLimits(0.1e6, 1e6);
+        if (level == 1) return LevelLimits(0.5e6, 5e6);
+        if (level == 2) return LevelLimits(2e6, 20e6);
+        return LevelLimits(5e6, 50e6);
+    }
+
+    /// @notice Every agent's level, in the same order as `agents()`.
+    function levels() external view returns (bytes32[] memory ids, uint8[] memory lvls) {
+        ids = _agentIds;
+        lvls = new uint8[](ids.length);
+        for (uint256 i; i < ids.length; i++) lvls[i] = agentLevel[ids[i]];
     }
 
     /// @notice The code this org's proxy currently runs.

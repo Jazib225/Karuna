@@ -114,6 +114,8 @@ async function waitTimelock() {
 async function activateAgent(capUsd: number) {
   const { id, token } = gk.prepareAgent("Ops agent");
   await propose(alice, { op: "SetAgent", id, capUsd });
+  // New agents start at Level 0; these tests set Level 0's limits to the agent's old allowance.
+  await propose(alice, { op: "SetLevelLimits", level: 0, perPaymentUsd: capUsd, dailyUsd: capUsd });
   await waitTimelock();
   return { id, token };
 }
@@ -382,15 +384,25 @@ describe("rules cover every kind of action, not just payments and web requests",
   it("message rules: a block stops it; an approval rule holds it, and only the approved message is delivered", async () => {
     const research = gk.authenticateAgent((await activateAgent(1)).token)!;
     const payer = gk.authenticateAgent((await activateAgent(1)).token)!;
-    // No rule: delivered, as before.
-    expect((await gk.propose(research, { type: "message", to: payer, body: "hello" })).status).toBe("allowed");
+    // No rule of the org's own: at Level 0 a message waits for approval…
+    const first = await gk.propose(research, { type: "message", to: payer, body: "hello" });
+    expect(first.status).toBe("pending");
+    expect(pending()[0].decision.ruleId).toBe("level-messages");
+    expect(bodies(payer)).toEqual([]);
+    await gk.decide(pending()[0].id, await signDecision(alice, pending()[0].id, pending()[0].payloadHash!, true));
     expect(bodies(payer)).toEqual(["hello"]);
+    // …and from Level 1 it's delivered.
+    gk.setChainRecords({ records: { [research]: { agent: research, level: 0, cleanStreak: 10 } } });
+    await propose(alice, { op: "SetLevel", agent: research, level: 1, reason: "vote" });
+    await waitTimelock();
+    expect((await gk.propose(research, { type: "message", to: payer, body: "hello again" })).status).toBe("allowed");
+    expect(bodies(payer)).toEqual(["hello again", "hello"]); // newest first
 
     await propose(alice, { op: "AddRule", id: "dm-needs-ok", outcome: "Approval", agent: research, scope: "message", target: payer });
     await waitTimelock();
     const held = await gk.propose(research, { type: "message", to: payer, body: "please pay invoice 7" });
     expect(held.status).toBe("pending");
-    expect(bodies(payer)).toHaveLength(1); // not delivered yet
+    expect(bodies(payer)).toHaveLength(2); // not delivered yet
     const p = pending()[0];
     expect(p.decision.ruleId).toBe("dm-needs-ok");
     await gk.decide(p.id, await signDecision(alice, p.id, p.payloadHash!, true));

@@ -112,6 +112,10 @@ export function pipeServer(gk: Gatekeeper): Server {
     }
     send({ type: "decision", id: `egress-${Date.now()}`, action_type: "http", summary: `${e.method} ${host}`.slice(0, 160), result: "allow", agent: e.agentId });
   });
+  // Trust-level changes and watchdog freezes show in the island's feed like any decision.
+  gk.on("notice", (n: { kind: string; agent: string; tone: "ok" | "bad"; summary: string }) =>
+    send({ type: "decision", id: `notice-${Date.now()}`, action_type: n.kind, summary: n.summary.slice(0, 160), result: n.tone === "bad" ? "deny" : "allow", agent: n.agent }),
+  );
   gk.on("paused", (p: { by: string; at: string }) => send({ type: "agent_paused", ...p }));
   gk.on("resumed", () => send({ type: "agent_resumed" }));
 

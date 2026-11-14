@@ -12,13 +12,24 @@ import { gunzipSync } from "node:zlib";
 import { WebSocketServer, type WebSocket } from "ws";
 import { DHARMA_ABI } from "@prekaruna/dharma";
 import type { Address, PublicClient } from "viem";
-import { decodeDharmaLogs, extractLogs, verifyQuickNodeSignature, type DharmaEvent, type RawLog } from "./events.ts";
+import {
+  TRANSFER_TOPIC, USDC_EMITTERS, decodeDharmaLogs, decodeWalletTransfers, extractLogs, verifyQuickNodeSignature,
+  type DharmaEvent, type RawLog, type WalletTransfer,
+} from "./events.ts";
+import { RecordBook } from "./records.ts";
+import type { AgentRecord } from "@prekaruna/dharma";
 
 export interface RelayOptions {
   securityToken?: string; // QuickNode Stream security token (HMAC key)
   client?: PublicClient; // Arc RPC, for the fallback
   dharma: () => string | null; // the org's Dharma address (only its events are relayed)
   notifyGatekeeper?: (events: DharmaEvent[]) => Promise<void>;
+  /** The org's wallet: the watchdog Stream reports USDC leaving it. */
+  wallet?: () => string | null;
+  notifyTransfers?: (transfers: WalletTransfer[]) => Promise<void>;
+  /** Agents' records, rebuilt from Dharma's events (trust levels). */
+  records?: RecordBook;
+  notifyRecords?: (records: Record<string, AgentRecord>, source: string) => Promise<void>;
   quietMs?: number; // show "rpc" for this long after the safety net caught a missed event
   lagBlocks?: number; // with a Stream, the safety net trails the chain by this many blocks
   pollMs?: number;
@@ -33,7 +44,10 @@ export class Relay extends EventEmitter {
   private nonces = new Set<string>();
   private nonceOrder: string[] = [];
   readonly recent: DharmaEvent[] = [];
-  stats = { deliveries: 0, rejected: 0, quickNodeEvents: 0, rpcEvents: 0, lastQuickNodeAt: 0, lastRpcPollAt: 0, lastError: "" };
+  stats = { deliveries: 0, rejected: 0, quickNodeEvents: 0, rpcEvents: 0, quickNodeTransfers: 0, rpcTransfers: 0, lastQuickNodeAt: 0, lastRpcPollAt: 0, lastError: "" };
+  readonly transfers: WalletTransfer[] = [];
+  private seenTransfers = new Set<string>();
+  private recordsTimer: NodeJS.Timeout | null = null;
   private lastBlock: bigint | null = null;
   private timer: NodeJS.Timeout | null = null;
   private notifyTimer: NodeJS.Timeout | null = null;
@@ -70,6 +84,7 @@ export class Relay extends EventEmitter {
       }
     }
     this.recent.splice(100);
+    if (this.opts.records?.add(events)) this.recordsChanged();
     if (!fresh.length) return fresh;
     this.emit("events", fresh);
     if (this.opts.notifyGatekeeper) {
@@ -80,6 +95,33 @@ export class Relay extends EventEmitter {
         void this.opts.notifyGatekeeper!(batch).catch((e) => (this.stats.lastError = `gatekeeper: ${scrub(e)}`));
       }, 200);
     }
+    return fresh;
+  }
+
+  /** Push the rebuilt records to the Gatekeeper (debounced: a backfill delivers many at once). */
+  recordsChanged(delayMs = 500) {
+    const book = this.opts.records;
+    if (!book || !this.opts.notifyRecords) return;
+    if (this.recordsTimer) clearTimeout(this.recordsTimer);
+    this.recordsTimer = setTimeout(() => {
+      this.emit("records", book.records());
+      void this.opts.notifyRecords!(book.records(), book.source()).catch((e) => (this.stats.lastError = `gatekeeper: ${scrub(e)}`));
+    }, delayMs);
+  }
+
+  /** USDC that left the org's wallet: each transfer once, to the consoles and the Gatekeeper. */
+  ingestTransfers(transfers: WalletTransfer[]) {
+    const fresh = transfers.filter((t) => !this.seenTransfers.has(t.id));
+    for (const t of fresh) {
+      this.seenTransfers.add(t.id);
+      this.transfers.unshift(t);
+      if (t.source === "quicknode") this.stats.quickNodeTransfers++;
+      else this.stats.rpcTransfers++;
+    }
+    this.transfers.splice(100);
+    if (!fresh.length) return fresh;
+    this.emit("transfers", fresh);
+    if (this.opts.notifyTransfers) void this.opts.notifyTransfers(fresh).catch((e) => (this.stats.lastError = `gatekeeper: ${scrub(e)}`));
     return fresh;
   }
 
@@ -123,8 +165,10 @@ export class Relay extends EventEmitter {
     } catch {
       return { status: 200, body: { ok: true, events: 0 } }; // signed but not JSON: acknowledge, ignore
     }
-    const events = this.ingest(decodeDharmaLogs(extractLogs(parsed), this.allowed(), "quicknode"));
-    return { status: 200, body: { ok: true, events: events.length } };
+    const logs = extractLogs(parsed);
+    const events = this.ingest(decodeDharmaLogs(logs, this.allowed(), "quicknode"));
+    const transfers = this.ingestTransfers(decodeWalletTransfers(logs, this.opts.wallet?.() ?? null, "quicknode"));
+    return { status: 200, body: { ok: true, events: events.length, transfers: transfers.length } };
   }
 
   // ------------------------------------------------ direct RPC fallback
@@ -152,15 +196,43 @@ export class Relay extends EventEmitter {
     if (latest <= this.lastBlock) return;
     const from = latest - this.lastBlock > 2000n ? latest - 2000n : this.lastBlock + 1n;
     const logs = await client.getLogs({ address: dharma as Address, fromBlock: from, toBlock: latest });
-    this.lastBlock = latest;
     this.stats.lastRpcPollAt = Date.now();
-    const raw: RawLog[] = logs.map((l) => ({
-      address: l.address, topics: l.topics as string[], data: l.data, blockNumber: l.blockNumber?.toString() ?? null,
-      transactionHash: l.transactionHash, logIndex: l.logIndex ?? null,
-    }));
-    this.ingest(decodeDharmaLogs(raw, this.allowed(), "rpc"));
+    this.ingest(decodeDharmaLogs(logs.map(toRaw), this.allowed(), "rpc"));
+    // The watchdog's safety net: USDC out of the wallet, from either emitter.
+    const wallet = this.opts.wallet?.();
+    if (wallet) {
+      const from32 = `0x${"0".repeat(24)}${wallet.toLowerCase().slice(2)}` as `0x${string}`;
+      const out = await client.request({
+        method: "eth_getLogs",
+        params: [{ address: Object.keys(USDC_EMITTERS) as `0x${string}`[], topics: [TRANSFER_TOPIC as `0x${string}`, from32], fromBlock: `0x${from.toString(16)}`, toBlock: `0x${latest.toString(16)}` }],
+      } as never) as { address: string; topics: string[]; data: string; blockNumber: string; transactionHash: string; logIndex: string }[];
+      this.ingestTransfers(decodeWalletTransfers(out, wallet, "rpc"));
+    }
+    this.lastBlock = latest;
+  }
+
+  /**
+   * Catch up on Dharma's history from `fromBlock` (e.g. the deploy block) straight from Arc, for
+   * when the relay was down while the backfilled Stream delivered. Chunked for public RPC limits.
+   */
+  async backfill(fromBlock: bigint, chunk = 10_000n) {
+    const client = this.opts.client;
+    const dharma = this.opts.dharma();
+    if (!client || !dharma) return 0;
+    const head = await client.getBlockNumber();
+    let n = 0;
+    for (let b = fromBlock; b <= head; b += chunk) {
+      const to = b + chunk - 1n > head ? head : b + chunk - 1n;
+      const logs = await client.getLogs({ address: dharma as Address, fromBlock: b, toBlock: to });
+      n += this.ingest(decodeDharmaLogs(logs.map(toRaw), this.allowed(), "rpc")).length;
+    }
+    return n;
   }
 }
+
+const toRaw = (l: { address: string; topics: readonly string[]; data: string; blockNumber: bigint | null; transactionHash: string | null; logIndex: number | null }): RawLog => ({
+  address: l.address, topics: [...l.topics], data: l.data, blockNumber: l.blockNumber?.toString() ?? null, transactionHash: l.transactionHash, logIndex: l.logIndex ?? null,
+});
 
 // ---------------------------------------------------------------- HTTP / WebSocket
 
@@ -200,6 +272,10 @@ export function consoleServer(relay: Relay): Server {
       res.writeHead(200, { "content-type": "application/json" }).end(json(relay.recent.slice(0, 50)));
       return;
     }
+    if (req.method === "GET" && path === "/transfers/recent") {
+      res.writeHead(200, { "content-type": "application/json" }).end(json(relay.transfers.slice(0, 50)));
+      return;
+    }
     res.writeHead(404).end();
   });
   const wss = new WebSocketServer({ noServer: true });
@@ -214,6 +290,9 @@ export function consoleServer(relay: Relay): Server {
   });
   relay.on("events", (events: DharmaEvent[]) => {
     for (const ws of wss.clients) send(ws, { type: "events", mode: relay.mode(), events });
+  });
+  relay.on("transfers", (transfers: WalletTransfer[]) => {
+    for (const ws of wss.clients) send(ws, { type: "transfers", transfers });
   });
   // Tell consoles when the source changes (QuickNode ↔ direct RPC).
   let lastMode = relay.mode();

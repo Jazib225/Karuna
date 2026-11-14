@@ -94,9 +94,15 @@ beforeEach(async () => {
     [{ op: "SetAgent", id: supplies, capUsd: 10 }, undefined],
     [{ op: "SetAgent", id: research, capUsd: 2 }, undefined],
     [{ op: "SetPayee", account: PAYEE, category: "supplies" }, "Supplier"],
+    [{ op: "SetLevelLimits", level: 0, perPaymentUsd: 10, dailyUsd: 50 }, undefined],
+    [{ op: "SetLevelLimits", level: 1, perPaymentUsd: 10, dailyUsd: 50 }, undefined],
   ] as [Change, string | undefined][]) {
     await gk.submitAction({ ...(await sign(Kind.Propose, c)), label });
   }
+  await passTimelock();
+  // Agents that message each other: Level 1 (a clean record, then a vote).
+  gk.setChainRecords({ records: Object.fromEntries([bills, supplies, research].map((a) => [a, { agent: a, level: 0, cleanStreak: 10 }])) });
+  for (const a of [bills, supplies, research]) await gk.submitAction(await sign(Kind.Propose, { op: "SetLevel", agent: a, level: 1, reason: "vote" }));
   await passTimelock();
 }, 60_000);
 

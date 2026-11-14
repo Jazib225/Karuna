@@ -90,6 +90,7 @@ beforeEach(async () => {
   bills = gk.prepareAgent("Bills").id;
   for (const [c, label] of [
     [{ op: "SetAgent", id: bills, capUsd: 1 }, undefined],
+    [{ op: "SetLevelLimits", level: 0, perPaymentUsd: 1, dailyUsd: 1 }, undefined], // Level 0 = the old $1 allowance
     [{ op: "SetPayee", account: PAYEE, category: "supplies" }, "Supplier"],
     [{ op: "SetPayee", account: OTHER, category: "utilities" }, "Power Co"],
   ] as [Change, string | undefined][]) {

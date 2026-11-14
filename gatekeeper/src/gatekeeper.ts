@@ -9,12 +9,13 @@ import { EventEmitter } from "node:events";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { keccak256, stringToHex, verifyTypedData, zeroAddress, type Address, type Hex, type PublicClient } from "viem";
 import {
-  SignedLog, buildContext, buildRuleset, evaluate, httpTargetMatches, matchCustomRules,
-  type Decision, type LogEntry, type LogEvent, type Request,
+  SignedLog, buildContext, buildRuleset, evaluate, httpTargetMatches, matchCustomRules, messageLevelDecision, LEVEL_GRANTS,
+  type Decision, type LogEntry, type LogEvent, type PolicyContext, type Request,
 } from "@prekaruna/engine";
 import {
-  DHARMA_ABI, Kind, actionTypedData, decodeChange, describeChange, encodeChange, opName, paymentDecisionTypedData, toBytes32, toMicro,
-  type Change,
+  DHARMA_ABI, Kind, LEVEL_UP_STREAK, actionTypedData, decodeChange, describeChange, encodeChange, levelLabel, levelUpEligibility, opName,
+  paymentDecisionTypedData, toBytes32, toMicro,
+  type AgentRecord, type Change,
 } from "@prekaruna/dharma";
 import {
   ConfigError, DEFAULT_ALLOWLISTED_DOMAINS, EXPLORER, USDC_TOKEN, WALLET_CHAIN, emptyOrg, isSetUp,
@@ -122,11 +123,30 @@ interface State {
   swarmTrips: { id: string; at: string; reason: string; agents: string[]; txRef?: string }[];
   precedents: Precedent[]; // every human approve / deny on a payment (Learns From Your Choices)
   paused?: { at: string; by: string } | null; // local pause: instant on/off, never onchain (unlike Freeze)
+  /** Running totals per agent, published onchain with each log anchor (ActionsRecorded). */
+  record?: Record<string, { completed: number; denied: number }>;
+  /** Agents' records as the relay rebuilt them from the QuickNode Stream (Dharma's own events). */
+  chainRecords?: { at: string; source: string; records: Record<string, AgentRecord> } | null;
+  /** The wallet watchdog: every USDC transfer that left the org's wallet, and what it matched. */
+  watchdog?: WatchdogEvent[];
+}
+
+export interface WatchdogEvent {
+  key: string; // txHash:to:microUsd (the same transfer may be reported twice)
+  at: string;
+  txHash: string;
+  to: string;
+  amountUsd: number;
+  block: number | null;
+  source: string;
+  verdict: "matched" | "gateway-deposit" | "unapproved";
+  proposalId?: string; // the Karuna payment it matched
+  txRef?: string; // the onchain report, for an unapproved transfer
 }
 
 export interface ShieldAlert {
   id: string;
-  kind: "shield-failed" | "shield-passed" | "changed-bank-account" | "agent-reported" | "trap-touched" | "swarm-stopped";
+  kind: "shield-failed" | "shield-passed" | "changed-bank-account" | "agent-reported" | "trap-touched" | "swarm-stopped" | "watchdog" | "level-lowered";
   agentId: string;
   title: string;
   body: string;
@@ -203,6 +223,8 @@ const lower = (a: string) => a.toLowerCase();
 /** Seconds past a timelock before the Gatekeeper executes (the wallet provider's node can trail our RPC). */
 const EXECUTE_MARGIN_S = 3;
 const MAX_PROPOSALS_KEPT = 5000;
+/** Circle Gateway's wallet contract on EVM testnets: deposits there stay the org's money. */
+export const GATEWAY_WALLET = (process.env.KARUNA_GATEWAY_WALLET ?? "0x0077777d7EBA4688BDeF3E311b846F25870A19B9").toLowerCase();
 const KIND_NAMES = ["tighten", "propose", "vote"] as const;
 
 // ---------------------------------------------------------------- gatekeeper
@@ -233,6 +255,10 @@ export class Gatekeeper extends EventEmitter {
   remote: { port: number; host: string; names: string[] } | null = null;
   /** One-time passes for HTTP requests a member approved: request hash -> expiry. */
   private grants = new Map<string, number>();
+  /** Level drops sent but not yet read back from the chain. */
+  private pendingLevel = new Map<string, number>();
+  /** When each agent last tripped a Tripwire (reported once a minute at most). */
+  private lastTripwire = new Map<string, number>();
 
   constructor(private readonly deps: GatekeeperDeps) {
     super();
@@ -273,7 +299,31 @@ export class Gatekeeper extends EventEmitter {
   private logDecision(request: Request, decision: Decision): LogEntry {
     const e = this.log.append(request, decision, this.now());
     this.deps.store.appendLog(e);
+    // The agent's record: allowed now = completed, denied = denied. Approvals count when decided;
+    // a request let through by a member's one-time pass was already counted then.
+    if (request.agent && decision.ruleId !== "human-approved") {
+      if (decision.outcome === "allow") this.countRecord(request.agent, "completed");
+      else if (decision.outcome === "deny") this.countRecord(request.agent, "denied");
+    }
     return e;
+  }
+
+  private countRecord(agentId: string, what: "completed" | "denied") {
+    const rec = ((this.state.record ??= {})[agentId] ??= { completed: 0, denied: 0 });
+    rec[what]++;
+  }
+
+  /** The engine's context for today: allowances, and on Dharma v3 each agent's trust level. */
+  private ctxFor(pol: OnchainPolicy, recipients = true): PolicyContext {
+    return buildContext(
+      {
+        agents: pol.agents.map((a) => ({ id: a.id, dailyAllowanceUsd: a.capUsd, level: a.level })),
+        recipients: recipients ? pol.payees.map((p) => ({ address: p.account, name: this.org.labels.payees[lower(p.account)] ?? p.account, category: p.category })) : [],
+        allowlistedDomains: pol.domains,
+        levelLimits: pol.levelLimits ?? undefined,
+      },
+      this.spentToday(),
+    );
   }
 
   private logEvent(event: LogEvent): LogEntry {
@@ -388,6 +438,7 @@ export class Gatekeeper extends EventEmitter {
       try {
         const { txRef } = await this.send("execute", [BigInt(prop.id)]);
         this.logEvent({ type: "dharma-executed", proposalId: prop.id, op: prop.change?.op ?? null, change: prop.change ? describeChange(prop.change, this.labels()) : `op ${prop.op}`, txRef });
+        if (prop.change?.op === "SetLevel") this.emit("notice", { kind: "level", agent: prop.change.agent, tone: "ok", summary: describeChange(prop.change, this.labels()) });
         await this.sync(true).catch(() => undefined);
         this.save();
       } catch (e) {
@@ -419,7 +470,18 @@ export class Gatekeeper extends EventEmitter {
   async anchorNow() {
     this.requireReady();
     const head = `0x${this.log.head()}` as Hex;
-    await this.send("anchorLog", [head, BigInt(this.log.length)]);
+    const pol = this.policy!;
+    if (pol.version >= 3 && pol.agents.length) {
+      // v3: the same transaction publishes every agent's running totals (its onchain record).
+      const ids = pol.agents.map((a) => a.id);
+      const rec = this.state.record ?? {};
+      await this.send("anchorWithRecord", [
+        head, BigInt(this.log.length), ids.map((id) => toBytes32(id)),
+        ids.map((id) => BigInt(rec[id]?.completed ?? 0)), ids.map((id) => BigInt(rec[id]?.denied ?? 0)),
+      ]);
+    } else {
+      await this.send("anchorLog", [head, BigInt(this.log.length)]);
+    }
     await this.sync(true).catch(() => undefined);
   }
 
@@ -507,9 +569,10 @@ export class Gatekeeper extends EventEmitter {
     }
     // Every member edit goes to a vote, even one that tightens; only the panic button is instant.
     // (Dharma enforces this too: MembersMustPropose.) Automatic safety writes don't come through here.
-    if (a.kind === Kind.Tighten && change.op !== "Freeze") {
-      throw new GatekeeperError("Rule changes go to a vote: propose it instead. Only the panic button applies instantly.", 409);
+    if (a.kind === Kind.Tighten && change.op !== "Freeze" && change.op !== "SetLevel") {
+      throw new GatekeeperError("Rule changes go to a vote: propose it instead. Only the panic button and lowering a level apply instantly.", 409);
     }
+    if (change.op === "SetLevel" && a.kind !== Kind.Vote) this.checkLevelChange(change, a.kind === Kind.Tighten);
 
     const nonce = await this.deps.client.readContract({ address: this.dharmaAddress(), abi: DHARMA_ABI, functionName: "nonces", args: [signer] });
     const typed = actionTypedData(this.dharmaAddress(), p.chainId, {
@@ -563,6 +626,27 @@ export class Gatekeeper extends EventEmitter {
     await this.sync(true).catch(() => undefined);
     this.save();
     return { txRef: res.txRef, proposalId };
+  }
+
+  /**
+   * Deploy the Dharma code this Gatekeeper ships (once per version), so members can propose an
+   * Upgrade to it. Deploying changes nothing: the org moves only after every member votes and the
+   * core wait passes. Returns the code's address and the version it brings.
+   */
+  async prepareUpgrade() {
+    const p = this.requireReady();
+    const shipped = this.org.dharmaCode;
+    if (shipped && shipped.version > p.version) {
+      const code = await this.deps.client.getCode({ address: shipped.implementation as Address }).catch(() => undefined);
+      if (code && code !== "0x") return { implementation: shipped.implementation, version: shipped.version, current: p.version };
+    }
+    const { implementation, txRef } = await this.writer().deployCode();
+    const version = Number(await this.deps.client.readContract({ address: implementation, abi: DHARMA_ABI, functionName: "version" }));
+    if (version <= p.version) throw new GatekeeperError(`This Gatekeeper ships Dharma v${version}; the org already runs v${p.version}`, 409);
+    this.org.dharmaCode = { implementation: lower(implementation), version, txRef, deployedAt: this.now().toISOString() };
+    this.logEvent({ type: "dharma-code-deployed", implementation: lower(implementation), version, txRef });
+    this.save();
+    return { implementation: lower(implementation), version, current: p.version };
   }
 
   /** Plain English → draft rules for a member to review and propose (see draft.ts). Never proposes. */
@@ -670,7 +754,10 @@ export class Gatekeeper extends EventEmitter {
       const firstTouch = !this.state.tainted[agentId];
       this.state.tainted[agentId] = { at: this.now().toISOString(), secret: trap.secret };
       const r = this.denyEarly(base, action, "trap-password", `Used trap credential ${trap.secret}`);
-      if (firstTouch) this.alert({ kind: "trap-touched", agentId, title: `${agentName} used a trap password`, body: `It tried to use ${trap.secret}, a fake credential planted by Karuna. Real keys never reach agents, so this is proof of misbehavior.` });
+      if (firstTouch) {
+        this.alert({ kind: "trap-touched", agentId, title: `${agentName} used a trap password`, body: `It tried to use ${trap.secret}, a fake credential planted by Karuna. Real keys never reach agents, so this is proof of misbehavior.` });
+        this.onTripwire([agentId], "trap password");
+      }
       this.logEvent({ type: "trap-touched", agent: agentId, secret: trap.secret, trapSet: trap.trap.id, proposalId: id });
       if (action.type === "message") this.tripSwarm(`${agentName} shared a trap credential (${trap.secret}) with another agent`, [agentId, String(action.to)]);
       this.save();
@@ -744,15 +831,7 @@ export class Gatekeeper extends EventEmitter {
       return { id, status: "failed" };
     }
 
-    const ctx = buildContext(
-      {
-        agents: policy.agents.map((a) => ({ id: a.id, dailyAllowanceUsd: a.capUsd })),
-        recipients: policy.payees.map((p) => ({ address: p.account, name: this.org.labels.payees[lower(p.account)] ?? p.account, category: p.category })),
-        allowlistedDomains: policy.domains,
-      },
-      this.spentToday(),
-    );
-    const decision = evaluate(built.request, ctx, buildRuleset(policy.rules));
+    const decision = evaluate(built.request, this.ctxFor(policy), buildRuleset(policy.rules));
     this.logDecision(built.request, decision);
     const p: Proposal = {
       ...base, request: built.request, decision, facts: built.facts, payload: built.payload,
@@ -1065,11 +1144,7 @@ export class Gatekeeper extends EventEmitter {
     }
 
     const pol = this.policy!;
-    const ctx = buildContext(
-      { agents: pol.agents.map((a) => ({ id: a.id, dailyAllowanceUsd: a.capUsd })), recipients: [], allowlistedDomains: pol.domains },
-      this.spentToday(),
-    );
-    const decision = evaluate(request, ctx, buildRuleset(pol.rules));
+    const decision = evaluate(request, this.ctxFor(pol, false), buildRuleset(pol.rules));
 
     // Swarm Stopper: agents converging on a host nobody approved.
     if (decision.outcome !== "allow") {
@@ -1255,7 +1330,7 @@ export class Gatekeeper extends EventEmitter {
       return deny("swarm-tainted", "Agent that touched a trap credential tried to message another agent");
     }
     // The org's own message rules (block / require approval / allow), after the swarm checks above.
-    const ruled = matchCustomRules(request, pol.rules);
+    const ruled = matchCustomRules(request, pol.rules) ?? messageLevelDecision(request, this.ctxFor(pol, false));
     if (ruled?.outcome === "deny") return deny(ruled.ruleId, ruled.reason);
     const facts: Fact[] = [
       { label: "Message to", value: toName },
@@ -1294,6 +1369,7 @@ export class Gatekeeper extends EventEmitter {
       return;
     }
     const trip: State["swarmTrips"][number] = { id: randomUUID(), at: this.now().toISOString(), reason, agents: [...new Set(agents)] };
+    this.onTripwire(trip.agents, "swarm");
     this.state.swarmTrips.push(trip);
     if (this.state.swarmTrips.length > 200) this.state.swarmTrips = this.state.swarmTrips.slice(-200);
     const already = !!this.isFrozen();
@@ -1313,6 +1389,152 @@ export class Gatekeeper extends EventEmitter {
           .finally(() => this.save()),
       );
     }
+  }
+
+  // ================================================================ Trust levels (Dharma v3)
+
+  /** An agent's level, or null when the org's Dharma has no levels (v2) or the agent is unknown. */
+  levelOf(agentId: string): number | null {
+    const pol = this.policy;
+    if (!pol || pol.version < 3) return null;
+    const a = pol.agents.find((x) => x.id === agentId);
+    return a ? (this.pendingLevel.get(agentId) ?? a.level ?? 0) : null;
+  }
+
+  /** Lower an agent's level onchain (a Gatekeeper-only tightening). Never raises. */
+  private async lowerLevel(agentId: string, level: number, reason: "tripwire" | "drill") {
+    const current = this.levelOf(agentId);
+    if (current === null || level >= current) return;
+    this.pendingLevel.set(agentId, level); // a second drop before the chain confirms stays consistent
+    const name = this.org.labels.agents[agentId] ?? agentId;
+    try {
+      const { op, data } = encodeChange({ op: "SetLevel", agent: agentId, level, reason });
+      const { txRef } = await this.send("tighten", [op, data, zeroAddress, 0n, "0x"]);
+      this.alert({ kind: "level-lowered", agentId, title: `${name} lowered to ${levelLabel(level)}`, body: `${reason === "tripwire" ? "Tripwire" : "Failed Drill"}. Raising it again needs a clean record and a member vote.` });
+      this.logEvent({ type: "level-lowered", agent: agentId, from: current, to: level, reason, txRef });
+      this.emit("notice", { kind: "level", agent: agentId, tone: "bad", summary: `${name} lowered to ${levelLabel(level)} (${reason === "tripwire" ? "Tripwire" : "failed Drill"})` });
+      await this.sync(true).catch(() => undefined);
+    } catch (e) {
+      this.logEvent({ type: "level-lower-failed", agent: agentId, to: level, reason, detail: scrub(e) });
+    } finally {
+      this.pendingLevel.delete(agentId);
+      this.save();
+    }
+  }
+
+  /** A Tripwire: recorded onchain per agent, and each agent drops to Level 0. Once per agent a minute. */
+  private onTripwire(agents: string[], reason: string) {
+    const now = this.now().getTime();
+    const fresh = [...new Set(agents)].filter((a) => this.policy?.agents.some((x) => x.id === a) && now - (this.lastTripwire.get(a) ?? 0) > 60_000);
+    if (!fresh.length || (this.policy?.version ?? 0) < 3) return;
+    for (const a of fresh) this.lastTripwire.set(a, now);
+    this.background((async () => {
+      for (const a of fresh) {
+        await this.send("reportTripwire", [toBytes32(a), reason]).catch((e) => this.logEvent({ type: "tripwire-report-failed", agent: a, detail: scrub(e) }));
+        await this.lowerLevel(a, 0, "tripwire");
+      }
+    })());
+  }
+
+  /**
+   * A member's level change, before it's relayed. Lowering (instant) must say "member"; raising
+   * (a proposal) must say "vote", go one level at a time, and have a clean record from the Stream.
+   */
+  private checkLevelChange(c: Extract<Change, { op: "SetLevel" }>, instant: boolean) {
+    const current = this.levelOf(c.agent);
+    if (current === null) throw new GatekeeperError(this.policy && this.policy.version < 3 ? "Trust levels need Dharma v3: upgrade first" : "Unknown agent", 409);
+    if (instant) {
+      if (c.level >= current) throw new GatekeeperError("Only lowering a level applies instantly; raising it goes to a vote", 409);
+      if (c.reason !== "member") throw new GatekeeperError("A member's level change must be recorded as \"member\"");
+      return;
+    }
+    if (c.reason !== "vote") throw new GatekeeperError("A proposed level change must be recorded as \"vote\"");
+    if (c.level <= current) return; // lowering by vote is allowed (it's just slower)
+    if (c.level !== current + 1) throw new GatekeeperError(`Levels go up one at a time: propose ${levelLabel(current + 1)}`, 409);
+    const rec = this.state.chainRecords?.records[c.agent];
+    if (!rec) throw new GatekeeperError("This agent's record hasn't arrived from the QuickNode Stream yet, so it can't be proposed for a higher level", 409);
+    const e = levelUpEligibility(rec, current);
+    if (!e.eligible) {
+      throw new GatekeeperError(`Not eligible for ${levelLabel(c.level)}: ${e.have} of ${e.needed} clean actions since its last level change or incident`, 409);
+    }
+  }
+
+  /** The relay's records, rebuilt from Dharma's events delivered by the QuickNode Stream. */
+  setChainRecords(input: { records?: unknown; source?: unknown }) {
+    const records = input.records && typeof input.records === "object" ? (input.records as Record<string, AgentRecord>) : {};
+    this.state.chainRecords = { at: this.now().toISOString(), source: typeof input.source === "string" ? input.source.slice(0, 20) : "quicknode", records };
+    this.save();
+    return { ok: true, agents: Object.keys(records).length };
+  }
+
+  // ================================================================ Wallet watchdog (QuickNode Stream)
+
+  /**
+   * USDC left the org's wallet (seen by the watchdog Stream). It must match a payment Karuna
+   * made: same payee, same amount. Deposits into Circle Gateway stay the org's money. Anything
+   * else means the wallet was used outside Karuna: every agent freezes, on Dharma.
+   */
+  watchdogTransfer(input: { txHash?: unknown; to?: unknown; amountUsd?: unknown; block?: unknown; source?: unknown }) {
+    if (!isSetUp(this.org)) throw new GatekeeperError("Finish setup in the console first", 409);
+    const txHash = String(input.txHash ?? "");
+    const to = lower(String(input.to ?? ""));
+    const amountUsd = Number(input.amountUsd);
+    if (!/^0x[0-9a-f]{64}$/i.test(txHash) || !/^0x[0-9a-f]{40}$/.test(to) || !Number.isFinite(amountUsd) || amountUsd < 0) {
+      throw new GatekeeperError("Malformed transfer");
+    }
+    const micro = Math.round(amountUsd * 1e6);
+    const key = `${lower(txHash)}:${to}:${micro}`;
+    const log = (this.state.watchdog ??= []);
+    const seen = log.find((x) => x.key === key);
+    if (seen) return seen;
+    if (micro === 0) return null; // zero-value transfers move nothing
+    const ev: WatchdogEvent = {
+      key, at: this.now().toISOString(), txHash: lower(txHash), to, amountUsd: micro / 1e6,
+      block: Number.isFinite(Number(input.block)) ? Number(input.block) : null, source: String(input.source ?? "quicknode").slice(0, 20), verdict: "unapproved",
+    };
+    const claimed = new Set(log.map((x) => x.proposalId).filter(Boolean));
+    const since = this.now().getTime() - 24 * 3600_000;
+    const match = to === GATEWAY_WALLET
+      ? null
+      : this.state.proposals.find((p) =>
+          !!p.payload && !claimed.has(p.id) && (p.status === "executing" || p.status === "executed") && Date.parse(p.createdAt) >= since &&
+          Math.round(p.payload.amountUsd * 1e6) === micro &&
+          lower(p.payload.kind === "transfer" ? p.payload.to : p.payload.seller) === to);
+    if (to === GATEWAY_WALLET) ev.verdict = "gateway-deposit";
+    else if (match) {
+      ev.verdict = "matched";
+      ev.proposalId = match.id;
+    }
+    log.push(ev);
+    if (log.length > 500) this.state.watchdog = log.slice(-500);
+    this.logEvent({ type: "watchdog-transfer", txHash: ev.txHash, to, amountUsd: ev.amountUsd, verdict: ev.verdict, proposalId: ev.proposalId ?? null });
+    if (ev.verdict === "unapproved") this.watchdogFreeze(ev);
+    this.save();
+    return ev;
+  }
+
+  private watchdogFreeze(ev: WatchdogEvent) {
+    const already = !!this.isFrozen();
+    if (!already) this.state.localFreeze = { at: ev.at, by: "Watchdog" };
+    this.emit("notice", { kind: "watchdog", agent: "", tone: "bad", summary: `Watchdog: ${usd(ev.amountUsd)} left the wallet without approval. Every agent frozen` });
+    this.alert({
+      kind: "watchdog", agentId: "", title: "USDC left the wallet without approval",
+      body: `${usd(ev.amountUsd)} to ${short(ev.to)} (tx ${short(ev.txHash)}) matches no payment Karuna made. Every agent is frozen; unfreezing needs a member vote.`,
+    });
+    this.background((async () => {
+      if (!already && !this.policy?.frozen) {
+        await this.send("tighten", [9 /* Op.Freeze */, "0x", zeroAddress, 0n, "0x"])
+          .then(({ txRef }) => this.logEvent({ type: "watchdog-freeze-onchain", txHash: ev.txHash, txRef }))
+          .catch((e) => this.logEvent({ type: "watchdog-freeze-onchain-failed", txHash: ev.txHash, detail: scrub(e) }));
+      }
+      if ((this.policy?.version ?? 0) >= 3) {
+        await this.send("reportUnapprovedTransfer", [ev.txHash as Hex, ev.to as Address, toMicro(ev.amountUsd)])
+          .then(({ txRef }) => (ev.txRef = txRef))
+          .catch((e) => this.logEvent({ type: "watchdog-report-failed", txHash: ev.txHash, detail: scrub(e) }));
+      }
+      await this.sync(true).catch(() => undefined);
+      this.save();
+    })());
   }
 
   /** Mint a trap set (for one agent, or all) to plant in sandboxes. */
@@ -1381,6 +1603,8 @@ export class Gatekeeper extends EventEmitter {
     test.ruleId = (change as { id: string }).id;
     await this.writeAutoRule(change);
     await this.send("reportTestFailed", [toBytes32(agentId), test.category]);
+    const level = this.levelOf(agentId);
+    if (level !== null && level > 0) await this.lowerLevel(agentId, level - 1, "drill");
     this.save();
   }
 
@@ -1588,6 +1812,7 @@ export class Gatekeeper extends EventEmitter {
 
     if (!d.approve) {
       p.status = "denied";
+      this.countRecord(p.agentId, "denied");
       p.resolvedBy = memberId;
       p.resolvedAt = this.now().toISOString();
       this.logEvent({ type: "denied-by-human", proposalId: id, by: memberId });
@@ -1610,6 +1835,7 @@ export class Gatekeeper extends EventEmitter {
       return { status: "needs-another-approval" as const };
     }
     p.resolvedBy = memberId;
+    this.countRecord(p.agentId, "completed");
     this.learn(p, "approve", memberId);
     if (!p.payload) {
       p.status = "allowed";
@@ -1654,13 +1880,25 @@ export class Gatekeeper extends EventEmitter {
         anchor: { head: pol.logHead, length: pol.logLength },
         members: pol.members.map((m) => ({ address: lower(m), name: L.member(m) ?? null })),
         agents: [
-          ...pol.agents.map((a) => ({ id: a.id, name: L.agent(a.id) ?? a.id, capUsd: a.capUsd, spentTodayUsd: spent[a.id] ?? 0, active: true, hasToken: !!this.org.agentTokens[a.id] })),
+          ...pol.agents.map((a) => {
+            const level = pol.version >= 3 ? (a.level ?? 0) : null;
+            const record = this.state.chainRecords?.records[a.id] ?? null;
+            return {
+              id: a.id, name: L.agent(a.id) ?? a.id, capUsd: a.capUsd, spentTodayUsd: spent[a.id] ?? 0, active: true, hasToken: !!this.org.agentTokens[a.id],
+              level, record, localRecord: this.state.record?.[a.id] ?? { completed: 0, denied: 0 },
+              eligibility: level === null ? null : levelUpEligibility(record, level),
+            };
+          }),
           ...Object.keys(this.org.agentTokens)
             .filter((id) => !pol.agents.some((a) => a.id === id))
             .map((id) => ({ id, name: L.agent(id) ?? id, capUsd: 0, spentTodayUsd: 0, active: false, hasToken: true })),
         ],
         payees: pol.payees.map((p) => ({ account: lower(p.account), category: p.category, name: L.payee(p.account) ?? null })),
         domains: pol.domains,
+        levelLimits: pol.levelLimits,
+        levelGrants: LEVEL_GRANTS,
+        levelUpStreak: LEVEL_UP_STREAK,
+        records: this.state.chainRecords ? { at: this.state.chainRecords.at, source: this.state.chainRecords.source } : null,
         rules: pol.rules,
         proposals: pol.proposals.map((p) => ({
           ...p,
@@ -1709,6 +1947,11 @@ export class Gatekeeper extends EventEmitter {
       }),
       proposals: this.state.proposals.slice(-300).reverse().map((p) => ({ ...p, approvalsNeeded: this.approvalsNeeded(p) })),
       sandbox: this.sandboxView(),
+      watchdog: {
+        wallet: this.org.wallet?.address ?? null,
+        gateway: GATEWAY_WALLET,
+        events: (this.state.watchdog ?? []).slice(-50).reverse(),
+      },
       log: { length: this.log.length, head: this.log.head(), verified: v.ok, brokenAt: v.brokenAt ?? null, publicKeyPem: this.log.publicKeyPem() },
     };
   }

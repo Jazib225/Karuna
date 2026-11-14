@@ -102,7 +102,7 @@ describe("relay", () => {
     try {
       const ok = await post({ "x-qn-nonce": "a", "x-qn-timestamp": "1", "x-qn-signature": sign("a", "1", body) });
       expect(ok.status).toBe(200);
-      expect(await ok.json()).toEqual({ ok: true, events: 1 });
+      expect(await ok.json()).toEqual({ ok: true, events: 1, transfers: 0 });
       expect(relay.mode()).toBe("quicknode");
 
       expect((await post({ "x-qn-nonce": "b", "x-qn-timestamp": "1", "x-qn-signature": sign("b", "1", body, "attacker") })).status).toBe(401);

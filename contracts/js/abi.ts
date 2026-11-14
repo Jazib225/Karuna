@@ -46,6 +46,19 @@ export const DHARMA_ABI = [
   },
   {
     "type": "function",
+    "name": "MAX_LEVEL",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "MAX_TIMELOCK",
     "inputs": [],
     "outputs": [
@@ -140,6 +153,25 @@ export const DHARMA_ABI = [
   },
   {
     "type": "function",
+    "name": "agentLevel",
+    "inputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "agents",
     "inputs": [],
     "outputs": [
@@ -169,6 +201,39 @@ export const DHARMA_ABI = [
         "name": "length",
         "type": "uint64",
         "internalType": "uint64"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "anchorWithRecord",
+    "inputs": [
+      {
+        "name": "head",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "length",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "agents_",
+        "type": "bytes32[]",
+        "internalType": "bytes32[]"
+      },
+      {
+        "name": "completed",
+        "type": "uint64[]",
+        "internalType": "uint64[]"
+      },
+      {
+        "name": "denied",
+        "type": "uint64[]",
+        "internalType": "uint64[]"
       }
     ],
     "outputs": [],
@@ -377,6 +442,55 @@ export const DHARMA_ABI = [
         "name": "",
         "type": "bool",
         "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "levelLimits",
+    "inputs": [
+      {
+        "name": "level",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct Dharma.LevelLimits",
+        "components": [
+          {
+            "name": "perPaymentMicroUsd",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "dailyMicroUsd",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "levels",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "ids",
+        "type": "bytes32[]",
+        "internalType": "bytes32[]"
+      },
+      {
+        "name": "lvls",
+        "type": "uint8[]",
+        "internalType": "uint8[]"
       }
     ],
     "stateMutability": "view"
@@ -620,6 +734,47 @@ export const DHARMA_ABI = [
   },
   {
     "type": "function",
+    "name": "reportTripwire",
+    "inputs": [
+      {
+        "name": "agent",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "reason",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "reportUnapprovedTransfer",
+    "inputs": [
+      {
+        "name": "txHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "to",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "amountMicroUsd",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "requestApproval",
     "inputs": [
       {
@@ -845,6 +1000,31 @@ export const DHARMA_ABI = [
   },
   {
     "type": "event",
+    "name": "ActionsRecorded",
+    "inputs": [
+      {
+        "name": "agent",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "completed",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "denied",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "AgentFrozen",
     "inputs": [
       {
@@ -957,6 +1137,62 @@ export const DHARMA_ABI = [
     "inputs": [
       {
         "name": "domain",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "LevelLimitsSet",
+    "inputs": [
+      {
+        "name": "level",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      },
+      {
+        "name": "perPaymentMicroUsd",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "dailyMicroUsd",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "LevelSet",
+    "inputs": [
+      {
+        "name": "agent",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "level",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      },
+      {
+        "name": "by",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "reason",
         "type": "string",
         "indexed": false,
         "internalType": "string"
@@ -1246,6 +1482,50 @@ export const DHARMA_ABI = [
         "type": "uint64",
         "indexed": false,
         "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "TripwireFired",
+    "inputs": [
+      {
+        "name": "agent",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "reason",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "UnapprovedTransfer",
+    "inputs": [
+      {
+        "name": "txHash",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "to",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amountMicroUsd",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
       }
     ],
     "anonymous": false

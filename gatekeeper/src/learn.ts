@@ -79,13 +79,14 @@ export function suggestions(precedents: Precedent[], rules: OnchainRule[], thres
 export interface PolicyShape {
   rules: OnchainRule[];
   payees: { account: string; category: string }[];
-  agents: { id: string; capUsd: number }[];
+  agents: { id: string; capUsd: number; level?: number }[];
   domains: string[];
+  levelLimits?: { perPaymentUsd: number; dailyUsd: number }[] | null; // Dharma v3
 }
 
 /** The policy as it would be if `c` passed. Unknown / non-policy ops leave it unchanged. */
 export function applyChange(p: PolicyShape, c: Change): PolicyShape {
-  const n: PolicyShape = { rules: [...p.rules], payees: [...p.payees], agents: [...p.agents], domains: [...p.domains] };
+  const n: PolicyShape = { rules: [...p.rules], payees: [...p.payees], agents: [...p.agents], domains: [...p.domains], levelLimits: p.levelLimits ? [...p.levelLimits] : p.levelLimits };
   switch (c.op) {
     case "AddRule":
       n.rules = n.rules.filter((r) => r.id !== c.id);
@@ -114,6 +115,12 @@ export function applyChange(p: PolicyShape, c: Change): PolicyShape {
       break;
     case "RemoveDomain":
       n.domains = n.domains.filter((d) => d !== c.domain.toLowerCase());
+      break;
+    case "SetLevel":
+      n.agents = n.agents.map((a) => (a.id === c.agent ? { ...a, level: c.level } : a));
+      break;
+    case "SetLevelLimits":
+      if (n.levelLimits) n.levelLimits[c.level] = { perPaymentUsd: c.perPaymentUsd, dailyUsd: c.dailyUsd };
       break;
   }
   return n;
@@ -144,9 +151,10 @@ export function previewLoosening(
   const recent = history.filter((h) => Date.parse(h.at) >= since && (h.request.tool === "payment" || h.request.tool === "http")).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
   const ctxOf = (p: PolicyShape, spent: Record<string, number>) =>
     buildContext({
-      agents: p.agents.map((a) => ({ id: a.id, dailyAllowanceUsd: a.capUsd })),
+      agents: p.agents.map((a) => ({ id: a.id, dailyAllowanceUsd: a.capUsd, level: a.level })),
       recipients: p.payees.map((x) => ({ address: x.account, name: payeeName(x.account), category: x.category })),
       allowlistedDomains: p.domains,
+      levelLimits: p.levelLimits ?? undefined,
     }, spent);
   const rulesAfter = buildRuleset(after.rules);
   const rulesBefore = buildRuleset(before.rules);
@@ -177,4 +185,4 @@ export function previewLoosening(
 }
 
 /** Only loosenings get a preview (tightenings apply at once and can only allow less). */
-export const LOOSENING_OPS = new Set(["AddRule", "RemoveRule", "SetPayee", "SetAgent", "AddDomain", "SetThreshold", "Unfreeze"]);
+export const LOOSENING_OPS = new Set(["AddRule", "RemoveRule", "SetPayee", "SetAgent", "AddDomain", "SetThreshold", "Unfreeze", "SetLevel", "SetLevelLimits"]);

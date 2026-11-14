@@ -16,13 +16,15 @@ import {
   type Address, type Chain, type Hex, type PublicClient, type WalletClient,
 } from "viem";
 import { arcTestnet } from "viem/chains";
-import { DHARMA_ABI, DHARMA_PROXY_ABI, OUTCOME_NAMES, STATUS_NAMES, decodeChange, fromBytes32, fromMicro, type Change } from "@prekaruna/dharma";
+import { DHARMA_ABI, DHARMA_PROXY_ABI, MAX_LEVEL, OUTCOME_NAMES, STATUS_NAMES, decodeChange, fromBytes32, fromMicro, type Change, type LevelLimits } from "@prekaruna/dharma";
 import { DHARMA_BYTECODE, DHARMA_PROXY_BYTECODE } from "@prekaruna/dharma/bytecode";
 import type { OnchainRule } from "@prekaruna/engine";
 import { WALLET_CHAIN } from "./config.ts";
 
 export type WriteFn =
-  | "tighten" | "propose" | "vote" | "execute" | "anchorLog" | "requestApproval" | "reportTestFailed";
+  | "tighten" | "propose" | "vote" | "execute" | "anchorLog" | "requestApproval" | "reportTestFailed"
+  // v3
+  | "anchorWithRecord" | "reportTripwire" | "reportUnapprovedTransfer";
 
 export interface DeployArgs {
   firstMember: Address;
@@ -35,6 +37,8 @@ export interface DeployArgs {
 export interface ChainWriter {
   readonly from: Address; // the Gatekeeper's address (Dharma.gatekeeper)
   deploy(args: DeployArgs): Promise<{ address: Address; txRef: string; implementation: Address }>;
+  /** Deploy only the current Dharma code (for an Upgrade the members then vote on). */
+  deployCode(): Promise<{ implementation: Address; txRef: string }>;
   write(contract: Address, fn: WriteFn, args: readonly unknown[]): Promise<{ txRef: string }>;
 }
 
@@ -80,7 +84,9 @@ const fnSig = (fn: WriteFn) => {
   const item = DHARMA_ABI.find((x) => x.type === "function" && x.name === fn) as { inputs: readonly { type: string }[] };
   return `${fn}(${item.inputs.map((i) => i.type).join(",")})`;
 };
-const cliArg = (v: unknown) => (typeof v === "bigint" ? v.toString() : typeof v === "boolean" ? String(v) : String(v));
+/** One Circle CLI argument. Arrays go as JSON, with integers as strings (they can exceed 2^53). */
+const cliArg = (v: unknown): string =>
+  Array.isArray(v) ? JSON.stringify(v, (_k, x) => (typeof x === "bigint" ? x.toString() : x)) : typeof v === "bigint" ? v.toString() : String(v);
 
 export class CircleChainWriter implements ChainWriter {
   private readonly env: NodeJS.ProcessEnv;
@@ -130,6 +136,12 @@ export class CircleChainWriter implements ChainWriter {
     return { address: String(d.contractAddress) as Address, txRef: String(d.txHash ?? d.id), implementation: impl };
   }
 
+  async deployCode() {
+    const code = await this.run(["contract", "deploy", "--bytecode", DHARMA_BYTECODE, "--address", this.from, "--chain", WALLET_CHAIN], 300_000);
+    if (!code.contractAddress) throw new ChainError("Deploying the Dharma code finished without an address");
+    return { implementation: String(code.contractAddress) as Address, txRef: String(code.txHash ?? code.id) };
+  }
+
   async write(contract: Address, fn: WriteFn, args: readonly unknown[]) {
     await simulate(this.client, this.from, contract, fn, args);
     const d = await this.run(["wallet", "execute", fnSig(fn), ...args.map(cliArg), "--contract", contract, "--address", this.from, "--chain", WALLET_CHAIN]);
@@ -162,6 +174,13 @@ export class ViemChainWriter implements ChainWriter {
     const r = await this.client.waitForTransactionReceipt({ hash });
     if (!r.contractAddress) throw new ChainError("deploying the org's Dharma failed");
     return { address: r.contractAddress, txRef: hash, implementation: code.contractAddress };
+  }
+
+  async deployCode() {
+    const hash = await this.wallet.deployContract({ abi: DHARMA_ABI, bytecode: DHARMA_BYTECODE, account: this.wallet.account!, chain: this.wallet.chain });
+    const r = await this.client.waitForTransactionReceipt({ hash });
+    if (!r.contractAddress) throw new ChainError("deploying the Dharma code failed");
+    return { implementation: r.contractAddress, txRef: hash };
   }
 
   async write(contract: Address, fn: WriteFn, args: readonly unknown[]) {
@@ -211,7 +230,9 @@ export interface OnchainPolicy {
   members: Address[];
   rules: OnchainRule[];
   payees: { account: Address; category: string }[];
-  agents: { id: string; capUsd: number }[];
+  agents: { id: string; capUsd: number; level?: number }[]; // level: Dharma v3+
+  /** What each trust level may pay (index = level). Null before Dharma v3. */
+  levelLimits: LevelLimits[] | null;
   domains: string[];
   proposals: OnchainProposal[];
   chainTime: number; // latest block timestamp, for timelock math
@@ -253,6 +274,18 @@ export async function readPolicy(client: PublicClient, address: Address, maxProp
       client.getBlock(),
       client.chain?.id ?? client.getChainId(),
     ]);
+  // Trust levels (v3): every agent's level and each level's payment limits.
+  let levelOf: Map<string, number> | null = null;
+  let levelLimits: LevelLimits[] | null = null;
+  if (Number(codeVersion) >= 3) {
+    const [lv, ...limits] = await readMany<readonly [readonly [readonly Hex[], readonly number[]], ...{ perPaymentMicroUsd: bigint; dailyMicroUsd: bigint }[]]>(
+      client,
+      [{ functionName: "levels" }, ...Array.from({ length: MAX_LEVEL + 1 }, (_, l) => ({ functionName: "levelLimits", args: [l] }))],
+      address,
+    );
+    levelOf = new Map(lv[0].map((id, i) => [fromBytes32(id), Number(lv[1][i])]));
+    levelLimits = limits.map((l) => ({ perPaymentUsd: fromMicro(l.perPaymentMicroUsd), dailyUsd: fromMicro(l.dailyMicroUsd) }));
+  }
   const n = Number(count);
   const ids = Array.from({ length: Math.min(n, maxProposals) }, (_, i) => n - 1 - i);
   type RawProposal = { op: number; data: Hex; proposer: Address; createdAt: bigint; queuedAt: bigint; yes: number; no: number; status: number; core: boolean; eta: bigint };
@@ -291,7 +324,11 @@ export async function readPolicy(client: PublicClient, address: Address, maxProp
       maxUsd: fromMicro(r.maxMicroUsd),
     })),
     payees: payees.map((p) => ({ account: p.account, category: p.category })),
-    agents: agents[0].map((id, i) => ({ id: fromBytes32(id), capUsd: fromMicro(agents[1][i]) })),
+    agents: agents[0].map((id, i) => {
+      const a = fromBytes32(id);
+      return { id: a, capUsd: fromMicro(agents[1][i]), ...(levelOf ? { level: levelOf.get(a) ?? 0 } : {}) };
+    }),
+    levelLimits,
     domains: [...domains],
     proposals: raw.map((p, i) => {
       let change: Change | null = null;

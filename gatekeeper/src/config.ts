@@ -27,6 +27,8 @@ export interface OrgFile {
   };
   agentTokens: Record<string, string>; // agent id -> sha256(token)
   enrollments: { address: string; name: string; requestedAt: string }[];
+  /** Newer Dharma code deployed for an Upgrade vote (the org moves only once the vote passes). */
+  dharmaCode?: { implementation: string; version: number; txRef: string; deployedAt: string };
 }
 
 export const emptyOrg = (): OrgFile => ({

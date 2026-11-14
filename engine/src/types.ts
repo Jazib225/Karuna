@@ -59,6 +59,18 @@ export interface PolicyContext {
   allowances: Record<AgentId, number>;
   /** How much each agent has already spent today, in USD. */
   spentTodayUsd: Record<AgentId, number>;
+  /**
+   * Trust levels (Dharma v3). When an agent has an entry, its level's payment limits replace its
+   * allowance and the level's grants apply. Absent (a v2 org): allowances only, no grants.
+   */
+  levels?: Record<AgentId, AgentLevel>;
+}
+
+/** An agent's trust level and what it may pay without asking. */
+export interface AgentLevel {
+  level: number;
+  perPaymentUsd: number;
+  dailyUsd: number;
 }
 
 /** The engine's verdict for one request. */

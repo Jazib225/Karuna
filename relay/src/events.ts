@@ -19,6 +19,7 @@ export interface DharmaEvent {
   contract: string;
   txHash: string | null;
   block: number | null;
+  logIndex: number | null;
   source: "quicknode" | "rpc";
   receivedAt: string;
 }
@@ -65,7 +66,9 @@ const num = (v: unknown): number | null => (v == null ? null : typeof v === "num
 
 /** Human-friendly args: bytes32 ids as text, micro-USD as USD, bigints as strings. */
 function friendly(name: string, args: Record<string, unknown>): Record<string, unknown> {
-  const MONEY: Record<string, string> = { amountMicroUsd: "amountUsd", capMicroUsd: "capUsd", microUsd: "usd", maxMicroUsd: "maxUsd" };
+  const MONEY: Record<string, string> = {
+    amountMicroUsd: "amountUsd", capMicroUsd: "capUsd", microUsd: "usd", maxMicroUsd: "maxUsd", perPaymentMicroUsd: "perPaymentUsd", dailyMicroUsd: "dailyUsd",
+  };
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(args)) {
     if (MONEY[k]) out[MONEY[k]] = fromMicro(v as bigint);
@@ -93,6 +96,7 @@ export function decodeDharmaLogs(logs: RawLog[], allowed: Set<string> | null, so
         contract: addr,
         txHash: l.transactionHash ?? null,
         block: num(l.blockNumber),
+        logIndex: num(l.logIndex),
         source,
         receivedAt: new Date().toISOString(),
       });
@@ -127,6 +131,78 @@ export function quickNodeFilterSource(): string {
   }
   visit(input, 0);
   return out.length ? { dharmaLogs: out } : null;
+}
+`;
+}
+
+// ---------------------------------------------------------------- the wallet watchdog
+
+/** Where USDC Transfer events come from on Arc: the ERC-20 interface (6 decimals) and the native
+ *  USDC system address (18 decimals). A Stream filter keeps both; one transfer is matched once. */
+export const USDC_EMITTERS: Record<string, number> = {
+  "0x3600000000000000000000000000000000000000": 6,
+  "0xfffffffffffffffffffffffffffffffffffffffe": 18,
+};
+export const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const padAddress = (a: string) => `0x${"0".repeat(24)}${a.toLowerCase().replace(/^0x/, "")}`;
+
+export interface WalletTransfer {
+  id: string; // txHash:to:microUsd, the same across emitters and sources
+  txHash: string;
+  to: string;
+  amountUsd: number;
+  block: number | null;
+  source: "quicknode" | "rpc";
+}
+
+/** USDC leaving `wallet`, from any log shape. Everything else is dropped. */
+export function decodeWalletTransfers(logs: RawLog[], wallet: string | null, source: WalletTransfer["source"]): WalletTransfer[] {
+  if (!wallet) return [];
+  const from = padAddress(wallet);
+  const out = new Map<string, WalletTransfer>();
+  for (const l of logs) {
+    const decimals = USDC_EMITTERS[l.address.toLowerCase()];
+    if (decimals === undefined || String(l.topics[0] ?? "").toLowerCase() !== TRANSFER_TOPIC) continue;
+    if (String(l.topics[1] ?? "").toLowerCase() !== from || !l.topics[2] || !l.transactionHash) continue;
+    try {
+      const to = `0x${String(l.topics[2]).slice(-40)}`.toLowerCase();
+      const raw = BigInt(l.data && l.data !== "0x" ? l.data : 0);
+      const micro = decimals >= 6 ? raw / 10n ** BigInt(decimals - 6) : raw * 10n ** BigInt(6 - decimals);
+      const txHash = l.transactionHash.toLowerCase();
+      const id = `${txHash}:${to}:${micro}`;
+      out.set(id, { id, txHash, to, amountUsd: Number(micro) / 1e6, block: num(l.blockNumber), source });
+    } catch {
+      /* malformed: ignore */
+    }
+  }
+  return [...out.values()];
+}
+
+/** The watchdog Stream's filter: only USDC transfers out of this org's wallet. */
+export function quickNodeWatchdogFilterSource(wallet: string): string {
+  return `function main(stream) {
+  var EMITTERS = ${JSON.stringify(Object.fromEntries(Object.keys(USDC_EMITTERS).map((a) => [a, 1])))};
+  var TRANSFER = "${TRANSFER_TOPIC}";
+  var FROM = "${padAddress(wallet)}";
+  var input = stream;
+  if (typeof input === "string") { try { input = JSON.parse(input); } catch (e) { return null; } }
+  if (input && input.data !== undefined) input = input.data;
+  var out = [];
+  function visit(x, depth) {
+    if (!x || depth > 8) return;
+    if (Array.isArray(x)) { for (var i = 0; i < x.length; i++) visit(x[i], depth + 1); return; }
+    if (typeof x === "object") {
+      if (Array.isArray(x.topics) && typeof x.address === "string") {
+        if (EMITTERS[x.address.toLowerCase()] && String(x.topics[0]).toLowerCase() === TRANSFER && String(x.topics[1]).toLowerCase() === FROM) {
+          out.push({ address: x.address, topics: x.topics, data: x.data, blockNumber: x.blockNumber, transactionHash: x.transactionHash, logIndex: x.logIndex });
+        }
+        return;
+      }
+      for (var k in x) { if (x[k] && typeof x[k] === "object") visit(x[k], depth + 1); }
+    }
+  }
+  visit(input, 0);
+  return out.length ? { walletTransfers: out } : null;
 }
 `;
 }

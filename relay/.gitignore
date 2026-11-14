@@ -1,2 +1,4 @@
 node_modules
 .stream.json
+.streams.json
+.records.json

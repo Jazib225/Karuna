@@ -185,6 +185,11 @@ export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: 
         await gk.sync(true).catch(() => undefined);
         return send(res, 200, { ok: true });
       }
+      // The relay's QuickNode Streams: a USDC transfer out of the org's wallet (watchdog), and the
+      // agents' records rebuilt from Dharma's events (trust levels).
+      if (method === "POST" && path === "/dharma/code") return send(res, 200, await gk.prepareUpgrade());
+      if (method === "POST" && path === "/watchdog/transfer") return send(res, 200, gk.watchdogTransfer(body as never));
+      if (method === "POST" && path === "/records") return send(res, 200, gk.setChainRecords(body as never));
       if (method === "POST" && path === "/inbox") return send(res, 200, gk.postMessage(body as never));
       if (method === "POST" && path === "/traps") return send(res, 200, gk.mintTrapSet(body.agentId));
       if (method === "POST" && (m = path.match(/^\/traps\/([\w-]+)\/plant$/))) return send(res, 200, gk.plantTrapInInbox(m[1], body.agentId));

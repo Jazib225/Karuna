@@ -13,7 +13,7 @@ export const ARC_TESTNET_CHAIN_ID = 5042002;
 export const Op = {
   AddRule: 0, RemoveRule: 1, SetPayee: 2, RemovePayee: 3, SetAgent: 4, RemoveAgent: 5,
   AddDomain: 6, RemoveDomain: 7, SetThreshold: 8, Freeze: 9, Unfreeze: 10, AddMember: 11, RemoveMember: 12,
-  SetTimelock: 13, SetCoreTimelock: 14, Upgrade: 15,
+  SetTimelock: 13, SetCoreTimelock: 14, Upgrade: 15, SetLevel: 16, SetLevelLimits: 17,
 } as const;
 export type OpName = keyof typeof Op;
 export const OP_NAMES = Object.keys(Op) as OpName[];
@@ -23,6 +23,22 @@ export const Outcome = { Allow: 0, Deny: 1, Approval: 2 } as const;
 export const OUTCOME_NAMES = ["allow", "deny", "approval"] as const;
 export const STATUS_NAMES = ["none", "open", "queued", "executed", "defeated", "cancelled"] as const;
 export const Kind = { Tighten: 0, Propose: 1, Vote: 2 } as const;
+
+// ---------------------------------------------------------------- trust levels (v3)
+
+export const MAX_LEVEL = 3;
+export const LEVEL_NAMES = ["Restricted", "Limited", "Standard", "Extended"] as const;
+export const levelLabel = (n: number) => `Level ${n} ${LEVEL_NAMES[n] ?? ""}`.trim();
+export interface LevelLimits { perPaymentUsd: number; dailyUsd: number }
+/** Mirrors Dharma.levelLimits' defaults (used until members change a level's limits by vote). */
+export const DEFAULT_LEVEL_LIMITS: LevelLimits[] = [
+  { perPaymentUsd: 0.1, dailyUsd: 1 },
+  { perPaymentUsd: 0.5, dailyUsd: 5 },
+  { perPaymentUsd: 2, dailyUsd: 20 },
+  { perPaymentUsd: 5, dailyUsd: 50 },
+];
+/** Why a level changed (stored with the onchain LevelSet event). */
+export type LevelReason = "vote" | "member" | "tripwire" | "drill" | "watchdog";
 
 // ---------------------------------------------------------------- ids & money
 
@@ -55,7 +71,9 @@ export type Change =
   | { op: "RemoveMember"; member: Address }
   | { op: "SetTimelock"; seconds: number }
   | { op: "SetCoreTimelock"; seconds: number }
-  | { op: "Upgrade"; implementation: Address };
+  | { op: "Upgrade"; implementation: Address }
+  | { op: "SetLevel"; agent: string; level: number; reason: string }
+  | { op: "SetLevelLimits"; level: number; perPaymentUsd: number; dailyUsd: number };
 
 const RULE = [
   { type: "bytes32" }, { type: "uint8" }, { type: "bytes32" }, { type: "string" }, { type: "string" }, { type: "uint256" },
@@ -98,8 +116,15 @@ export function encodeChange(c: Change): { op: number; data: Hex } {
       return { op, data: encodeAbiParameters([{ type: "uint64" }], [BigInt(Math.round(c.seconds))]) };
     case "Upgrade":
       return { op, data: encodeAbiParameters([{ type: "address" }], [c.implementation]) };
+    case "SetLevel":
+      return { op, data: encodeAbiParameters(LEVEL, [toBytes32(c.agent), c.level, c.reason]) };
+    case "SetLevelLimits":
+      return { op, data: encodeAbiParameters(LIMITS, [c.level, toMicro(c.perPaymentUsd), toMicro(c.dailyUsd)]) };
   }
 }
+
+const LEVEL = [{ type: "bytes32" }, { type: "uint8" }, { type: "string" }] as const;
+const LIMITS = [{ type: "uint8" }, { type: "uint256" }, { type: "uint256" }] as const;
 
 export function decodeChange(op: number, data: Hex): Change {
   const name = opName(op);
@@ -141,6 +166,14 @@ export function decodeChange(op: number, data: Hex): Change {
       return { op: name, seconds: Number(decodeAbiParameters([{ type: "uint64" }], data)[0]) };
     case "Upgrade":
       return { op: name, implementation: decodeAbiParameters([{ type: "address" }], data)[0] };
+    case "SetLevel": {
+      const [agent, level, reason] = decodeAbiParameters(LEVEL, data);
+      return { op: name, agent: fromBytes32(agent), level, reason };
+    }
+    case "SetLevelLimits": {
+      const [level, per, daily] = decodeAbiParameters(LIMITS, data);
+      return { op: name, level, perPaymentUsd: fromMicro(per), dailyUsd: fromMicro(daily) };
+    }
     default:
       throw new Error(`unknown op ${op}`);
   }
@@ -213,6 +246,8 @@ export function describeChange(c: Change, l: Labels = {}): string {
     case "SetTimelock": return `Set the wait for changes to ${waitText(c.seconds)}`;
     case "SetCoreTimelock": return `Set the wait for core changes to ${waitText(c.seconds)}`;
     case "Upgrade": return `Upgrade Dharma's code to ${short(c.implementation)}`;
+    case "SetLevel": return `Set ${ag(c.agent)} to ${levelLabel(c.level)}`;
+    case "SetLevelLimits": return `Set ${levelLabel(c.level)} payment limits to ${usd(c.perPaymentUsd)} per payment, ${usd(c.dailyUsd)} per day`;
   }
 }
 
@@ -275,7 +310,8 @@ export const isAddr = (a: unknown): a is Address => typeof a === "string" && isA
 // ---------------------------------------------------------------- classification (mirror)
 
 export interface PolicyShape {
-  agents: { id: string; capUsd: number }[];
+  agents: { id: string; capUsd: number; level?: number }[];
+  levelLimits?: LevelLimits[];
   thresholdUsd: number;
   rules: { id: string; outcome: "allow" | "deny" | "approval"; builtin: boolean }[];
 }
@@ -296,6 +332,14 @@ export function isTightening(c: Change, p: PolicyShape): boolean {
     }
     case "SetThreshold":
       return c.usd <= p.thresholdUsd;
+    case "SetLevel": {
+      const a = p.agents.find((x) => x.id === c.agent);
+      return !!a && c.level < (a.level ?? 0);
+    }
+    case "SetLevelLimits": {
+      const cur = (p.levelLimits ?? DEFAULT_LEVEL_LIMITS)[c.level];
+      return !!cur && c.perPaymentUsd <= cur.perPaymentUsd && c.dailyUsd <= cur.dailyUsd;
+    }
     case "RemovePayee":
     case "RemoveAgent":
     case "RemoveDomain":
@@ -304,4 +348,40 @@ export function isTightening(c: Change, p: PolicyShape): boolean {
     default:
       return false;
   }
+}
+
+// ---------------------------------------------------------------- the agent's record (trust levels)
+
+/** One agent's record, built from Dharma's events (the QuickNode Stream, backfilled from deploy). */
+export interface AgentRecord {
+  agent: string;
+  level: number;
+  completed: number; // running total, from the latest ActionsRecorded
+  denied: number;
+  approvalsRequested: number;
+  drillsFailed: number;
+  tripwires: number;
+  /** Completed actions since the agent's last level change or last incident (failed Drill, Tripwire). */
+  cleanStreak: number;
+  levelChanges: { level: number; reason: string; block: number | null; txHash: string | null }[];
+  lastBlock: number | null;
+}
+
+/** Clean completed actions needed to be proposed for each level (index = target level). */
+export const LEVEL_UP_STREAK = [0, 10, 25, 50] as const;
+
+export interface Eligibility {
+  eligible: boolean;
+  target: number | null; // the next level, or null at the top
+  needed: number;
+  have: number;
+}
+
+/** Whether an agent can be proposed for its next level. One level at a time; members still vote. */
+export function levelUpEligibility(rec: Pick<AgentRecord, "cleanStreak"> | null | undefined, current: number): Eligibility {
+  if (current >= MAX_LEVEL) return { eligible: false, target: null, needed: 0, have: rec?.cleanStreak ?? 0 };
+  const target = current + 1;
+  const needed = LEVEL_UP_STREAK[target];
+  const have = rec?.cleanStreak ?? 0;
+  return { eligible: !!rec && have >= needed, target, needed, have };
 }
