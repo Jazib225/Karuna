@@ -34,6 +34,26 @@ Karuna makes sure no agent, and no group of agents, can be tricked into misusing
 - **Agents only propose.** A denial is a blank `denied`, never the reason, so an agent can't learn
   which wording gets through.
 
+## Agent decision loop
+1. **The agent acts.** It runs in a Karuna sandbox with no keys, no wallet and no network. Every
+   payment, web request, shell command, file access or message to another agent leaves the
+   sandbox as a request to the Gatekeeper.
+2. **Karuna checks the facts.** It works out who is asking, the exact payee, amount and target, and
+   the agent's spend so far today. These come from the request, never from the agent's explanation.
+3. **The rules decide.** The policy engine reads the org's rules from Dharma on Arc and the first
+   matching rule gives one of three answers:
+   - **allow**: the action goes ahead now;
+   - **ask**: an approval card appears on every member's screen through the QuickNode Stream, with
+     Karuna's facts on top and the agent's reason boxed as "may not be true";
+   - **deny**: the agent gets a blank `denied`, with no reason to learn from.
+4. **The Gatekeeper executes.** Only the Gatekeeper holds the Circle Agent Wallet. It pays in USDC
+   on Arc (x402 for data, transfers for bills) and executes exactly the payload that was allowed or
+   approved, checked by hash (Exact Match).
+5. **Everything is recorded.** Each decision goes into a signed, hash-chained log, which is
+   anchored to Dharma on Arc.
+6. **Karuna watches for patterns.** Drills, Tripwire and the changed-account alert can block an
+   agent or freeze every agent instantly. Only a member vote loosens things again.
+
 ## Dharma: who can change what
 Dharma (`contracts/src/Dharma.sol`) is one contract per organization. Every member action is an
 EIP-712 signature from that member's own key; the Gatekeeper relays it and pays gas but can't forge
@@ -97,6 +117,23 @@ instantly with no model call, so a rehearsed demo sentence can't fail. Models: `
 - **Learns from your choices:** a "no" becomes a block at once; a "yes" becomes a suggested rule only
   after repeated approvals and a vote. **Preview before loosening** replays recent requests under a
   proposed change.
+
+## Safety limits
+| Limit | Default | Who can change it |
+|---|---|---|
+| Payment to an address that isn't a known payee | always denied (core rule) | every member + 24 h wait |
+| Reading secrets, catastrophic shell commands (`rm -rf /`, etc.) | always denied (core rule) | every member + 24 h wait |
+| Anything no rule covers | denied (core rule) | every member + 24 h wait |
+| Payment to a known payee | allowed up to the agent's **daily allowance** | majority vote + wait |
+| Payment over the allowance or with no allowance | needs a member's approval | majority vote + wait |
+| Payment above the two-person threshold | needs **two** members' approval | majority vote + wait |
+| `rm -rf <path>`, package installs, file writes, POST/PUT/DELETE | needs a member's approval | majority vote + wait |
+| Web requests | GET only to allowlisted domains; everything else denied | majority vote + wait |
+| Approved payment | executes only if the payload hash and price still match | can't be changed |
+| Agent falls for a Drill | blocked from that kind of action until a vote restores it | majority vote + wait |
+| Agent uses a trap password, or 2 agents go after the same new target within 60 s | **every agent frozen** | majority vote + wait to unfreeze |
+| Panic button | any one member freezes every agent at once | majority vote + wait to unfreeze |
+| Agent keys and the wallet | never inside the sandbox; the Gatekeeper swaps placeholders on the way out | can't be changed |
 
 ## Deployed on Arc testnet
 | | |
