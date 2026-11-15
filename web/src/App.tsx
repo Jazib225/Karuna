@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import type { Address } from "viem";
-import type { PrivateKeyAccount } from "viem/accounts";
 import { isAddr, decodeChange, describeChange, describeScope, waitText, type Change } from "@prekaruna/dharma";
 import { api, useGatekeeper, type LooseningPreview, type AgentView, type Governance, type LogEntry, type Proposal, type Rule, type Snapshot, type WalletInfo } from "./api.ts";
-import { Kind, SignerUnavailable, decidePayment, loadSigner, submitChange } from "./signer.ts";
+import { Kind, SignerUnavailable, decidePayment, loadSigner, submitChange, type Signer } from "./signer.ts";
+import { emailSignInAvailable, emailSigner, loadEmailSession, signInWithEmail, signOutEmail, type EmailSession } from "./circle.ts";
 import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
 import { Palette, type Command } from "./palette.tsx";
 import { keccak256, stringToHex } from "viem";
@@ -143,7 +143,9 @@ const useConsoleData = PREVIEW ? usePreviewGatekeeper : useGatekeeper;
 
 export default function App() {
   const gk = useConsoleData();
-  const signer = useMemo<{ me: PrivateKeyAccount | null; error: string | null }>(() => {
+  // Who signs: the person's email account if they signed in with it, else this device's key.
+  const [emailSession, setEmailSession] = useState<EmailSession | null>(() => (PREVIEW ? null : loadEmailSession()));
+  const device = useMemo<{ me: Signer | null; error: string | null }>(() => {
     if (PREVIEW) return { me: previewSigner, error: null };
     try {
       return { me: loadSigner(), error: null };
@@ -151,6 +153,18 @@ export default function App() {
       return { me: null, error: e instanceof SignerUnavailable ? e.message : String(e) };
     }
   }, []);
+  const signer = useMemo<{ me: Signer | null; error: string | null }>(
+    () => (emailSession ? { me: emailSigner(emailSession, () => setEmailSession(null)), error: null } : device),
+    [emailSession, device],
+  );
+  const account: AccountCtl = {
+    session: emailSession,
+    signIn: async (email) => setEmailSession(await signInWithEmail(email)),
+    signOut: () => {
+      signOutEmail();
+      setEmailSession(null);
+    },
+  };
   const [flash, setFlash] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const notify: Notify = (kind, text) => {
@@ -185,11 +199,11 @@ export default function App() {
   useEffect(() => setDesktopSigner(signer.me, (s?.org.dharma?.address as Address | undefined) ?? null, isMember), [signer.me, s?.org.dharma?.address, isMember]);
   if (!s && gk.offline) body = <Offline reason={gk.offline} />;
   else if (!s) body = <Loading text="Connecting to the Gatekeeper…" />;
-  else if (!signer.me) body = <div className="center"><Backdrop /><div className="onboard narrow"><div className="onboard-body"><h2 className="setup-title heading-gradient">No signing key</h2><p className="lede">{signer.error}</p></div></div></div>;
-  else if (!s.setUp) body = <Setup s={s} me={signer.me} run={run} busy={busy} />;
+  else if (!signer.me) body = <div className="center"><Backdrop /><div className="onboard narrow"><div className="onboard-body"><h2 className="setup-title heading-gradient">No signing key</h2><p className="lede">{signer.error}</p><AccountBox me={null} account={account} run={run} busy={busy} /></div></div></div>;
+  else if (!s.setUp) body = <Setup s={s} me={signer.me} run={run} busy={busy} account={account} />;
   else if (!s.policy) body = <Loading text="Reading Dharma from Arc…" />;
-  else if (!s.policy.members.some((m) => m.address === signer.me!.address.toLowerCase())) body = <Join s={s} me={signer.me} run={run} />;
-  else body = <Console s={s} log={gk.log} wallet={gk.wallet} run={run} busy={busy} me={signer.me} offline={gk.offline} refresh={gk.refresh} />;
+  else if (!s.policy.members.some((m) => m.address === signer.me!.address.toLowerCase())) body = <Join s={s} me={signer.me} run={run} busy={busy} account={account} />;
+  else body = <Console s={s} log={gk.log} wallet={gk.wallet} run={run} busy={busy} me={signer.me} offline={gk.offline} refresh={gk.refresh} account={account} />;
 
   return (
     <>
@@ -235,7 +249,7 @@ function Offline({ reason }: { reason: string }) {
 
 // ============================================================== setup: deploy this org's Dharma
 
-function Setup({ s, me, run, busy }: { s: Snapshot; me: PrivateKeyAccount; run: Run; busy: boolean }) {
+function Setup({ s, me, run, busy, account }: { s: Snapshot; me: Signer; run: Run; busy: boolean; account: AccountCtl }) {
   const [detected, setDetected] = useState<string[] | null>(null);
   const [detectErr, setDetectErr] = useState<string | null>(null);
   const [form, setForm] = useState({ orgName: "", memberName: "", walletAddress: "" });
@@ -301,11 +315,7 @@ function Setup({ s, me, run, busy }: { s: Snapshot; me: PrivateKeyAccount; run: 
                   : <>No logged-in Circle wallet found{detectErr ? ` (${detectErr})` : ""}. Run <span className="mono">circle wallet login &lt;email&gt; --testnet</span></>}
             </small>
           </div>
-          <div className="keybox">
-            <span className="field-label"><Icon name="key" size={14} /> Your signing key · made in this browser</span>
-            <div className="mono">{me.address}</div>
-            <div className="small muted">Every vote and approval you make is signed with it, here. Keep using this browser for Karuna.</div>
-          </div>
+          <AccountBox me={me} account={account} run={run} busy={busy} />
           <button className="btn btn-dark btn-lg btn-block" type="submit" disabled={deploying}>
             {deploying ? <span className="shimmer">Deploying Dharma on Arc…</span> : <>Create organization <span className="nudge"><Icon name="arrow" size={16} /></span></>}
           </button>
@@ -317,7 +327,7 @@ function Setup({ s, me, run, busy }: { s: Snapshot; me: PrivateKeyAccount; run: 
 
 // ============================================================== join: a browser that isn't a member yet
 
-function Join({ s, me, run }: { s: Snapshot; me: PrivateKeyAccount; run: Run }) {
+function Join({ s, me, run, busy, account }: { s: Snapshot; me: Signer; run: Run; busy: boolean; account: AccountCtl }) {
   const [name, setName] = useState("");
   const requested = s.enrollments.some((e) => e.address === me.address.toLowerCase());
   return (
@@ -329,9 +339,9 @@ function Join({ s, me, run }: { s: Snapshot; me: PrivateKeyAccount; run: Run }) 
           <div>
             <p className="eyebrow">Not a member yet</p>
             <h2 className="setup-title heading-gradient" style={{ marginTop: 14 }}>Ask to join {s.org.name}</h2>
-            <p className="lede">Members sign every approval and policy change with a key in their own browser. A current member proposes adding you, and Dharma adds you after the vote and a {s.policy!.timelock}s wait.</p>
+            <p className="lede">Members sign every approval and policy change themselves. A current member proposes adding you, and Dharma adds you after the vote and a {s.policy!.timelock}s wait.</p>
           </div>
-          <div className="keybox"><span className="field-label"><Icon name="key" size={14} /> This browser's signing key</span><div className="mono">{me.address}</div></div>
+          <AccountBox me={me} account={account} run={run} busy={busy} />
           {requested ? (
             <p className="ok-text"><Icon name="check" /> Request sent. A member will see it under Team.</p>
           ) : (
@@ -346,11 +356,59 @@ function Join({ s, me, run }: { s: Snapshot; me: PrivateKeyAccount; run: Run }) 
   );
 }
 
+// ============================================================== who signs: email account or this device's key
+
+interface AccountCtl {
+  session: EmailSession | null;
+  signIn: (email: string) => Promise<void>;
+  signOut: () => void;
+}
+
+/** Shown wherever someone is identified: setup, join, and the "no key" screen. */
+function AccountBox({ me, account, run, busy }: { me: Signer | null; account: AccountCtl; run: Run; busy: boolean }) {
+  const [available, setAvailable] = useState<boolean | null>(null);
+  const [email, setEmail] = useState("");
+  useEffect(() => {
+    if (PREVIEW) return void setAvailable(true);
+    void emailSignInAvailable().then((c) => setAvailable(c.email));
+  }, []);
+  if (account.session) {
+    return (
+      <div className="keybox">
+        <span className="field-label"><Icon name="check" size={14} /> Signed in with email</span>
+        <div><b>{account.session.email}</b> <span className="mono small muted">{short(account.session.address)}</span></div>
+        <div className="small muted">The same account on every device. Each vote and approval asks you to confirm in Circle's window. <button type="button" className="link-btn" onClick={account.signOut}>Use this device's key instead</button></div>
+      </div>
+    );
+  }
+  return (
+    <div className="keybox">
+      {available && (
+        <div className="email-signin">
+          <span className="field-label"><Icon name="key" size={14} /> Sign in with email</span>
+          <div className="row-form">
+            <input type="email" aria-label="Email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" />
+            <button type="button" className="btn btn-dark" disabled={busy || !email.includes("@")} onClick={() => run(() => account.signIn(email), "Signed in")}>Send code</button>
+          </div>
+          <div className="small muted">One account on every device. Circle emails you a code; no passwords or seed phrases.</div>
+        </div>
+      )}
+      {me && (
+        <div className={available ? "device-key" : ""}>
+          <span className="field-label"><Icon name="key" size={14} /> {available ? "Or use this device's key" : "Your signing key · made in this browser"}</span>
+          <div className="mono">{me.address}</div>
+          {!available && <div className="small muted">Every vote and approval you make is signed with it, here. Keep using this browser for Karuna.</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ============================================================== console shell
 
 interface Ctx {
   s: Snapshot;
-  me: PrivateKeyAccount;
+  me: Signer;
   run: Run;
   busy: boolean;
   /** Sign a change. Every rule change is proposed for a vote; only the panic button (Freeze) applies at once. */
@@ -359,7 +417,7 @@ interface Ctx {
   name: (address?: string | null) => string;
 }
 
-function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snapshot; log: LogEntry[]; wallet: WalletInfo | null; run: Run; busy: boolean; me: PrivateKeyAccount; offline: string | null; refresh: () => Promise<void> }) {
+function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: { s: Snapshot; log: LogEntry[]; wallet: WalletInfo | null; run: Run; busy: boolean; me: Signer; offline: string | null; refresh: () => Promise<void>; account: AccountCtl }) {
   const [view, setPage] = useState<Page>(() => {
     try {
       return PAGE_OF[localStorage.getItem("karuna.view") as View] ?? "overview";
@@ -582,7 +640,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
         </nav>
         <div className="member" title="This browser's signing key">
           <span className="av">{myName[0]?.toUpperCase()}</span>
-          <div className="who"><div>{myName}</div><div>{short(myAddr)}</div></div>
+          <div className="who" title={account.session ? `Signed in as ${account.session.email} · ${myAddr}` : `This device's key · ${myAddr}`}><div>{myName}</div><div>{account.session ? account.session.email : short(myAddr)}</div></div>
         </div>
       </aside>
 

@@ -13,6 +13,7 @@ import { GatekeeperError, type AgentAction, type Gatekeeper, type SignedAction, 
 import type { WalletBackend } from "./wallet.ts";
 import type { EgressProxy } from "./proxy.ts";
 import type { SecretStore } from "./secrets.ts";
+import { CircleUsers, CircleUsersError } from "./circle-users.ts";
 
 /** What the agent API needs to hand out sandbox runs. Absent = sandboxes not available. */
 export interface SandboxDeps {
@@ -48,6 +49,7 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
 function fail(res: ServerResponse, e: unknown) {
   if (e instanceof GatekeeperError) return send(res, e.status, { error: e.message });
   if (e instanceof ConfigError) return send(res, 400, { error: e.message });
+  if (e instanceof CircleUsersError) return send(res, e.status, { error: e.message });
   if (isTransient(e)) return send(res, 503, { error: "The Arc RPC is busy (rate limited). Try again in a moment — or set ARC_RPC_URL to your QuickNode endpoint." });
   console.error("gatekeeper error:", scrub(e));
   send(res, 500, { error: "Internal error" });
@@ -124,7 +126,10 @@ export function agentApi(gk: Gatekeeper, sandbox?: SandboxDeps): Server {
 
 // ---------------------------------------------------------------- console API
 
-export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: string, secrets?: SecretStore, caPem?: string): Server {
+export function consoleApi(
+  gk: Gatekeeper, wallet: WalletBackend, consoleToken: string, secrets?: SecretStore, caPem?: string,
+  circle: CircleUsers = new CircleUsers(process.env.CIRCLE_API_KEY, process.env.CIRCLE_APP_ID),
+): Server {
   let walletCache: { at: number; value: unknown } | null = null;
 
   return createServer(async (req, res) => {
@@ -149,6 +154,8 @@ export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: 
         return;
       }
       if (method === "GET" && path === "/state") return send(res, 200, gk.snapshot());
+      // Sign in with email (Circle). The API key stays here; the browser gets only per-login tokens.
+      if (method === "GET" && path === "/auth/config") return send(res, 200, { email: circle.enabled, appId: circle.enabled ? circle.appId : null });
       if (method === "GET" && path === "/sandbox/ca") {
         // Public certificate (not a secret): remote machines pin it to trust only this Gatekeeper.
         res.writeHead(200, { "content-type": "application/x-pem-file", "content-disposition": "attachment; filename=karuna-ca.pem" });
@@ -187,6 +194,10 @@ export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: 
       }
       // The relay's QuickNode Streams: a USDC transfer out of the org's wallet (watchdog), and the
       // agents' records rebuilt from Dharma's events (trust levels).
+      if (method === "POST" && path === "/auth/email/start") return send(res, 200, await circle.emailToken(String(body.email ?? ""), String(body.deviceId ?? "")));
+      if (method === "POST" && path === "/auth/circle/init") return send(res, 200, await circle.initialize(String(body.userToken ?? "")));
+      if (method === "POST" && path === "/auth/circle/wallet") return send(res, 200, await circle.wallet(String(body.userToken ?? "")));
+      if (method === "POST" && path === "/auth/circle/sign") return send(res, 200, await circle.signTypedData(String(body.userToken ?? ""), String(body.walletId ?? ""), body.typedData));
       if (method === "POST" && path === "/dharma/code") return send(res, 200, await gk.prepareUpgrade());
       if (method === "POST" && path === "/watchdog/transfer") return send(res, 200, gk.watchdogTransfer(body as never));
       if (method === "POST" && path === "/records") return send(res, 200, gk.setChainRecords(body as never));

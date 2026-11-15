@@ -820,3 +820,9 @@ html, body, * { scrollbar-width: none; }
 @media (max-width: 760px) {
   .level-line { grid-template-columns: 1fr; gap: 6px; }
 }
+
+/* Sign in with email (setup, join) */
+.email-signin { display: grid; gap: 8px; }
+.email-signin .row-form input { flex: 1 1 200px; }
+.device-key { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); display: grid; gap: 4px; }
+.link-btn { background: none; border: 0; padding: 0; color: var(--ink); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; font: inherit; }

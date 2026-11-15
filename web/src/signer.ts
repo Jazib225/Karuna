@@ -1,7 +1,8 @@
-// This browser's member key. Every Dharma action and every payment decision is signed here,
-// in the member's own browser. The Gatekeeper only relays signatures; it can't make one.
-// The key lives in this browser's storage: clearing site data means re-enrolling (a member
-// proposes adding the new key). One browser = one member.
+// Who signs. Every Dharma action and every payment decision is signed by the member, never by the
+// Gatekeeper (it only relays signatures). Two kinds of signer:
+//   - the person's email account (Circle, see circle.ts): the same member on every device;
+//   - this device's own key, kept in this browser's storage (one browser = one member).
+// Both sign the same EIP-712 messages, which Dharma checks the same way.
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import type { Address, Hex } from "viem";
 import {
@@ -12,6 +13,9 @@ import { api } from "./api.ts";
 const STORAGE_KEY = "karuna.signer.v1";
 
 export class SignerUnavailable extends Error {}
+
+/** What signs: this device's key, or the person's email account (`email` is set for that one). */
+export type Signer = Pick<PrivateKeyAccount, "address" | "signTypedData"> & { email?: string };
 
 /** Load this browser's key, creating it on first use. Throws if storage is unavailable. */
 export function loadSigner(): PrivateKeyAccount {
@@ -37,7 +41,7 @@ async function nonce(addr: Address) {
 
 /** Sign and submit a Dharma action: Tighten (instant), Propose (vote + timelock), or Vote. */
 export async function submitChange(
-  me: PrivateKeyAccount, dharma: Address,
+  me: Signer, dharma: Address,
   a: { kind: number; change: Change; proposalId?: number; support?: boolean; label?: string },
 ) {
   const { op, data } = encodeChange(a.change);
@@ -54,7 +58,7 @@ export async function submitChange(
 }
 
 /** Sign (only) an approve/deny for one request, bound to its payload hash. Nothing is sent. */
-export async function signDecision(me: PrivateKeyAccount, dharma: Address, proposalId: string, payloadHash: string, approve: boolean) {
+export async function signDecision(me: Signer, dharma: Address, proposalId: string, payloadHash: string, approve: boolean) {
   const h = (payloadHash.startsWith("0x") ? payloadHash : `0x${payloadHash}`) as Hex;
   const d = deadline();
   const signature = await me.signTypedData(paymentDecisionTypedData(dharma, ARC_TESTNET_CHAIN_ID, { proposalId, payloadHash: h, approve, deadline: d }));
@@ -62,7 +66,7 @@ export async function signDecision(me: PrivateKeyAccount, dharma: Address, propo
 }
 
 /** Sign and submit an approve/deny for one payment, bound to the payload hash on the card. */
-export async function decidePayment(me: PrivateKeyAccount, dharma: Address, proposalId: string, payloadHash: string, approve: boolean) {
+export async function decidePayment(me: Signer, dharma: Address, proposalId: string, payloadHash: string, approve: boolean) {
   return api<{ status: string; error?: string }>(`/proposals/${proposalId}/decide`, await signDecision(me, dharma, proposalId, payloadHash, approve));
 }
 
