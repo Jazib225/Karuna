@@ -1126,6 +1126,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
         {!levels && <label className="field"><span>Daily allowance (USD)</span><input required type="number" min="0" step="0.000001" value={form.cap} onChange={(e) => setForm({ ...form, cap: e.target.value })} /></label>}
         <button className="btn btn-dark" type="submit" disabled={busy}><Icon name="plus" /> Propose agent</button>
       </form>
+      <Computers ctx={ctx} />
       <SandboxRuns ctx={ctx} />
       <RemoteRuns ctx={ctx} />
       {pol.agents.length === 0 ? (
@@ -2160,6 +2161,61 @@ function Appearance() {
   );
 }
 
+
+// ============================================================== computers (Claude Code / Cursor plugin)
+
+/** Computers running Claude Code or Cursor with the Karuna plugin: approve, see, disconnect. */
+function Computers({ ctx }: { ctx: Ctx }) {
+  const { s, run, busy, me } = ctx;
+  const devices = s.devices ?? [];
+  const pending = devices.filter((d) => d.status === "pending");
+  const connected = devices.filter((d) => d.status === "approved");
+  const toolName = (t: string) => (t === "cursor" ? "Cursor" : "Claude Code");
+  const approve = (d: (typeof devices)[number]) =>
+    run(async () => {
+      const dharma = s.org.dharma!.address as Address;
+      const { agentId } = await api<{ agentId: string }>(`/devices/${d.id}/approve`, { by: me.address });
+      // Its agent, and the vote to let it run outside a sandbox (it runs on that person's computer).
+      await submitChange(me, dharma, { kind: Kind.Propose, change: { op: "SetAgent", id: agentId, capUsd: 0 }, label: d.name });
+      await submitChange(me, dharma, { kind: Kind.Propose, change: { op: "AddRule", id: `unsandboxed-${agentId}`.slice(0, 31), outcome: "Allow", scope: "unsandboxed", target: agentId } });
+    }, `Approved. ${d.name} works once the vote passes (${s.policy!.timelock}s), starting at Level 0`);
+  if (!devices.length) {
+    return (
+      <div className="card">
+        <div className="hd"><h2>Computers</h2><span className="sub">Claude Code · Cursor</span></div>
+        <Empty icon="agents">No computers yet. In Claude Code, run <span className="mono">/plugin install karuna</span>; its first tool call shows a code to approve here.</Empty>
+      </div>
+    );
+  }
+  return (
+    <div className="card">
+      <div className="hd"><h2>Computers</h2><span className="sub">{connected.length} connected{pending.length ? ` · ${pending.length} waiting` : ""}</span></div>
+      <div className="resolved">
+        {pending.map((d) => (
+          <div className="res" key={d.id}>
+            <Badge v="approval">wants to connect</Badge>
+            <span className="small"><b>{d.name}</b> · {toolName(d.tool)} · code <span className="mono">{d.code}</span> · {ago(d.requestedAt)}</span>
+            <span className="ballot-actions">
+              <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => run(() => api(`/devices/${d.id}/deny`, {}), "Denied")}>Deny</button>
+              <button className="btn btn-approve btn-sm" disabled={busy} title="Check the code matches the one on that computer" onClick={() => approve(d)}><Icon name="pen" size={14} /> Approve</button>
+            </span>
+          </div>
+        ))}
+        {connected.map((d) => {
+          const seen = d.lastSeenAt ? Date.now() - Date.parse(d.lastSeenAt) : null;
+          return (
+            <div className="res" key={d.id}>
+              <Badge v={seen !== null && seen < 10 * 60_000 ? "allow" : "approval"}>{seen !== null && seen < 10 * 60_000 ? "active" : "connected"}</Badge>
+              <span className="small"><b>{d.agentName ?? d.name}</b> · {toolName(d.tool)} · {d.lastSeenAt ? `last call ${ago(d.lastSeenAt)}` : "no calls yet"}</span>
+              <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => confirm(`Disconnect ${d.name}? Its tool calls stop working at once.`) && run(() => api(`/devices/${d.id}/revoke`, {}), "Disconnected")}>Disconnect</button>
+            </div>
+          );
+        })}
+      </div>
+      <div className="log-foot"><span>every tool call is checked against your rules before it runs</span><span>connected computers can be disconnected at any time</span></div>
+    </div>
+  );
+}
 
 // ============================================================== trust levels (Dharma v3)
 

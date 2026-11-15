@@ -33,6 +33,7 @@ import { band, bandLabel, learnedDenyRule, previewLoosening, suggestions, LOOSEN
 import { PivotTracker, findCredential, findTrap, mintTraps, targetOf, trapEnvFile, trapLeakMessage, type TrapSet } from "./swarm.ts";
 import { SecretStore } from "./secrets.ts";
 import { DRAFT_KEYS, NoDrafterError, draftRules, freshIds, type DraftResult } from "./draft.ts";
+import { hookRequest, type HookCall } from "./hook.ts";
 
 // ---------------------------------------------------------------- types
 
@@ -129,6 +130,23 @@ interface State {
   chainRecords?: { at: string; source: string; records: Record<string, AgentRecord> } | null;
   /** The wallet watchdog: every USDC transfer that left the org's wallet, and what it matched. */
   watchdog?: WatchdogEvent[];
+  /** Computers running Claude Code or Cursor with the Karuna plugin, each tied to an agent. */
+  devices?: Device[];
+}
+
+export interface Device {
+  id: string;
+  secretHash: string; // the plugin's polling secret, hashed
+  code: string; // shown on the computer and in the console, so the member knows which is which
+  name: string;
+  tool: string; // "claude-code" | "cursor"
+  requestedAt: string;
+  status: "pending" | "approved" | "denied" | "revoked" | "expired";
+  agentId?: string;
+  pendingToken?: string; // handed to the plugin once, then removed
+  approvedBy?: string;
+  approvedAt?: string;
+  lastSeenAt?: string;
 }
 
 export interface WatchdogEvent {
@@ -223,6 +241,8 @@ const lower = (a: string) => a.toLowerCase();
 /** Seconds past a timelock before the Gatekeeper executes (the wallet provider's node can trail our RPC). */
 const EXECUTE_MARGIN_S = 3;
 const MAX_PROPOSALS_KEPT = 5000;
+/** How long a computer's connection request waits for a member. */
+const DEVICE_TTL_MS = 30 * 60_000;
 /** Circle Gateway's wallet contract on EVM testnets: deposits there stay the org's money. */
 export const GATEWAY_WALLET = (process.env.KARUNA_GATEWAY_WALLET ?? "0x0077777d7EBA4688BDeF3E311b846F25870A19B9").toLowerCase();
 const KIND_NAMES = ["tighten", "propose", "vote"] as const;
@@ -1536,6 +1556,147 @@ export class Gatekeeper extends EventEmitter {
     })());
   }
 
+  // ================================================================ Claude Code / Cursor (ease 2a)
+
+  /**
+   * A computer asks to connect (the plugin's first run). It gets a short code to show its person; a
+   * member approves it in the console, which gives the computer its own agent. Unauthenticated, so
+   * only a handful can wait at once and each request expires.
+   */
+  requestDevice(input: { name?: unknown; tool?: unknown }) {
+    if (!isSetUp(this.org)) throw new GatekeeperError("This Karuna isn't set up yet", 409);
+    const devices = (this.state.devices ??= []);
+    const now = this.now().getTime();
+    for (const d of devices) if (d.status === "pending" && now - Date.parse(d.requestedAt) > DEVICE_TTL_MS) d.status = "expired";
+    if (devices.filter((d) => d.status === "pending").length >= 10) throw new GatekeeperError("Too many computers are waiting to connect; ask a member to review them", 429);
+    const name = requireText(input.name ?? "Claude Code", "Name", 60);
+    const tool = typeof input.tool === "string" && /^[a-z-]{2,20}$/.test(input.tool) ? input.tool : "claude-code";
+    const secret = randomBytes(24).toString("base64url");
+    const code = `${randomBytes(2).toString("hex")}-${randomBytes(2).toString("hex")}`.toUpperCase();
+    const d: Device = { id: randomUUID(), secretHash: sha256(secret), code, name, tool, requestedAt: this.now().toISOString(), status: "pending" };
+    devices.push(d);
+    if (devices.length > 200) this.state.devices = devices.slice(-200);
+    this.logEvent({ type: "device-requested", device: d.id, name, tool, code });
+    this.save();
+    return { deviceId: d.id, secret, code };
+  }
+
+  /** The plugin polls until a member approves; the agent token is handed over exactly once. */
+  pollDevice(input: { deviceId?: unknown; secret?: unknown }) {
+    const d = (this.state.devices ?? []).find((x) => x.id === input.deviceId);
+    if (!d || d.secretHash !== sha256(String(input.secret ?? ""))) throw new GatekeeperError("Unknown connection request", 404);
+    if (d.status === "pending" && this.now().getTime() - Date.parse(d.requestedAt) > DEVICE_TTL_MS) d.status = "expired";
+    if (d.status !== "approved" || !d.pendingToken) return { status: d.status === "approved" ? "connected" : d.status };
+    const token = d.pendingToken;
+    delete d.pendingToken;
+    this.save();
+    return { status: "approved", agentId: d.agentId, token };
+  }
+
+  /**
+   * A member approves a computer. The console has already proposed its agent on Dharma (and the
+   * outside-sandbox grant); here the computer gets that agent's token.
+   */
+  approveDevice(id: string, input: { agentId?: unknown; by?: unknown }) {
+    const d = (this.state.devices ?? []).find((x) => x.id === id);
+    if (!d || d.status !== "pending") throw new GatekeeperError("No such connection request waiting", 404);
+    const agentId = typeof input.agentId === "string" && input.agentId ? input.agentId : null;
+    const { id: agent, token } = agentId ? { id: agentId, ...this.rotateAgentToken(agentId) } : this.prepareAgent(d.name);
+    d.status = "approved";
+    d.agentId = agent;
+    d.pendingToken = token;
+    d.approvedBy = typeof input.by === "string" ? lower(input.by) : undefined;
+    d.approvedAt = this.now().toISOString();
+    this.logEvent({ type: "device-approved", device: d.id, agent, by: d.approvedBy ?? null });
+    this.save();
+    return { agentId: agent };
+  }
+
+  denyDevice(id: string) {
+    const d = (this.state.devices ?? []).find((x) => x.id === id);
+    if (!d || d.status !== "pending") throw new GatekeeperError("No such connection request waiting", 404);
+    d.status = "denied";
+    this.logEvent({ type: "device-denied", device: d.id });
+    this.save();
+    return { ok: true };
+  }
+
+  /** Disconnect a computer: its token stops working at once. */
+  revokeDevice(id: string) {
+    const d = (this.state.devices ?? []).find((x) => x.id === id);
+    if (!d || d.status !== "approved" || !d.agentId) throw new GatekeeperError("No such connected computer", 404);
+    this.rotateAgentToken(d.agentId); // the new token is discarded: nothing holds it
+    d.status = "revoked";
+    delete d.pendingToken;
+    this.logEvent({ type: "device-revoked", device: d.id, agent: d.agentId });
+    this.save();
+    return { ok: true };
+  }
+
+  /**
+   * One tool call from Claude Code or Cursor, before it runs. Same engine, rules, levels, Tripwire,
+   * freeze and log as any agent. "pending" means a member must approve it (waitHook).
+   */
+  hookCall(agentId: string, call: HookCall): { decision: "allow" | "deny" | "pending"; proposalId?: string } {
+    const pol = this.requireReady();
+    const device = (this.state.devices ?? []).find((d) => d.agentId === agentId && d.status === "approved");
+    if (device) device.lastSeenAt = this.now().toISOString();
+    const t = hookRequest(agentId, { tool: String(call.tool ?? ""), input: call.input && typeof call.input === "object" ? call.input : {}, cwd: String(call.cwd ?? "") });
+    if (t.kind !== "request") return { decision: "allow" };
+    const request = t.request;
+    const base = {
+      id: randomUUID(), agentId, createdAt: this.now().toISOString(),
+      action: { type: "action" as const, tool: (request.tool === "tool" ? "http" : request.tool) as "shell" | "file" | "http", command: request.command, path: request.path, url: request.url, method: request.method },
+      approvals: [],
+    };
+    const facts: Fact[] = [
+      { label: "From", value: `${this.org.labels.agents[agentId] ?? agentId} (${device?.tool === "cursor" ? "Cursor" : "Claude Code"}${device ? ` · ${device.name}` : ""})` },
+      { label: "Tool", value: String(call.tool).slice(0, 80) },
+      { label: "Action", value: t.summary || "(empty)" },
+    ];
+    const deny = (ruleId: string, reason: string) => {
+      const decision: Decision = { outcome: "deny", ruleId, reason };
+      this.logDecision(request, decision);
+      this.state.proposals.push({ ...base, request, decision, facts, status: "denied" });
+      this.save();
+      return { decision: "deny" as const, proposalId: base.id };
+    };
+    if (!pol.agents.some((a) => a.id === agentId)) return deny("agent-inactive", "This computer's agent isn't on Dharma yet (waiting for the vote)");
+
+    // A planted trap key in a command, a URL or a file write is proof of misbehavior.
+    const trap = findTrap(this.state.traps, { input: call.input });
+    if (trap) {
+      const first = !this.state.tainted[agentId];
+      this.state.tainted[agentId] = { at: this.now().toISOString(), secret: trap.secret };
+      const name = this.org.labels.agents[agentId] ?? agentId;
+      if (first) {
+        this.alert({ kind: "trap-touched", agentId, title: `${name} used a trap password`, body: `Its ${String(call.tool)} call contained ${trap.secret}, a fake credential planted by Karuna.` });
+        this.onTripwire([agentId], "trap password");
+      }
+      this.logEvent({ type: "trap-touched", agent: agentId, secret: trap.secret, trapSet: trap.trap.id, via: "hook" });
+      return deny("trap-password", `Used trap credential ${trap.secret}`);
+    }
+    if (this.isFrozen()) return deny("panic-freeze", "All agents are frozen");
+    if (this.state.paused) return deny("paused", `Agents are paused (by ${this.state.paused.by})`);
+
+    const decision = evaluate(request, this.ctxFor(pol, false), buildRuleset(pol.rules));
+    if (decision.outcome === "allow") {
+      this.logDecision(request, decision);
+      this.emit("egress-allowed", { agentId, method: String(call.tool), url: t.summary });
+      this.save();
+      return { decision: "allow" };
+    }
+    if (decision.outcome === "deny") return deny(decision.ruleId, decision.reason);
+    // Approval: the same call while one is waiting joins that card.
+    const hash = sha256(`hook\n${String(call.tool)}\n${JSON.stringify(call.input ?? {})}\n${String(call.cwd ?? "")}`);
+    const open = this.state.proposals.find((p) => p.status === "pending" && p.agentId === agentId && p.payloadHash === hash);
+    if (open) return { decision: "pending", proposalId: open.id };
+    this.logDecision(request, decision);
+    this.state.proposals.push({ ...base, request, decision, facts, payloadHash: hash, status: "pending" });
+    this.save();
+    return { decision: "pending", proposalId: base.id };
+  }
+
   /** Mint a trap set (for one agent, or all) to plant in sandboxes. */
   mintTrapSet(agentId?: unknown) {
     this.requireReady();
@@ -1946,6 +2107,10 @@ export class Gatekeeper extends EventEmitter {
       }),
       proposals: this.state.proposals.slice(-300).reverse().map((p) => ({ ...p, approvalsNeeded: this.approvalsNeeded(p) })),
       sandbox: this.sandboxView(),
+      devices: (this.state.devices ?? []).filter((d) => d.status === "pending" || d.status === "approved").slice(-50).reverse().map((d) => ({
+        id: d.id, code: d.code, name: d.name, tool: d.tool, status: d.status, requestedAt: d.requestedAt, agentId: d.agentId ?? null,
+        agentName: d.agentId ? (L.agent(d.agentId) ?? d.agentId) : null, lastSeenAt: d.lastSeenAt ?? null, approvedAt: d.approvedAt ?? null,
+      })),
       watchdog: {
         wallet: this.org.wallet?.address ?? null,
         gateway: GATEWAY_WALLET,

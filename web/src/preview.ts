@@ -204,6 +204,11 @@ export const previewSnapshot: Snapshot = {
     },
   ],
   log: { length: 46, head: hash(46), verified: true, brokenAt: null, publicKeyPem: "" },
+  devices: [
+    { id: "d1", code: "7F3A-91C2", name: "sam's Claude Code (sam-mbp)", tool: "claude-code", status: "pending", requestedAt: iso(90), agentId: null, agentName: null, lastSeenAt: null, approvedAt: null },
+    { id: "d2", code: "0B4E-5D17", name: "adi's Claude Code (adi-xps)", tool: "claude-code", status: "approved", requestedAt: iso(86400), agentId: "adi-claude-code", agentName: "Adi's Claude Code", lastSeenAt: iso(40), approvedAt: iso(86000) },
+    { id: "d3", code: "C2A8-6E40", name: "adi's Cursor (adi-xps)", tool: "cursor", status: "approved", requestedAt: iso(86400 * 3), agentId: "adi-cursor", agentName: "Adi's Cursor", lastSeenAt: iso(7200), approvedAt: iso(86400 * 3) },
+  ],
   watchdog: {
     wallet: "0xe78f1b83b5f995a8c5fbc3b4ad1f3639fe6002ea",
     gateway: "0x0077777d7eba4688bdef3e311b846f25870a19b9",

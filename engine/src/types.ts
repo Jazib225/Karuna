@@ -4,7 +4,8 @@
 
 export type Outcome = "allow" | "deny" | "approval";
 
-export type Tool = "shell" | "file" | "http" | "payment" | "message";
+/** "tool" is a connector (MCP) tool call, e.g. gmail:send_email. */
+export type Tool = "shell" | "file" | "http" | "payment" | "message" | "tool";
 
 /** Agent ids are chosen by each organization (e.g. "ap-agent"). */
 export type AgentId = string;
@@ -40,6 +41,20 @@ export interface Request {
   body?: string;
   /** The agent a message is addressed to. */
   recipient?: AgentId;
+
+  // tool (a connector / MCP tool call)
+  /** "<server>:<tool>", e.g. "gmail:send_email". */
+  toolName?: string;
+  /** The connector marks the tool read-only (MCP annotation readOnlyHint). */
+  readOnly?: boolean;
+  /** The connector marks the tool destructive (MCP annotation destructiveHint). */
+  destructive?: boolean;
+
+  /**
+   * The agent runs on a person's own computer (Claude Code, Cursor, a chat app), not in a Karuna
+   * sandbox. Set by the Gatekeeper. Its project folder is presented as ./workspace.
+   */
+  host?: boolean;
 
   /**
    * Internal Auto-Shield flag. Set ONLY by Karuna's test generator, NEVER by an agent.

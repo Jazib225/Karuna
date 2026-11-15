@@ -81,6 +81,11 @@ export interface AgentRecord {
   cleanStreak: number; levelChanges: { level: number; reason: string; block: number | null; txHash: string | null }[]; lastBlock: number | null;
 }
 
+export interface DeviceView {
+  id: string; code: string; name: string; tool: string; status: "pending" | "approved";
+  requestedAt: string; agentId: string | null; agentName: string | null; lastSeenAt: string | null; approvedAt: string | null;
+}
+
 export interface WatchdogEvent {
   key: string; at: string; txHash: string; to: string; amountUsd: number; block: number | null; source: string;
   verdict: "matched" | "gateway-deposit" | "unapproved"; proposalId?: string; txRef?: string;
@@ -117,6 +122,8 @@ export interface Snapshot {
     records?: { at: string; source: string } | null;
   };
   watchdog?: { wallet: string | null; gateway: string; events: WatchdogEvent[] };
+  /** Computers running Claude Code or Cursor with the Karuna plugin. */
+  devices?: DeviceView[];
   frozen: null | false | { by: string | null; at: string; confirmed: boolean };
   enrollments: { address: string; name: string; requestedAt: string }[];
   shield: {

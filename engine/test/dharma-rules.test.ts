@@ -18,7 +18,7 @@ const pay = (agent: string, amountUsd: number, category = "services") =>
 describe("buildRuleset (Dharma → engine)", () => {
   it("with only the defaults, behaves exactly like the default policy", () => {
     const rules = buildRuleset(builtins());
-    expect(rules.map((r) => r.id).filter((id) => !id.startsWith("level-"))).toEqual(defaultRules.map((r) => r.id));
+    expect(rules.map((r) => r.id).filter((id) => !/^(level-|host-|tool-)/.test(id))).toEqual(defaultRules.map((r) => r.id));
   });
 
   it("a custom block for one agent + category beats its allowance (Auto-Shield shape)", () => {
