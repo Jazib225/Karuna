@@ -177,7 +177,7 @@ and all of it pulled back the moment something goes wrong. Each agent's level li
 ## Deployed on Arc testnet
 | | |
 |---|---|
-| Organization's Dharma (dev org, v2 proxy) | [`0x6a1e15aaf824f51119c4a6e3493085c606b5d843`](https://testnet.arcscan.app/address/0x6a1e15aaf824f51119c4a6e3493085c606b5d843) |
+| Organization's Dharma (dev org, v3 proxy) | [`0x1034316a026f18096c42346ae2e549856380d933`](https://testnet.arcscan.app/address/0x1034316a026f18096c42346ae2e549856380d933) |
 | Gatekeeper's Circle Agent Wallet | [`0xe78f1b83b5f995a8c5fbc3b4ad1f3639fe6002ea`](https://testnet.arcscan.app/address/0xe78f1b83b5f995a8c5fbc3b4ad1f3639fe6002ea) |
 
 Every new organization deploys its own Dharma (code + proxy) at setup; each verification and demo
