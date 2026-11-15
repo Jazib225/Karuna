@@ -2,11 +2,11 @@
 
 We use QuickNode twice:
 1. **An RPC endpoint** on Arc testnet — a faster, private node for the Gatekeeper and scripts (Phase 0).
-2. **Two Streams** on Arc testnet, both delivering to our relay's signed webhook (the $500 bounty):
-   - `karuna-dharma-events`: Dharma's events, **backfilled from the contract's deploy block** and then
-     live. Drives the approval pop-ups, and is the source of every agent's record for trust levels.
-   - `karuna-wallet-watchdog`: USDC `Transfer` logs out of the org's wallet, from the chain tip. Each
-     must match a payment Karuna made, or every agent freezes.
+2. **One Stream** on Arc testnet, `karuna-events` (the free plan allows one), delivering to our relay's
+   signed webhook (the $500 bounty). It is **backfilled from Dharma's deploy block**, then live, and its
+   filter keeps Dharma's events (approval pop-ups, and every agent's record for trust levels) and USDC
+   `Transfer` logs out of the org's wallet (the watchdog: each must match a payment Karuna made, or
+   every agent freezes).
 
 Do **part A now**. Part B waits until the Dharma contract is deployed (Phase 3), because a Stream needs the contract address.
 
@@ -53,8 +53,8 @@ things only you can do, then one command:
    ```bash
    pnpm --dir relay stream:create
    ```
-   It first test-runs both filters on QuickNode against real blocks, then
-   creates both Streams, generates the security token into `.env` (`QUICKNODE_SECURITY_TOKEN`), and
+   It first test-runs the filter on QuickNode against real blocks, then
+   creates the Stream, generates the security token into `.env` (`QUICKNODE_SECURITY_TOKEN`), and
    saves the Stream id. Restart the relay; the console badge switches to **QuickNode live**.
 
 **If you restart `cloudflared`, it gets a new URL.** Put the new one in `.env` as

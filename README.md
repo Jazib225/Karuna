@@ -142,7 +142,7 @@ and all of it pulled back the moment something goes wrong. Each agent's level li
 - **Changed bank account alert:** a known supplier's name with a different account is blocked and
   flagged.
 - **Exact Match:** what a member approved (payload hash, re-quoted price) is exactly what executes.
-- **Wallet watchdog:** a second QuickNode Stream watches every USDC transfer leaving the org's wallet.
+- **Wallet watchdog:** the QuickNode Stream also watches every USDC transfer leaving the org's wallet.
   Each one must match a payment Karuna made (same payee, same amount); deposits into Circle Gateway
   stay the org's money. Anything else means the wallet was used outside Karuna, so every agent
   freezes and the transfer is recorded on Dharma (`UnapprovedTransfer`). Limits: x402 purchases are
@@ -183,41 +183,29 @@ and all of it pulled back the moment something goes wrong. Each agent's level li
 Every new organization deploys its own Dharma (code + proxy) at setup; each verification and demo
 run deploys a fresh one and prints its explorer link.
 
-## QuickNode Streams (live alerts, the wallet watchdog, and each agent's record)
-Two Streams feed the relay. Both are created by `pnpm --dir relay stream:create`.
-
-**1. `karuna-dharma-events`: everything Dharma does, backfilled from its deploy block**
+## QuickNode Stream (live alerts, the wallet watchdog, and each agent's record)
+One Stream, `karuna-events`, feeds the relay (QuickNode's free plan allows one, and one filter can
+keep both kinds of log). Created by `pnpm --dir relay stream:create`.
 
 | Setting | Value | Why |
 |---|---|---|
-| Network | `arc-testnet` | Dharma lives on Arc |
-| Dataset | `logs` | Dharma's state changes are all events |
+| Network | `arc-testnet` | Dharma and the org's wallet are on Arc |
+| Dataset | `logs` | Dharma's state changes and USDC transfers are both logs |
 | Range | `start_range` = the block Dharma was deployed in, no `end_range` | replays the org's whole history, then follows the chain: that history is each agent's record |
-| Filter | JavaScript (`quickNodeFilterSource()` in `relay/src/events.ts`): keeps only logs whose `topics[0]` is one of Dharma's event signatures | ships a few events instead of every Arc log |
-| Destination | webhook → `https://<tunnel>/quicknode/webhook` (relay :8791), `security_token` set, batch size 1 | one event per delivery = lowest latency for approval pop-ups |
+| Filter | JavaScript (`quickNodeCombinedFilterSource(wallet)` in `relay/src/events.ts`) that keeps two things and drops every other Arc log: **Dharma's events** (`topics[0]` is one of Dharma's event signatures) as `dharmaLogs`, and **USDC leaving the org's wallet** (`Transfer` logs from Arc's USDC, the ERC-20 interface `0x3600…0000` with 6 decimals or the native USDC system address `0xffff…fffe` with 18, whose `from` topic is the wallet) as `walletTransfers` | each delivery carries only what the relay acts on |
+| Destination | webhook → `https://<tunnel>/quicknode/webhook` (relay :8791), `security_token` set, batch size 1 | one block per delivery = lowest latency for approval pop-ups |
+| Verification | the relay checks `HMAC-SHA256(token, nonce + timestamp + body)` and rejects replays | an unsigned POST can't fake an alert or a transfer (401) |
 
-Uses: approval pop-ups, votes, freezes and level changes on every member's screen; and agents'
-records for trust levels (`ActionsRecorded`, `LevelSet`, `TestFailed`, `TripwireFired`), rebuilt by
-the relay in chain order and sent to the Gatekeeper.
+What the relay does with it:
+- **Dharma's events**: approval pop-ups, votes, freezes and level changes on every member's screen;
+  and each agent's record for trust levels (`ActionsRecorded`, `LevelSet`, `TestFailed`,
+  `TripwireFired`), rebuilt in chain order and sent to the Gatekeeper.
+- **USDC leaving the wallet**: the wallet watchdog. Each transfer must match a Karuna payment or
+  every agent freezes (see Safety features).
 
-**2. `karuna-wallet-watchdog`: USDC leaving the org's wallet**
-
-| Setting | Value | Why |
-|---|---|---|
-| Network | `arc-testnet` | the wallet is on Arc |
-| Dataset | `logs` | a USDC transfer is a `Transfer` log |
-| Range | from the chain tip | older transfers predate Karuna's own payment records |
-| Filter | JavaScript (`quickNodeWatchdogFilterSource(wallet)`): `Transfer` logs from Arc's USDC (the ERC-20 interface `0x3600…0000`, 6 decimals, and the native USDC system address `0xffff…fffe`, 18 decimals) whose `from` topic is the org's wallet | only money leaving this wallet, nothing else on Arc |
-| Destination | the same signed webhook | one verified entry point |
-
-Uses: the wallet watchdog (see Safety features). Each transfer is matched to a Karuna payment or
-freezes every agent.
-
-**Both:** the relay checks `HMAC-SHA256(token, nonce + timestamp + body)` and rejects replays, so an
-unsigned POST can't fake an alert (401). If a Stream goes quiet the relay reads Arc directly and
-de-duplicates; the top bar shows which source is live (`QuickNode` or `Arc`).
-Setup: [`docs/QUICKNODE.md`](docs/QUICKNODE.md) · `pnpm --dir relay stream:create` (add
-`--backfill` to recreate the Dharma Stream from the deploy block).
+If the Stream goes quiet the relay reads Arc directly and de-duplicates; the top bar shows which
+source is live (`QuickNode` or `Arc`). Setup: [`docs/QUICKNODE.md`](docs/QUICKNODE.md) ·
+`pnpm --dir relay stream:create` (add `--backfill` to recreate it from the deploy block).
 
 ## Circle tools used
 | Tool | How |

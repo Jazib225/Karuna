@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { encodeAbiParameters, encodeEventTopics, type Hex } from "viem";
 import { DHARMA_ABI, levelUpEligibility, toBytes32 } from "@prekaruna/dharma";
 import {
-  TRANSFER_TOPIC, decodeDharmaLogs, decodeWalletTransfers, extractLogs, quickNodeFilterSource, quickNodeWatchdogFilterSource, type RawLog,
+  TRANSFER_TOPIC, decodeDharmaLogs, decodeWalletTransfers, extractLogs, quickNodeCombinedFilterSource, quickNodeFilterSource, quickNodeWatchdogFilterSource, type RawLog,
 } from "../src/events.ts";
 import { RecordBook } from "../src/records.ts";
 import { Relay } from "../src/relay.ts";
@@ -118,6 +118,18 @@ describe("wallet watchdog (QuickNode Stream on USDC transfers)", () => {
     relay.ingestTransfers(decodeWalletTransfers(extractLogs(filtered), WALLET, "rpc")); // the safety net sees it too
     expect(reported).toHaveLength(1);
     expect(reported[0]).toMatchObject({ to: PAYEE, amountUsd: 2 });
+  });
+});
+
+describe("the org's single Stream (QuickNode's free plan allows one)", () => {
+  it("keeps Dharma's events and USDC leaving the wallet, sorted apart, and drops everything else", () => {
+    const run = new Function(`${quickNodeCombinedFilterSource(WALLET)}; return main;`)() as (s: unknown) => { dharmaLogs?: RawLog[]; walletTransfers?: RawLog[] } | null;
+    const out = run({ data: [{ logs: [actions(5, 0, 50), transfer(ERC20, WALLET, PAYEE, 1_000_000n, 30), transfer(ERC20, PAYEE, WALLET, 1n, 31)] }] })!;
+    expect(out.dharmaLogs).toHaveLength(1);
+    expect(out.walletTransfers).toHaveLength(1);
+    expect(decode(extractLogs(out)).map((e) => e.event)).toEqual(["ActionsRecorded"]);
+    expect(decodeWalletTransfers(extractLogs(out), WALLET, "quicknode")).toMatchObject([{ to: PAYEE, amountUsd: 1 }]);
+    expect(run({ data: [{ logs: [transfer(ERC20, PAYEE, WALLET, 1n, 32)] }] })).toBeNull();
   });
 });
 

@@ -1493,11 +1493,10 @@ export class Gatekeeper extends EventEmitter {
       block: Number.isFinite(Number(input.block)) ? Number(input.block) : null, source: String(input.source ?? "quicknode").slice(0, 20), verdict: "unapproved",
     };
     const claimed = new Set(log.map((x) => x.proposalId).filter(Boolean));
-    const since = this.now().getTime() - 24 * 3600_000;
     const match = to === GATEWAY_WALLET
       ? null
       : this.state.proposals.find((p) =>
-          !!p.payload && !claimed.has(p.id) && (p.status === "executing" || p.status === "executed") && Date.parse(p.createdAt) >= since &&
+          !!p.payload && !claimed.has(p.id) && (p.status === "executing" || p.status === "executed") &&
           Math.round(p.payload.amountUsd * 1e6) === micro &&
           lower(p.payload.kind === "transfer" ? p.payload.to : p.payload.seller) === to);
     if (to === GATEWAY_WALLET) ev.verdict = "gateway-deposit";

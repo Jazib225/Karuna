@@ -1,19 +1,18 @@
-// Create (or update) the two QuickNode Streams that feed the relay.
+// Create (or update) the QuickNode Stream that feeds the relay.
 //
 //   QUICKNODE_API_KEY=…        (in .env) QuickNode dashboard → API Keys, with Streams access
 //   RELAY_PUBLIC_URL=https://… (in .env) public HTTPS URL that reaches the relay's webhook port
 //   QUICKNODE_SECURITY_TOKEN   (in .env) HMAC key; generated and saved to .env if missing
 //
-//   pnpm --dir relay stream:create              test both filters, then create/update both Streams
-//   pnpm --dir relay stream:create --test       only test the filters against real blocks
-//   pnpm --dir relay stream:create --backfill   recreate the Dharma Stream from the deploy block
+//   pnpm --dir relay stream:create              test the filter, then create/update the Stream
+//   pnpm --dir relay stream:create --test       only test the filter against real blocks
+//   pnpm --dir relay stream:create --backfill   recreate the Stream from Dharma's deploy block
 //
-// 1. karuna-dharma-events   arc-testnet · logs · only Dharma events · starts at the org's Dharma
-//                           deploy block (backfill), then follows the chain: approvals, votes,
-//                           freezes, and every agent's record for trust levels.
-// 2. karuna-wallet-watchdog arc-testnet · logs · only USDC Transfer logs out of the org's wallet ·
-//                           from the chain tip (old transfers predate Karuna's own records).
-// Both deliver to the relay's webhook, signed with the same token.
+// One Stream (QuickNode's free plan allows one), `karuna-events`: arc-testnet · logs · starts at the
+// org's Dharma deploy block (backfill), then follows the chain. Its filter keeps two things:
+//   - Dharma's events: approvals, votes, freezes, and every agent's record for trust levels;
+//   - USDC Transfer logs out of the org's wallet: the wallet watchdog.
+// Delivered to the relay's webhook, signed with the security token.
 import { config as loadEnv } from "dotenv";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -21,7 +20,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createPublicClient, http } from "viem";
 import { arcTestnet } from "viem/chains";
-import { DHARMA_TOPICS, TRANSFER_TOPIC, USDC_EMITTERS, quickNodeFilterSource, quickNodeWatchdogFilterSource } from "../src/events.ts";
+import { DHARMA_TOPICS, TRANSFER_TOPIC, USDC_EMITTERS, quickNodeCombinedFilterSource } from "../src/events.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const envPath = resolve(here, "../../.env");
@@ -77,14 +76,14 @@ async function testFilter(label: string, source: string, block: bigint, expectKe
 }
 const dharmaLogs = await client.getLogs({ address: dharma as `0x${string}`, fromBlock: latest > 9000n ? latest - 9000n : 0n, toBlock: latest });
 const sample = dharmaLogs.find((l) => DHARMA_TOPICS[String(l.topics[0]).toLowerCase()]);
-if (sample?.blockNumber) await testFilter("Dharma", quickNodeFilterSource(), sample.blockNumber, "dharmaLogs");
+if (sample?.blockNumber) await testFilter("Dharma", quickNodeCombinedFilterSource(wallet), sample.blockNumber, "dharmaLogs");
 else console.log(`No Dharma events in the last 9,000 blocks of ${dharma}; skipping the Dharma filter test.`);
 const pad = `0x${"0".repeat(24)}${wallet.slice(2)}` as `0x${string}`;
 const outgoing = (await client.request({
   method: "eth_getLogs",
   params: [{ address: Object.keys(USDC_EMITTERS) as `0x${string}`[], topics: [TRANSFER_TOPIC as `0x${string}`, pad], fromBlock: `0x${(latest > 9000n ? latest - 9000n : 0n).toString(16)}`, toBlock: `0x${latest.toString(16)}` }],
 } as never)) as { blockNumber: string }[];
-if (outgoing.length) await testFilter("watchdog", quickNodeWatchdogFilterSource(wallet), BigInt(outgoing.at(-1)!.blockNumber), "walletTransfers");
+if (outgoing.length) await testFilter("watchdog", quickNodeCombinedFilterSource(wallet), BigInt(outgoing.at(-1)!.blockNumber), "walletTransfers");
 else console.log(`No USDC left ${wallet} in the last 9,000 blocks; skipping the watchdog filter test (it's unit-tested).`);
 if (testOnly) process.exit(0);
 
@@ -107,60 +106,43 @@ const destination_attributes = {
 
 interface StreamState { id: string; dharma?: string; wallet?: string; startBlock?: string | null; url: string; updatedAt: string }
 const stateFile = resolve(here, "../.streams.json");
-const legacyFile = resolve(here, "../.stream.json"); // before the watchdog: one Stream, no backfill
-const state: { dharma?: StreamState; watchdog?: StreamState } = existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, "utf8")) : {};
-if (!state.dharma && existsSync(legacyFile)) state.dharma = { ...(JSON.parse(readFileSync(legacyFile, "utf8")) as StreamState), dharma: undefined };
+const legacyFile = resolve(here, "../.stream.json"); // before trust levels: no backfill, Dharma events only
+const saved: { stream?: StreamState; dharma?: StreamState } = existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, "utf8")) : {};
+const old: StreamState | undefined = saved.stream ?? saved.dharma ?? (existsSync(legacyFile) ? (JSON.parse(readFileSync(legacyFile, "utf8")) as StreamState) : undefined);
+const filter = b64(quickNodeCombinedFilterSource(wallet));
+const save = (st: StreamState) => writeFileSync(stateFile, JSON.stringify({ stream: st }, null, 2));
 
-async function create(name: string, filter: string, startBlock: bigint | null) {
+async function create(startBlock: bigint | null) {
   const body = {
-    name, network: "arc-testnet", dataset: "logs", region: "usa_east",
-    dataset_batch_size: 1, elastic_batch_enabled: true, filter_function: b64(filter), filter_language: "javascript",
+    name: "karuna-events", network: "arc-testnet", dataset: "logs", region: "usa_east",
+    dataset_batch_size: 1, elastic_batch_enabled: true, filter_function: filter, filter_language: "javascript",
     destination: "webhook", destination_attributes, status: "active",
     ...(startBlock !== null ? { start_range: Number(startBlock) } : {}),
   };
-  try {
-    return await qn("/streams", { method: "POST", body: JSON.stringify(body) });
-  } catch (e) {
-    // Fast chains need a bigger batch on some plans (the API answers 422).
-    if ((e as { status?: number }).status === 422) return qn("/streams", { method: "POST", body: JSON.stringify({ ...body, dataset_batch_size: 5 }) });
-    throw e;
-  }
+  return qn("/streams", { method: "POST", body: JSON.stringify(body) });
 }
-async function remove(id: string, why: string) {
-  try {
-    await qn(`/streams/${id}`, { method: "DELETE" });
-    console.log(`Deleted the old stream ${id} (${why}).`);
-  } catch (e) {
-    console.log(`Couldn't delete the old stream ${id} (${(e as Error).message}); pause or delete it in the QuickNode dashboard.`);
-  }
-}
-const now = () => new Date().toISOString();
 
-// 2a. Dharma events, backfilled from the deploy block
-const d = state.dharma;
-if (d && d.dharma === dharma && !forceBackfill) {
-  await qn(`/streams/${d.id}`, { method: "PATCH", body: JSON.stringify({ filter_function: b64(quickNodeFilterSource()), destination_attributes, status: "active" }) });
-  state.dharma = { ...d, url: destination_attributes.url, updatedAt: now() };
-  console.log(`Updated the Dharma stream ${d.id} → ${destination_attributes.url}`);
+if (old && old.dharma === dharma && !forceBackfill) {
+  // Same org: keep the Stream (and its backfill), update the filter and the destination.
+  // QuickNode only edits a paused Stream: pause, update, resume (it picks up where it left off).
+  await qn(`/streams/${old.id}`, { method: "PATCH", body: JSON.stringify({ status: "paused" }) }).catch(() => undefined);
+  await qn(`/streams/${old.id}`, { method: "PATCH", body: JSON.stringify({ filter_function: filter, destination_attributes }) });
+  await qn(`/streams/${old.id}`, { method: "PATCH", body: JSON.stringify({ status: "active" }) });
+  save({ ...old, wallet, url: destination_attributes.url, updatedAt: new Date().toISOString() });
+  console.log(`Updated stream ${old.id}: Dharma events + USDC leaving ${wallet} → ${destination_attributes.url}`);
 } else {
-  const res = await create("karuna-dharma-events", quickNodeFilterSource(), deployBlock);
-  state.dharma = { id: String(res.id), dharma, startBlock: deployBlock?.toString() ?? null, url: destination_attributes.url, updatedAt: now() };
-  console.log(`Created the Dharma stream ${res.id}: ${deployBlock !== null ? `backfilling from block ${deployBlock} (Dharma's deploy), then live` : "live from the chain tip (deploy block unknown)"}`);
-  if (d?.id) await remove(d.id, d.dharma && d.dharma !== dharma ? "it watched another org's Dharma" : "replaced by the backfilled one");
+  // A new org, or --backfill. The free plan allows one Stream, so the old one goes first.
+  if (old?.id) {
+    try {
+      await qn(`/streams/${old.id}`, { method: "DELETE" });
+      console.log(`Deleted the old stream ${old.id}.`);
+    } catch (e) {
+      console.log(`Couldn't delete the old stream ${old.id} (${(e as Error).message}); delete it in the QuickNode dashboard, then run this again.`);
+      process.exit(1);
+    }
+  }
+  const res = await create(deployBlock);
+  save({ id: String(res.id), dharma, wallet, startBlock: deployBlock?.toString() ?? null, url: destination_attributes.url, updatedAt: new Date().toISOString() });
+  console.log(`Created stream ${res.id}: ${deployBlock !== null ? `backfilling from block ${deployBlock} (Dharma's deploy), then live` : "live from the chain tip (deploy block unknown)"}; Dharma events + USDC leaving ${wallet}`);
 }
-
-// 2b. Wallet watchdog, from the tip
-const w = state.watchdog;
-if (w && w.wallet === wallet) {
-  await qn(`/streams/${w.id}`, { method: "PATCH", body: JSON.stringify({ filter_function: b64(quickNodeWatchdogFilterSource(wallet)), destination_attributes, status: "active" }) });
-  state.watchdog = { ...w, url: destination_attributes.url, updatedAt: now() };
-  console.log(`Updated the watchdog stream ${w.id} → ${destination_attributes.url}`);
-} else {
-  const res = await create("karuna-wallet-watchdog", quickNodeWatchdogFilterSource(wallet), null);
-  state.watchdog = { id: String(res.id), wallet, startBlock: null, url: destination_attributes.url, updatedAt: now() };
-  console.log(`Created the watchdog stream ${res.id}: USDC leaving ${wallet}, live from the chain tip`);
-  if (w?.id) await remove(w.id, "it watched another wallet");
-}
-
-writeFileSync(stateFile, JSON.stringify(state, null, 2));
 console.log("Saved relay/.streams.json. Restart the relay; the console badge shows QuickNode once deliveries arrive.");

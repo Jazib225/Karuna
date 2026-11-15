@@ -178,7 +178,45 @@ export function decodeWalletTransfers(logs: RawLog[], wallet: string | null, sou
   return [...out.values()];
 }
 
-/** The watchdog Stream's filter: only USDC transfers out of this org's wallet. */
+/**
+ * The org's single Stream (QuickNode's free plan allows one): Dharma's events from any Dharma
+ * contract, plus USDC transfers out of this org's wallet. The relay sorts them apart.
+ */
+export function quickNodeCombinedFilterSource(wallet: string): string {
+  return `function main(stream) {
+  var TOPICS = ${JSON.stringify(Object.fromEntries(Object.keys(DHARMA_TOPICS).map((t) => [t, 1])))};
+  var EMITTERS = ${JSON.stringify(Object.fromEntries(Object.keys(USDC_EMITTERS).map((a) => [a, 1])))};
+  var TRANSFER = "${TRANSFER_TOPIC}";
+  var FROM = "${padAddress(wallet)}";
+  var input = stream;
+  if (typeof input === "string") { try { input = JSON.parse(input); } catch (e) { return null; } }
+  if (input && input.data !== undefined) input = input.data;
+  var dharma = [], transfers = [];
+  function pick(x) { return { address: x.address, topics: x.topics, data: x.data, blockNumber: x.blockNumber, transactionHash: x.transactionHash, logIndex: x.logIndex }; }
+  function visit(x, depth) {
+    if (!x || depth > 8) return;
+    if (Array.isArray(x)) { for (var i = 0; i < x.length; i++) visit(x[i], depth + 1); return; }
+    if (typeof x === "object") {
+      if (Array.isArray(x.topics) && typeof x.address === "string" && x.topics.length) {
+        var t0 = String(x.topics[0]).toLowerCase();
+        if (TOPICS[t0]) dharma.push(pick(x));
+        else if (t0 === TRANSFER && EMITTERS[x.address.toLowerCase()] && String(x.topics[1]).toLowerCase() === FROM) transfers.push(pick(x));
+        return;
+      }
+      for (var k in x) { if (x[k] && typeof x[k] === "object") visit(x[k], depth + 1); }
+    }
+  }
+  visit(input, 0);
+  if (!dharma.length && !transfers.length) return null;
+  var out = {};
+  if (dharma.length) out.dharmaLogs = dharma;
+  if (transfers.length) out.walletTransfers = transfers;
+  return out;
+}
+`;
+}
+
+/** The watchdog's filter on its own (for plans with more than one Stream). */
 export function quickNodeWatchdogFilterSource(wallet: string): string {
   return `function main(stream) {
   var EMITTERS = ${JSON.stringify(Object.fromEntries(Object.keys(USDC_EMITTERS).map((a) => [a, 1])))};
