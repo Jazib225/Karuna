@@ -2617,7 +2617,7 @@ export class Gatekeeper extends EventEmitter {
           }),
           ...Object.keys(this.org.agentTokens)
             .filter((id) => !pol.agents.some((a) => a.id === id))
-            .map((id) => ({ id, name: L.agent(id) ?? id, capUsd: 0, spentTodayUsd: 0, active: false, hasToken: true })),
+            .map((id) => ({ id, name: L.agent(id) ?? id, capUsd: 0, spentTodayUsd: 0, active: false, hasToken: true, level: null, record: null, eligibility: null, built: null })),
         ],
         payees: pol.payees.map((p) => ({ account: lower(p.account), category: p.category, name: L.payee(p.account) ?? null })),
         domains: pol.domains,

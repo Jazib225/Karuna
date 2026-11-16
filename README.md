@@ -207,12 +207,64 @@ If the Stream goes quiet the relay reads Arc directly and de-duplicates; the top
 source is live (`QuickNode` or `Arc`). Setup: [`docs/QUICKNODE.md`](docs/QUICKNODE.md) ·
 `pnpm --dir relay stream:create` (add `--backfill` to recreate it from the deploy block).
 
+## Karuna without code
+For people who don't write code, and for coders who just want their AI kept safe.
+
+**Sign in with email.** Members open Karuna on any device and sign in with their email: Circle emails
+a code (Circle user-controlled wallets, an EOA on Arc), the same account everywhere, so one person is
+one member with one vote. Each vote and approval is confirmed in Circle's window. The Gatekeeper
+holds the Circle API key (`CIRCLE_API_KEY`, `CIRCLE_APP_ID` in `.env`); the browser only gets
+per-login tokens. EOA signatures are plain ECDSA, so Dharma checks them exactly like a device key.
+
+**Claude Code and Cursor: every tool call goes through Karuna.** Add Karuna's plugin once:
+```
+/plugin marketplace add <path or repo of this project>
+/plugin install karuna@karuna
+```
+(Cursor: `node plugin/scripts/install-cursor.mjs`.) The first time Claude tries a tool, it shows a
+code; a member approves it in Agents → Computers & chats, which gives that computer its own agent at
+Level 0. From then on, before Claude runs a shell command, reads or edits a file, fetches a page or
+calls an MCP tool, Karuna decides: it runs, it's refused ("Karuna blocked this."), or it waits while a
+member approves. Coding defaults: reading the project runs; at Level 1 edits and commands in the
+project run, except `git push`, network tools, installs, `rm -rf` and `sudo`, which ask; secrets are
+always blocked. It fails closed if Karuna can't be reached. It protects the coder from their AI
+(mistakes, prompt injection); where a team requires it, the keys are the enforcement: the org's keys
+and wallet stay in Karuna, and a computer that stops checking in shows in the console.
+
+**Chat apps (claude.ai, Claude Desktop, ChatGPT).** Add `https://<your-karuna>/mcp` as a connector.
+The chat app opens Karuna's connect page, which shows a code; a member approves it in the console.
+The chat gets `pay` (saved payees only), `buy_data`, `balance` and `check_request`, plus the team's
+connectors: other MCP servers (GitHub, Gmail, …) added by a vote in Settings → Connectors and reached
+only through Karuna, so every call follows the rules (read-only tools run, others wait for a member
+until a rule or Level 2 allows them, destructive ones always ask; rules per connector or tool). A
+connector's key stays in Karuna. A tool whose description, inputs or hints change after approval is
+held until a member reviews it. A chat app's own built-in tools (its web search, files dropped in)
+can't be checked by anyone outside it. The connector is served on `KARUNA_PUBLIC_PORT` (8792): expose
+it with a tunnel (`cloudflared tunnel --url http://127.0.0.1:8792`).
+
+**New agent: Karuna builds and runs it.** Agents → New agent: describe the job ("Every morning, check
+grain prices; if flour is under $35, order from Valley Flour, up to $50 a week"). Karuna drafts its
+name, instructions, when it runs (Run now, every N minutes, daily, or when a message arrives) and its
+limits as rules; members edit and propose it. Once the vote passes, Karuna runs it on schedule in a
+sandbox: a Claude agent (`agents/hosted/run.ts`) with Karuna's tools, a token issued for that run
+only, and the Anthropic key as a placeholder (Keys: a key named `anthropic` bound to
+api.anthropic.com). Docker must be running.
+
+**Watching agents work (Runs).** Every sandboxed run, Karuna's own or a developer's `karuna run`,
+has a live timeline: the conversation with its model, read from the traffic the egress proxy already
+carries (Anthropic, OpenAI-compatible including local servers like Ollama, and Gemini; plain or
+streamed), each action with Karuna's decision (Approve/Deny right there for held ones), what the
+agent printed (labelled as its own notes), the model used, Watch screen for a box with a desktop,
+and Stop. A run whose actions have no model traffic behind them says "This agent's reasoning isn't
+visible; only its actions are."
+
 ## Circle tools used
 | Tool | How |
 |---|---|
 | **Circle Agent Wallet** (SCA on `ARC-TESTNET`) | the organization's wallet, held **only** by the Gatekeeper; agents never see it |
 | **Circle CLI** | `circle wallet transfer` (USDC bills), `circle services pay` (x402 purchases, `--estimate` first for Exact Match), `circle wallet execute` (Dharma writes), `circle contract deploy` (each org's Dharma code and proxy), `circle gateway balance`, `circle wallet list` |
 | **x402 + Gateway Nanopayments** | agents buy data per request (e.g. $0.001); the Gatekeeper pays from the wallet's Gateway balance and hands the agent only the response |
+| **User-controlled wallets** (email login, EOA on `ARC-TESTNET`) | members sign in with an email; one account on every device signs their votes and approvals |
 
 ## Run it locally
 ```bash
@@ -282,7 +334,8 @@ Every pull request runs these on GitHub (CI) and needs the owner's review before
 ```bash
 pnpm --dir engine test       # policy engine, every rule kind, Dharma rule ordering, signed log
 pnpm --dir contracts test    # Dharma + proxy (forge): tiers, waits, skip, freeze-cancel, upgrades, trust levels
-pnpm --dir gatekeeper test   # gatekeeper on the real Dharma (anvil): levels, watchdog, v2→v3 upgrade, proxy, drafter
+pnpm --dir gatekeeper test   # gatekeeper on the real Dharma (anvil): levels, watchdog, v2→v3 upgrade, proxy, drafter,
+                             # email sign-in, Claude Code hook, chat connector + connectors, built agents, runs
 pnpm --dir relay test        # QuickNode signature, replay, decoding, both filters, agent records
 pnpm --dir agents check:no-keys
 # live, on Arc testnet (needs the test seller running):

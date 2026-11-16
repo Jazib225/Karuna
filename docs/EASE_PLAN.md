@@ -90,8 +90,9 @@ For claude.ai, Claude Desktop or ChatGPT, which have connectors but no hooks.
 
 - In the chat app: Settings → Connectors → add `https://<your-karuna>/mcp`. Nothing to install,
   nothing to copy.
-- The chat app opens Karuna's connect page → **Sign in with email** (part 1) → pick which of the org's
-  approved agents this chat acts as → confirm with your signature. Done.
+- The chat app opens Karuna's connect page, which shows a code; a member approves it in the console
+  (Agents → Computers & chats), signed in with email or a device key. Done. (Built this way so sign-in
+  lives in one place, the console, and the public page holds no keys.)
 - Then you chat ("buy today's grain price report"), and Karuna allows it, holds it for approval, or
   denies it, like any agent.
 
