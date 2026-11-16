@@ -30,6 +30,9 @@ export const MAX_LEVEL = 3;
 export const LEVEL_NAMES = ["Restricted", "Limited", "Standard", "Extended"] as const;
 export const levelLabel = (n: number) => `Level ${n} ${LEVEL_NAMES[n] ?? ""}`.trim();
 export interface LevelLimits { perPaymentUsd: number; dailyUsd: number }
+/** A level limit at or above this is "no limit": members vote it like any other value. */
+export const NO_LIMIT_USD = 1e12;
+export const isNoLimit = (usd: number) => usd >= NO_LIMIT_USD;
 /** Mirrors Dharma.levelLimits' defaults (used until members change a level's limits by vote). */
 export const DEFAULT_LEVEL_LIMITS: LevelLimits[] = [
   { perPaymentUsd: 0.1, dailyUsd: 1 },
@@ -185,7 +188,7 @@ export interface Labels {
   payee?: (a: string) => string | undefined;
 }
 
-const usd = (n: number) => `$${n > 0 && n < 0.01 ? String(n) : n.toFixed(2)}`;
+const usd = (n: number) => (isNoLimit(n) ? "no limit" : `$${n > 0 && n < 0.01 ? String(n) : n.toFixed(2)}`);
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
 /** What a rule covers, in words: "shell commands starting with `git push`", "payments to Acme". */
@@ -247,7 +250,9 @@ export function describeChange(c: Change, l: Labels = {}): string {
     case "SetCoreTimelock": return `Set the wait for core changes to ${waitText(c.seconds)}`;
     case "Upgrade": return `Upgrade Dharma's code to ${short(c.implementation)}`;
     case "SetLevel": return `Set ${ag(c.agent)} to ${levelLabel(c.level)}`;
-    case "SetLevelLimits": return `Set ${levelLabel(c.level)} payment limits to ${usd(c.perPaymentUsd)} per payment, ${usd(c.dailyUsd)} per day`;
+    case "SetLevelLimits": return isNoLimit(c.perPaymentUsd) && isNoLimit(c.dailyUsd)
+      ? `Remove ${levelLabel(c.level)} payment limits (no limit)`
+      : `Set ${levelLabel(c.level)} payment limits to ${usd(c.perPaymentUsd)} per payment, ${usd(c.dailyUsd)} per day`;
   }
 }
 

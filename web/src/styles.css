@@ -870,3 +870,9 @@ html, body, * { scrollbar-width: none; }
 .flash.working { background: var(--surface); color: var(--ink); border: 1px solid var(--line-strong); display: flex; align-items: center; gap: 10px; }
 .spinner { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--ink); animation: spin .8s linear infinite; flex: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------------------------------------------------------------- Claude chat setup */
+.chat-step { display: flex; gap: 12px; align-items: flex-start; }
+.chat-step .grow { flex: 1; min-width: 0; display: grid; gap: 6px; }
+.step-n { flex: none; width: 22px; height: 22px; border-radius: 999px; display: grid; place-items: center; font: 600 12px/1 var(--font-mono); background: var(--canvas-2); border: 1px solid var(--line); color: var(--ink); }
+.chat-url { overflow-wrap: anywhere; padding: 6px 10px; border-radius: var(--r-sm); background: var(--canvas-2); border: 1px solid var(--line); }

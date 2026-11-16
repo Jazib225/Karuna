@@ -158,6 +158,8 @@ export interface Snapshot {
   watchdog?: { wallet: string | null; gateway: string; events: WatchdogEvent[] };
   /** Computers running Claude Code or Cursor with the Karuna plugin, and connected chat apps. */
   devices?: DeviceView[];
+  /** Where chat apps add Karuna (KARUNA_CHAT_URL + /mcp), or null when no public address is set. */
+  chatUrl?: string | null;
   /** The team's connectors (MCP servers), reached only through Karuna. */
   connectors?: ConnectorView[];
   /** Recent runs (sandboxed agents): open one for its timeline. */
