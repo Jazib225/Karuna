@@ -142,6 +142,19 @@ function usePreviewGatekeeper() {
 }
 const useConsoleData = PREVIEW ? usePreviewGatekeeper : useGatekeeper;
 
+/** While something is being sent (a vote, an approval, a rule): a visible notice with the time so far. */
+function WorkingNotice() {
+  const [start] = useState(() => Date.now());
+  const now = useNow(1000);
+  const secs = Math.max(0, Math.floor((now - start) / 1000));
+  if (secs < 2) return null;
+  return (
+    <div role="status" className="flash working">
+      <span className="spinner" aria-hidden /> Sending to Arc… {secs}s{secs >= 20 ? " · Circle's wallet can take a minute or two" : ""}
+    </div>
+  );
+}
+
 export default function App() {
   const gk = useConsoleData();
   // Who signs: this device's key, which is your account's key once you sign in with email + password.
@@ -218,6 +231,7 @@ export default function App() {
     <>
       {body}
       {busy && <div className="busy-bar" />}
+      {busy && <WorkingNotice />}
       {flash && (
         <div role="status" className={`flash ${flash.kind}`} onClick={() => setFlash(null)}>
           <Icon name={flash.kind === "ok" ? "check" : "alert"} size={16} />{flash.text}

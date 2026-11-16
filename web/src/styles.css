@@ -865,3 +865,8 @@ html, body, * { scrollbar-width: none; }
 
 /* One line at the top of a page */
 .page-line { margin: 0; color: var(--n500); font-size: 14px; }
+
+/* Something is being sent to Arc: say so, with the time so far */
+.flash.working { background: var(--surface); color: var(--ink); border: 1px solid var(--line-strong); display: flex; align-items: center; gap: 10px; }
+.spinner { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--ink); animation: spin .8s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
