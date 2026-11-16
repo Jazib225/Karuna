@@ -15,6 +15,7 @@ import { EgressProxy } from "./proxy.ts";
 import { remoteListener } from "./remote.ts";
 import { PIPE_PATH, pipeServer } from "./pipe.ts";
 import { hostname } from "node:os";
+import { spawn } from "node:child_process";
 
 const here = dirname(fileURLToPath(import.meta.url));
 loadEnv({ path: resolve(here, "../../.env"), quiet: true });
@@ -44,6 +45,30 @@ const gk = new Gatekeeper({
   // Agents run in Karuna sandboxes; an agent token used anywhere else is refused unless voted.
   requireSandbox: (process.env.KARUNA_REQUIRE_SANDBOX ?? "1") !== "0",
   requireIsolation: process.env.KARUNA_REQUIRE_ISOLATION === "gvisor" ? "gvisor" : "docker",
+  // Agents Karuna builds and runs: each run is a normal `karuna run` of the hosted runner, with a
+  // token issued for that run only. Docker must be running on this machine.
+  launcher: ({ agentId, token, runId, onOutput, onExit }) => {
+    const root = resolve(here, "../..");
+    const win = process.platform === "win32";
+    const args = ["tsx", resolve(root, "runner/src/cli.ts"), "run", "--agent", agentId, "--gatekeeper", `http://127.0.0.1:${agentPort}`, resolve(root, "agents"), "--", "npx", "tsx", "hosted/run.ts"];
+    const p = spawn(win ? "npx.cmd" : "npx", args, {
+      env: { ...process.env, KARUNA_AGENT_TOKEN: token, KARUNA_RUN_ID: runId },
+      shell: win, windowsHide: true, stdio: ["ignore", "ignore", "pipe"],
+    });
+    // The box's own output reaches the run through `karuna run`; here, only Karuna's own lines.
+    let buf = "";
+    p.stderr!.on("data", (b: Buffer) => {
+      const parts = (buf + b.toString("utf8")).split(/\r?\n/);
+      buf = parts.pop() ?? "";
+      for (const l of parts) if (/^karuna · /.test(l)) onOutput(`Karuna: ${l.slice("karuna · ".length)}`);
+    });
+    p.on("exit", (code) => onExit(code ?? 1));
+    p.on("error", (e) => {
+      onOutput(`Karuna: couldn't start the run (${e.message})`);
+      onExit(1);
+    });
+    return () => p.kill();
+  },
 });
 gk.holdMs = Number(process.env.KARUNA_HOLD_SECONDS ?? 120) * 1000;
 const ca = new SandboxCA(dataDir);

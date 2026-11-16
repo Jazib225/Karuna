@@ -16,7 +16,11 @@ import { Duplex } from "node:stream";
 import type { AddressInfo } from "node:net";
 import type { SandboxCA } from "./ca.ts";
 import type { Gatekeeper } from "./gatekeeper.ts";
+import { decodeBody, decodeExchange, modelCall } from "./models.ts";
 import { SecretStore } from "./secrets.ts";
+
+/** Most of one model reply Karuna keeps to read (a box still gets all of it). */
+const MODEL_COPY_LIMIT = 4 * 1024 * 1024;
 
 const MAX_BODY = 20 * 1024 * 1024;
 const INTERNAL_HOST = "karuna.internal";
@@ -178,6 +182,26 @@ export class EgressProxy {
     const outRes: Record<string, string | string[]> = {};
     for (const [k, v] of Object.entries(upstream.headers)) if (v !== undefined && !["connection", "keep-alive", "transfer-encoding"].includes(k)) outRes[k] = v;
     res.writeHead(upstream.statusCode ?? 502, outRes);
+    // A model call (Claude, GPT, Gemini, a local model): keep a copy as it streams to the box, then
+    // read what was asked and answered into the run. The box gets every byte as it arrives.
+    const call = modelCall(u.toString(), method);
+    if (call) {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      upstream.on("data", (c: Buffer) => {
+        if (size < MODEL_COPY_LIMIT) chunks.push(c);
+        size += c.length;
+      });
+      upstream.on("end", () => {
+        try {
+          const text = decodeBody(Buffer.concat(chunks), String(upstream.headers["content-encoding"] ?? ""));
+          const exchange = (upstream.statusCode ?? 0) < 400 ? decodeExchange(call, body.toString("utf8"), text) : null;
+          this.gk.recordModelExchange(token, { url: u.toString(), status: upstream.statusCode ?? 0, exchange, provider: call.provider });
+        } catch {
+          /* the box already has its answer; the run just misses this step */
+        }
+      });
+    }
     upstream.pipe(res);
   }
 

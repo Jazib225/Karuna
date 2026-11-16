@@ -225,6 +225,32 @@ async function draftOnce(policy: string, ctx: DraftContext, key: string, fetchIm
   return { rules, note: text(parsed.note, 600), skipped };
 }
 
+/**
+ * Ask the free models in order for one JSON object matching `schema` (the agent drafter uses this).
+ * Returns the parsed object and which model answered.
+ */
+export async function draftJson(
+  messages: { role: string; content: string }[], name: string, schema: Record<string, unknown>,
+  keys: Record<string, string | null>, fetchImpl: typeof fetch = fetch, pauseMs = 600,
+): Promise<{ json: Record<string, unknown>; model: string }> {
+  const usable = DRAFT_PROVIDERS.filter((p) => keys[p.key]);
+  if (!usable.length) throw new NoDrafterError();
+  const failures: string[] = [];
+  for (let i = 0; i < usable.length; i++) {
+    if (i > 0) await new Promise((r) => setTimeout(r, pauseMs));
+    const p = usable[i];
+    try {
+      let res = await call(fetchImpl, p, keys[p.key]!, { messages, response_format: { type: "json_schema", json_schema: { name, schema } } });
+      if (res.status === 400) res = await call(fetchImpl, p, keys[p.key]!, { messages, response_format: { type: "json_object" } });
+      if (!res.ok) throw new Error(`answered ${res.status}${res.error ? `: ${res.error.slice(0, 160)}` : ""}`);
+      return { json: JSON.parse(res.content) as Record<string, unknown>, model: p.model };
+    } catch (e) {
+      failures.push(`${p.name} ${p.model}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  throw new Error(`No free model could draft this right now (${failures.join("; ")}). Try again in a minute.`);
+}
+
 /** A rule id that's never reused: time plus randomness (two drafts can land in the same millisecond).
  *  Always well under Dharma's 32-byte limit, e.g. "r-message-mwbu66r3k7q2x1". */
 export function ruleId(kind: string, i: number): string {

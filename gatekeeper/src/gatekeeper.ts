@@ -35,6 +35,8 @@ import { SecretStore } from "./secrets.ts";
 import { DRAFT_KEYS, NoDrafterError, draftRules, freshIds, type DraftResult } from "./draft.ts";
 import { hookRequest, type HookCall } from "./hook.ts";
 import { ConnectorClients, exposedName, splitName, toolFingerprint, type ConnectorDef } from "./connectors.ts";
+import type { ModelExchange } from "./models.ts";
+import { draftAgentSpec, type AgentDraft } from "./agent-draft.ts";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 
 // ---------------------------------------------------------------- types
@@ -134,6 +136,10 @@ interface State {
   watchdog?: WatchdogEvent[];
   /** Computers running Claude Code or Cursor with the Karuna plugin, each tied to an agent. */
   devices?: Device[];
+  /** What each sandbox run did: model exchanges, actions and decisions, the agent's own notes. */
+  runs?: Run[];
+  /** Agents Karuna builds and runs: their instructions and schedule (the agent itself is on Dharma). */
+  builtAgents?: Record<string, BuiltAgent>;
   /** Each connector tool as first seen after the team approved its connector (to catch changes). */
   toolSnapshots?: Record<string, { fingerprint: string; description: string; firstSeenAt: string; changed?: { fingerprint: string; description: string; seenAt: string } }>;
 }
@@ -203,6 +209,8 @@ export interface GatekeeperDeps {
   requireSandbox?: boolean; // agent tokens only work from inside a Karuna sandbox (unless voted otherwise)
   requireIsolation?: "gvisor" | "docker"; // refuse runs weaker than this
   connectors?: ConnectorClients; // MCP clients for the team's connectors (tests pass a fake)
+  /** Starts a built agent's sandbox run (`karuna run` with the hosted runner). Returns a stop function. */
+  launcher?: (run: { agentId: string; token: string; runId: string; onOutput: (line: string) => void; onExit: (code: number) => void }) => () => void;
 }
 
 /** One `karuna run`: an agent in a box, reachable only through the egress proxy. */
@@ -221,6 +229,7 @@ export interface SandboxSession {
   denied: number;
   lastRequest: string | null;
   stopRequested: boolean;
+  runId?: string; // the run record this session's steps go to
 }
 
 /** One HTTP(S) request leaving a box, as the proxy saw it. */
@@ -246,6 +255,98 @@ const lower = (a: string) => a.toLowerCase();
 /** Seconds past a timelock before the Gatekeeper executes (the wallet provider's node can trail our RPC). */
 const EXECUTE_MARGIN_S = 3;
 const MAX_PROPOSALS_KEPT = 5000;
+
+// ---------------------------------------------------------------- runs and built agents
+
+export interface Run {
+  id: string;
+  agentId: string;
+  trigger: string; // "Run now", "Every 60 min", "Daily at 09:00", "Message in its inbox", "karuna run on <host>"
+  startedAt: string;
+  endedAt?: string;
+  status: "starting" | "running" | "done" | "failed" | "stopped";
+  steps: RunStep[];
+  built: boolean; // an agent Karuna runs (vs. a developer's `karuna run`)
+  exitCode?: number;
+  host?: string | null;
+  isolation?: string;
+}
+
+export type RunStep =
+  | { at: string; kind: "model"; exchange: ModelExchange; status: number }
+  | { at: string; kind: "raw-model"; url: string; provider: string; status: number }
+  | { at: string; kind: "action"; summary: string; outcome: "allowed" | "denied" | "waiting"; ruleId?: string; reason?: string; proposalId?: string }
+  | { at: string; kind: "note"; text: string };
+
+export interface Schedule {
+  kind: "manual" | "every" | "daily" | "inbox";
+  minutes?: number; // every N minutes (15 … 10080)
+  at?: string; // daily, "HH:MM" (Gatekeeper's local time)
+}
+
+export interface BuiltAgent {
+  instructions: string;
+  schedule: Schedule;
+  paused: boolean;
+  createdAt: string;
+  lastRunAt?: string;
+  inboxWaiting?: boolean;
+  model?: string;
+}
+
+const MAX_RUNS = 200;
+const MAX_RUN_STEPS = 500;
+
+export function parseSchedule(v: unknown): Schedule {
+  const o = (v && typeof v === "object" ? v : {}) as Record<string, unknown>;
+  const kind = ["manual", "every", "daily", "inbox"].includes(String(o.kind)) ? (String(o.kind) as Schedule["kind"]) : "manual";
+  if (kind === "every") {
+    const minutes = Math.round(Number(o.minutes));
+    if (!Number.isFinite(minutes) || minutes < 15 || minutes > 10_080) throw new GatekeeperError("Run every 15 minutes to 7 days");
+    return { kind, minutes };
+  }
+  if (kind === "daily") {
+    const at = String(o.at ?? "");
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(at)) throw new GatekeeperError("Daily time is HH:MM");
+    return { kind, at };
+  }
+  return { kind };
+}
+
+export function scheduleText(s: Schedule): string {
+  if (s.kind === "every") return s.minutes! % 60 === 0 ? `Every ${s.minutes! / 60} h` : `Every ${s.minutes} min`;
+  if (s.kind === "daily") return `Daily at ${s.at}`;
+  if (s.kind === "inbox") return "When a message arrives in its inbox";
+  return "Only when started";
+}
+
+/** Why a built agent should start now, or null. */
+export function dueReason(b: BuiltAgent, now: Date): string | null {
+  const last = b.lastRunAt ? Date.parse(b.lastRunAt) : 0;
+  const s = b.schedule;
+  if (s.kind === "every" && now.getTime() - last >= s.minutes! * 60_000) return scheduleText(s);
+  if (s.kind === "daily") {
+    const [h, m] = s.at!.split(":").map(Number);
+    const today = new Date(now);
+    today.setHours(h, m, 0, 0);
+    if (now >= today && last < today.getTime()) return scheduleText(s);
+  }
+  if (s.kind === "inbox" && b.inboxWaiting) return "Message in its inbox";
+  return null;
+}
+
+function runSummary(r: Run, agentName: string) {
+  const models = [...new Set(r.steps.flatMap((s) => (s.kind === "model" ? [`${s.exchange.model || "model"} (${s.exchange.provider})`] : s.kind === "raw-model" ? [s.provider] : [])))];
+  const actions = r.steps.filter((s) => s.kind === "action").length;
+  const modelSteps = r.steps.filter((s) => s.kind === "model" || s.kind === "raw-model").length;
+  return {
+    id: r.id, agentId: r.agentId, agentName, trigger: r.trigger, startedAt: r.startedAt, endedAt: r.endedAt ?? null, status: r.status,
+    built: r.built, host: r.host ?? null, steps: r.steps.length, actions, models,
+    reasoningVisible: modelSteps > 0 || actions === 0,
+    waiting: r.steps.filter((s) => s.kind === "action" && s.outcome === "waiting").length,
+  };
+}
+
 /** How long a computer's connection request waits for a member. */
 const DEVICE_TTL_MS = 30 * 60_000;
 /** Circle Gateway's wallet contract on EVM testnets: deposits there stay the org's money. */
@@ -283,6 +384,8 @@ export class Gatekeeper extends EventEmitter {
   /** MCP clients for the team's connectors, and the last error per connector. */
   readonly connectors: ConnectorClients;
   private connectorErrors = new Map<string, string>();
+  /** Stop functions for runs the scheduler launched. */
+  private launchStops = new Map<string, () => void>();
   /** Level drops sent but not yet read back from the chain. */
   private pendingLevel = new Map<string, number>();
   /** When each agent last tripped a Tripwire (reported once a minute at most). */
@@ -451,6 +554,7 @@ export class Gatekeeper extends EventEmitter {
     await this.executeReady();
     await this.anchorIfDue();
     this.shieldHousekeeping();
+    this.scheduleBuiltAgents();
   }
 
   /** Anyone may execute a passed proposal after its timelock; the Gatekeeper does it promptly. */
@@ -1032,7 +1136,7 @@ export class Gatekeeper extends EventEmitter {
   }
 
   /** `karuna run` asks for a box. The agent must be on Dharma and the org not frozen. */
-  startSession(agentId: string, meta: { host?: unknown; isolation?: unknown; desktop?: unknown; remote?: unknown } = {}): SandboxSession {
+  startSession(agentId: string, meta: { host?: unknown; isolation?: unknown; desktop?: unknown; remote?: unknown; runId?: unknown } = {}): SandboxSession {
     const pol = this.requireReady();
     if (!pol.agents.some((a) => a.id === agentId)) throw new GatekeeperError("This agent is not active in Dharma yet", 403);
     if (this.isFrozen()) throw new GatekeeperError("All agents are frozen", 423);
@@ -1046,6 +1150,13 @@ export class Gatekeeper extends EventEmitter {
       isolation, desktop: meta.desktop === true, remote: meta.remote === true, viewer: null,
       requests: 0, denied: 0, lastRequest: null, stopRequested: false,
     };
+    // Its run: the one the scheduler made for it, or a new one for a developer's `karuna run`.
+    const planned = typeof meta.runId === "string" ? (this.state.runs ?? []).find((r) => r.id === meta.runId && r.agentId === agentId && r.status === "starting") : undefined;
+    const run = planned ?? this.newRun(agentId, `karuna run${s.host ? ` on ${s.host}` : ""}`, false);
+    run.status = "running";
+    run.host = s.host;
+    run.isolation = isolation;
+    s.runId = run.id;
     this.sessions.set(s.token, s);
     this.logEvent({ type: "sandbox-started", agent: agentId, session: s.id, host: s.host, isolation, desktop: s.desktop, remote: s.remote });
     this.save();
@@ -1080,6 +1191,11 @@ export class Gatekeeper extends EventEmitter {
     const s = this.sessions.get(token);
     if (!s) return;
     this.sessions.delete(token);
+    const run = s.runId ? (this.state.runs ?? []).find((r) => r.id === s.runId) : undefined;
+    if (run && run.status === "running") {
+      run.status = s.stopRequested ? "stopped" : why === "idle" ? "failed" : "done";
+      run.endedAt = this.now().toISOString();
+    }
     this.logEvent({ type: "sandbox-ended", agent: s.agentId, session: s.id, why, requests: s.requests, denied: s.denied });
     this.emit("session-end", token);
     this.save();
@@ -1099,7 +1215,21 @@ export class Gatekeeper extends EventEmitter {
    * rules, signed log), plus key bindings. Approvals become cards; a member's yes is a one-time
    * pass for exactly this request (method + URL + body hash) for 10 minutes.
    */
+  /** A request leaving a box: decided, and added to the box's run with its decision. */
   egress(token: string, r: EgressRequest): EgressVerdict {
+    const v = this.egressDecide(token, r);
+    let where = r.url;
+    try {
+      const u = new URL(r.url);
+      where = `${u.host}${u.pathname}`;
+    } catch {
+      /* keep raw */
+    }
+    this.recordAction(token, `${r.method.toUpperCase()} ${where}`, v.verdict === "allow" ? "allowed" : v.verdict === "pending" ? "waiting" : "denied", v.verdict === "allow" ? undefined : v.proposalId);
+    return v;
+  }
+
+  private egressDecide(token: string, r: EgressRequest): EgressVerdict {
     const s = this.session(token);
     if (!s) return { verdict: "deny" };
     s.lastSeen = Date.now();
@@ -1385,6 +1515,7 @@ export class Gatekeeper extends EventEmitter {
     const fromName = this.org.labels.agents[from] ?? from;
     const m: InboxMessage = { id: randomUUID(), agentId: to, from: `${fromName} (agent)`, subject: `Message from ${fromName}`, body, receivedAt: this.now().toISOString() };
     this.state.inbox.push(m);
+    this.wakeOnInbox(to);
   }
 
   /** Freeze every agent: instantly here, then onchain (a Gatekeeper-only tightening). */
@@ -1908,6 +2039,224 @@ export class Gatekeeper extends EventEmitter {
     return { content: [{ type: "text" as const, text: `Waiting for your team to approve this in Karuna (request ${open.id}). Try again once it's approved.` }] };
   }
 
+  // ================================================================ runs (what an agent did), built agents (ease 3)
+
+  private runOf(token: string): Run | null {
+    const s = this.sessions.get(token);
+    if (!s?.runId) return null;
+    return (this.state.runs ?? []).find((r) => r.id === s.runId) ?? null;
+  }
+
+  private addStep(run: Run | null, step: RunStep) {
+    if (!run) return;
+    run.steps.push(step);
+    if (run.steps.length > MAX_RUN_STEPS) run.steps.splice(0, run.steps.length - MAX_RUN_STEPS);
+    this.emit("run-step", { runId: run.id, step });
+    this.emit("change");
+  }
+
+  /** A new run record (the scheduler makes one before launching; `karuna run` gets one at session start). */
+  private newRun(agentId: string, trigger: string, built: boolean): Run {
+    const run: Run = { id: randomUUID(), agentId, trigger, startedAt: this.now().toISOString(), status: "starting", steps: [], built };
+    const runs = (this.state.runs ??= []);
+    runs.push(run);
+    if (runs.length > MAX_RUNS) this.state.runs = runs.slice(-MAX_RUNS);
+    return run;
+  }
+
+  /** The egress proxy read a model call (Claude, GPT, Gemini, a local model) for this box. */
+  recordModelExchange(token: string, call: { url: string; status: number; exchange: ModelExchange | null; provider: string }) {
+    const run = this.runOf(token);
+    if (!run) return;
+    if (call.exchange) this.addStep(run, { at: this.now().toISOString(), kind: "model", exchange: call.exchange, status: call.status });
+    else this.addStep(run, { at: this.now().toISOString(), kind: "raw-model", url: call.url.slice(0, 300), provider: call.provider, status: call.status });
+  }
+
+  /** Lines the agent printed (captured by `karuna run`): its own account, not a record. */
+  noteOutput(token: string, lines: unknown) {
+    const run = this.runOf(token);
+    if (!run || !Array.isArray(lines)) return { ok: true };
+    for (const l of lines.slice(0, 200)) {
+      const text = String(l ?? "").replace(/\s+$/, "");
+      if (text) this.addStep(run, { at: this.now().toISOString(), kind: "note", text: text.slice(0, 2000) });
+    }
+    this.save();
+    return { ok: true };
+  }
+
+  /** An action from a box and Karuna's decision on it. */
+  private recordAction(token: string, summary: string, outcome: "allowed" | "denied" | "waiting", proposalId?: string) {
+    const run = this.runOf(token);
+    if (!run) return;
+    const p = proposalId ? this.state.proposals.find((x) => x.id === proposalId) : undefined;
+    this.addStep(run, {
+      at: this.now().toISOString(), kind: "action", summary: summary.slice(0, 300), outcome,
+      ruleId: p?.decision.ruleId, reason: p?.decision.reason, proposalId,
+    });
+  }
+
+  /** A proposal made from inside a box (payments, messages): add it to the box's run. */
+  noteRunProposal(token: string, r: AgentResponse) {
+    const p = this.state.proposals.find((x) => x.id === r.id);
+    if (!p) return;
+    const summary = p.facts.map((f) => `${f.label}: ${f.value}`).join(" · ") || p.request.tool;
+    this.recordAction(token, summary, r.status === "pending" ? "waiting" : r.status === "denied" || r.status === "failed" ? "denied" : "allowed", p.id);
+  }
+
+  runsView(agentId?: string) {
+    const L = this.labels();
+    return (this.state.runs ?? [])
+      .filter((r) => !agentId || r.agentId === agentId)
+      .slice(-60)
+      .reverse()
+      .map((r) => runSummary(r, L.agent(r.agentId) ?? r.agentId));
+  }
+
+  runView(id: string) {
+    const r = (this.state.runs ?? []).find((x) => x.id === id);
+    if (!r) throw new GatekeeperError("No such run", 404);
+    // Held actions show their current state (approved or denied since).
+    const steps = r.steps.map((st) => {
+      if (st.kind !== "action" || !st.proposalId) return st;
+      const p = this.state.proposals.find((x) => x.id === st.proposalId);
+      return p ? { ...st, now: p.status } : st;
+    });
+    return { ...runSummary(r, this.labels().agent(r.agentId) ?? r.agentId), steps };
+  }
+
+  /** Console: stop a run now (its box stops on the next heartbeat; its network is cut at once). */
+  stopRun(id: string) {
+    const r = (this.state.runs ?? []).find((x) => x.id === id);
+    if (!r) throw new GatekeeperError("No such run", 404);
+    const s = [...this.sessions.values()].find((x) => x.runId === id);
+    if (s) {
+      s.stopRequested = true;
+      this.logEvent({ type: "run-stop-requested", agent: r.agentId, run: id });
+    }
+    this.launchStops.get(id)?.();
+    r.status = "stopped";
+    r.endedAt ??= this.now().toISOString();
+    this.save();
+    return { ok: true };
+  }
+
+  // ---- built agents: Karuna drafts, stores and runs them
+
+  /** Plain English → a draft agent (name, instructions, schedule) and the rules it needs. Never proposes. */
+  async draftAgent(text: unknown) {
+    const pol = this.requireReady();
+    const job = requireText(text, "Job", 2000);
+    const keys = Object.fromEntries(DRAFT_KEYS.map((k) => [k, this.deps.secrets?.drafterKey(k) ?? this.deps.secrets?.reveal(k) ?? null]));
+    const payees = pol.payees.map((p) => ({ address: lower(p.account), name: this.org.labels.payees[lower(p.account)] ?? p.account, category: p.category }));
+    let out: AgentDraft;
+    try {
+      out = await draftAgentSpec(job, { payees, domains: pol.domains }, keys);
+    } catch (e) {
+      if (e instanceof NoDrafterError) throw new GatekeeperError(e.message, 503);
+      throw new GatekeeperError(scrub(e), 502);
+    }
+    // The limits it needs, as rules (the same drafter as the Rules page), for every agent for now:
+    // the console scopes them to the new agent when it proposes.
+    let rules: DraftResult | null = null;
+    if (out.limits.trim()) rules = await this.draftRules(out.limits).catch(() => null);
+    return { ...out, rules: rules?.rules ?? [], rulesNote: rules?.note ?? "" };
+  }
+
+  /** Create a built agent locally (its existence, payees and rules go to Dharma from the console). */
+  buildAgent(input: { name?: unknown; instructions?: unknown; schedule?: unknown }) {
+    const instructions = requireText(input.instructions, "Instructions", 6000);
+    const schedule = parseSchedule(input.schedule);
+    const { id } = this.prepareAgent(input.name); // its token is never kept: each run gets a fresh one
+    (this.state.builtAgents ??= {})[id] = { instructions, schedule, paused: false, createdAt: this.now().toISOString() };
+    this.logEvent({ type: "agent-built", agent: id, schedule: scheduleText(schedule) });
+    this.save();
+    return { id };
+  }
+
+  updateBuiltAgent(id: string, input: { instructions?: unknown; schedule?: unknown; paused?: unknown }) {
+    const b = this.state.builtAgents?.[id];
+    if (!b) throw new GatekeeperError("Not an agent Karuna runs", 404);
+    if (input.instructions !== undefined) b.instructions = requireText(input.instructions, "Instructions", 6000);
+    if (input.schedule !== undefined) b.schedule = parseSchedule(input.schedule);
+    if (input.paused !== undefined) b.paused = input.paused === true;
+    this.logEvent({ type: "agent-built-updated", agent: id, paused: b.paused, schedule: scheduleText(b.schedule) });
+    this.save();
+    return { ok: true };
+  }
+
+  /** What a built agent's box reads at start: its instructions and why this run started. */
+  jobFor(token: string) {
+    const s = this.session(token);
+    if (!s) throw new GatekeeperError("Unknown run", 401);
+    const b = this.state.builtAgents?.[s.agentId];
+    if (!b) throw new GatekeeperError("Not an agent Karuna runs", 404);
+    const run = this.runOf(token);
+    return { agentId: s.agentId, name: this.org.labels.agents[s.agentId] ?? s.agentId, instructions: b.instructions, trigger: run?.trigger ?? "Run now", runId: run?.id ?? null, model: b.model ?? null };
+  }
+
+  /** Start a built agent now (Run now, its schedule, or a message in its inbox). */
+  runBuiltAgent(id: string, trigger = "Run now") {
+    const pol = this.requireReady();
+    const b = this.state.builtAgents?.[id];
+    if (!b) throw new GatekeeperError("Not an agent Karuna runs", 404);
+    if (!pol.agents.some((a) => a.id === id)) throw new GatekeeperError("This agent isn't on Dharma yet (waiting for the vote)", 409);
+    if (this.isFrozen()) throw new GatekeeperError("All agents are frozen", 423);
+    if ((this.state.runs ?? []).some((r) => r.agentId === id && (r.status === "starting" || r.status === "running"))) throw new GatekeeperError("It's already running", 409);
+    if (!this.deps.launcher) throw new GatekeeperError("This Gatekeeper can't start sandboxes (no launcher)", 501);
+    const run = this.newRun(id, trigger, true);
+    b.lastRunAt = run.startedAt;
+    b.inboxWaiting = false;
+    const { token } = this.rotateAgentToken(id); // a fresh token for this run only
+    this.logEvent({ type: "run-started", agent: id, run: run.id, trigger });
+    this.save();
+    const stop = this.deps.launcher({
+      agentId: id, token, runId: run.id,
+      onOutput: (line) => {
+        this.addStep(run, { at: this.now().toISOString(), kind: "note", text: line.slice(0, 2000) });
+      },
+      onExit: (code) => {
+        this.launchStops.delete(run.id);
+        if (run.status !== "stopped") run.status = code === 0 ? "done" : "failed";
+        run.exitCode = code;
+        run.endedAt = this.now().toISOString();
+        this.logEvent({ type: "run-ended", agent: id, run: run.id, code });
+        this.save();
+      },
+    });
+    this.launchStops.set(run.id, stop);
+    return { runId: run.id };
+  }
+
+  /** The scheduler: start each built agent that's due (part of housekeeping). */
+  private scheduleBuiltAgents() {
+    const pol = this.policy;
+    if (!pol || !this.deps.launcher || this.isFrozen()) return;
+    const now = this.now();
+    for (const [id, b] of Object.entries(this.state.builtAgents ?? {})) {
+      if (b.paused || !pol.agents.some((a) => a.id === id)) continue;
+      if ((this.state.runs ?? []).some((r) => r.agentId === id && (r.status === "starting" || r.status === "running"))) continue;
+      const why = dueReason(b, now);
+      if (!why) continue;
+      try {
+        this.runBuiltAgent(id, why);
+      } catch (e) {
+        this.logEvent({ type: "run-start-failed", agent: id, detail: scrub(e) });
+      }
+    }
+  }
+
+  /** The team's saved payees, as an agent may see them (the only accounts Karuna pays). */
+  agentPayees() {
+    const pol = this.requireReady();
+    return pol.payees.map((p) => ({ name: this.org.labels.payees[lower(p.account)] ?? p.account, address: lower(p.account), category: p.category }));
+  }
+
+  /** A message arrived for an agent Karuna runs "when a message arrives": start it soon. */
+  private wakeOnInbox(agentId: string) {
+    const b = this.state.builtAgents?.[agentId];
+    if (b && b.schedule.kind === "inbox" && !b.paused) b.inboxWaiting = true;
+  }
+
   /** Mint a trap set (for one agent, or all) to plant in sandboxes. */
   mintTrapSet(agentId?: unknown) {
     this.requireReady();
@@ -2061,6 +2410,7 @@ export class Gatekeeper extends EventEmitter {
       body: requireText(input.body, "Body", 4000), receivedAt: this.now().toISOString(),
     };
     this.state.inbox.push(m);
+    this.wakeOnInbox(m.agentId);
     if (this.state.inbox.length > 2000) this.state.inbox = this.state.inbox.slice(-2000);
     this.logEvent({ type: "inbox-message", agent: agentId, messageId: m.id, from: m.from });
     this.save();
@@ -2110,6 +2460,7 @@ export class Gatekeeper extends EventEmitter {
       memberName: memberNames.length ? memberNames[Math.floor(Math.random() * memberNames.length)] : undefined, now: this.now(),
     });
     this.state.inbox.push(message);
+    this.wakeOnInbox(message.agentId);
     this.state.tests.push(test);
     if (this.state.tests.length > 1000) this.state.tests = this.state.tests.slice(-1000);
     this.logEvent({ type: "shield-test-sent", testId: test.id, agent: agentId, template, category });
@@ -2257,6 +2608,10 @@ export class Gatekeeper extends EventEmitter {
             return {
               id: a.id, name: L.agent(a.id) ?? a.id, capUsd: a.capUsd, spentTodayUsd: spent[a.id] ?? 0, active: true, hasToken: !!this.org.agentTokens[a.id],
               level, record, localRecord: this.state.record?.[a.id] ?? { completed: 0, denied: 0 },
+              built: (() => {
+                const b = this.state.builtAgents?.[a.id];
+                return b ? { instructions: b.instructions, schedule: b.schedule, scheduleText: scheduleText(b.schedule), paused: b.paused, lastRunAt: b.lastRunAt ?? null } : null;
+              })(),
               eligibility: level === null ? null : levelUpEligibility(record, level),
             };
           }),
@@ -2324,6 +2679,7 @@ export class Gatekeeper extends EventEmitter {
           key: k, name: k.slice(c.name.length + 1), description: v.description, firstSeenAt: v.firstSeenAt, changed: v.changed ?? null,
         })),
       })),
+      runs: this.runsView(),
       devices: (this.state.devices ?? []).filter((d) => d.status === "pending" || d.status === "approved").slice(-50).reverse().map((d) => ({
         id: d.id, code: d.code, name: d.name, tool: d.tool, status: d.status, requestedAt: d.requestedAt, agentId: d.agentId ?? null,
         agentName: d.agentId ? (L.agent(d.agentId) ?? d.agentId) : null, lastSeenAt: d.lastSeenAt ?? null, approvedAt: d.approvedAt ?? null,

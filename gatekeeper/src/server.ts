@@ -81,7 +81,7 @@ export function agentApi(gk: Gatekeeper, sandbox?: SandboxDeps): Server {
         if (who.session) return send(res, 403, { error: "Start runs from outside the sandbox" });
         if (!sandbox) return send(res, 501, { error: "This Gatekeeper has no sandbox support" });
         const body = await readBody(req);
-        const s = gk.startSession(agentId, { host: body.host, isolation: body.isolation, desktop: body.desktop, remote: body.remote });
+        const s = gk.startSession(agentId, { host: body.host, isolation: body.isolation, desktop: body.desktop, remote: body.remote, runId: body.runId });
         const proxyPort = await sandbox.proxy.open(s.token);
         return send(res, 200, {
           session: s.token, id: s.id, agentId, proxyPort, caPem: sandbox.caPem,
@@ -93,6 +93,17 @@ export function agentApi(gk: Gatekeeper, sandbox?: SandboxDeps): Server {
         if (!who.session) return send(res, 400, { error: "Heartbeat with the run's session token" });
         const hb = await readBody(req);
         return send(res, 200, gk.heartbeat(token, { viewer: hb.viewer }));
+      }
+      // What the box printed (karuna run forwards it): the agent's own account, shown in its run.
+      if (req.method === "POST" && url.pathname === "/v1/sessions/output") {
+        if (!who.session) return send(res, 400, { error: "Send output with the run's session token" });
+        const out = await readBody(req);
+        return send(res, 200, gk.noteOutput(token, out.lines));
+      }
+      // A built agent's box asks what to do this run.
+      if (req.method === "GET" && url.pathname === "/v1/job") {
+        if (!who.session) return send(res, 400, { error: "Ask from inside the run" });
+        return send(res, 200, gk.jobFor(token));
       }
       if (req.method === "DELETE" && url.pathname === "/v1/sessions") {
         if (who.session) gk.endSession(token, "runner exited");
@@ -107,7 +118,9 @@ export function agentApi(gk: Gatekeeper, sandbox?: SandboxDeps): Server {
         const body = await readBody(req);
         const action = body.action as AgentAction | undefined;
         if (!action || typeof action !== "object") return send(res, 400, { error: "action is required" });
-        return send(res, 200, await gk.propose(agentId, action, body.reason as string | undefined));
+        const r = await gk.propose(agentId, action, body.reason as string | undefined);
+        if (who.session) gk.noteRunProposal(token, r);
+        return send(res, 200, r);
       }
       // Claude Code / Cursor: decide one tool call before it runs; wait for a member when it's held.
       if (req.method === "POST" && url.pathname === "/v1/hook") {
@@ -121,6 +134,7 @@ export function agentApi(gk: Gatekeeper, sandbox?: SandboxDeps): Server {
         return send(res, 200, { status: await gk.waitForDecision(hw[1], ms) });
       }
       if (req.method === "GET" && url.pathname === "/v1/inbox") return send(res, 200, { messages: gk.agentInbox(agentId) });
+      if (req.method === "GET" && url.pathname === "/v1/payees") return send(res, 200, { payees: gk.agentPayees() });
       const r = url.pathname.match(/^\/v1\/inbox\/([\w-]+)\/report$/);
       if (req.method === "POST" && r) {
         const body = await readBody(req);
@@ -168,6 +182,8 @@ export function consoleApi(
         return;
       }
       if (method === "GET" && path === "/state") return send(res, 200, gk.snapshot());
+      if (method === "GET" && path === "/runs") return send(res, 200, gk.runsView(url.searchParams.get("agent") ?? undefined));
+      if (method === "GET" && path.startsWith("/runs/")) return send(res, 200, gk.runView(decodeURIComponent(path.slice("/runs/".length))));
       // Sign in with email (Circle). The API key stays here; the browser gets only per-login tokens.
       if (method === "GET" && path === "/auth/config") return send(res, 200, { email: circle.enabled, appId: circle.enabled ? circle.appId : null });
       if (method === "GET" && path === "/sandbox/ca") {
@@ -212,6 +228,12 @@ export function consoleApi(
       if (method === "POST" && (m = path.match(/^\/devices\/([\w-]+)\/deny$/))) return send(res, 200, gk.denyDevice(m[1]));
       if (method === "POST" && (m = path.match(/^\/devices\/([\w-]+)\/revoke$/))) return send(res, 200, gk.revokeDevice(m[1]));
       if (method === "POST" && (m = path.match(/^\/connectors\/tools\/(.+)\/accept$/))) return send(res, 200, gk.acceptToolChange(decodeURIComponent(m[1])));
+      // Agents Karuna builds and runs, and every run's timeline.
+      if (method === "POST" && path === "/agents/draft") return send(res, 200, await gk.draftAgent(body.text));
+      if (method === "POST" && path === "/agents/build") return send(res, 200, gk.buildAgent(body));
+      if (method === "PATCH" && (m = path.match(/^\/agents\/([\w-]+)\/built$/))) return send(res, 200, gk.updateBuiltAgent(m[1], body));
+      if (method === "POST" && (m = path.match(/^\/agents\/([\w-]+)\/run$/))) return send(res, 200, gk.runBuiltAgent(m[1], "Run now"));
+      if (method === "POST" && (m = path.match(/^\/runs\/([\w-]+)\/stop$/))) return send(res, 200, gk.stopRun(m[1]));
       if (method === "POST" && path === "/auth/email/start") return send(res, 200, await circle.emailToken(String(body.email ?? ""), String(body.deviceId ?? "")));
       if (method === "POST" && path === "/auth/circle/init") return send(res, 200, await circle.initialize(String(body.userToken ?? "")));
       if (method === "POST" && path === "/auth/circle/wallet") return send(res, 200, await circle.wallet(String(body.userToken ?? "")));
