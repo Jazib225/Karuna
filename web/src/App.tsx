@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import type { Address } from "viem";
 import { isAddr, decodeChange, describeChange, describeScope, waitText, type Change } from "@prekaruna/dharma";
-import { api, useGatekeeper, type LooseningPreview, type AgentView, type Governance, type LogEntry, type Proposal, type Rule, type Snapshot, type WalletInfo } from "./api.ts";
+import { api, useGatekeeper, type LooseningPreview, type AgentView, type AgentDraftView, type Governance, type LogEntry, type Proposal, type Rule, type RunDetail, type RunStep, type Schedule, type Snapshot, type WalletInfo } from "./api.ts";
 import { Kind, SignerUnavailable, decidePayment, loadSigner, submitChange, type Signer } from "./signer.ts";
 import { emailSignInAvailable, emailSigner, loadEmailSession, signInWithEmail, signOutEmail, type EmailSession } from "./circle.ts";
 import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
 import { Palette, type Command } from "./palette.tsx";
 import { keccak256, stringToHex } from "viem";
-import { PREVIEW, previewLog, previewSigner, previewSnapshot, previewWallet } from "./preview.ts";
+import { PREVIEW, previewLog, previewRun, previewSigner, previewSnapshot, previewWallet } from "./preview.ts";
 import { Badge, Icon, type IconName } from "./icons.tsx";
 import { IN_APP, getIslandEnabled, setDesktopSigner, setIslandEnabled } from "./desktop.ts";
 import { setThemePref, useThemePref, type ThemePref } from "./theme.ts";
@@ -1106,6 +1106,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
   const [form, setForm] = useState({ name: "", cap: "1" });
   const [reveal, setReveal] = useState<{ token: string; agent: string; agentId: string } | null>(null);
   const [editing, setEditing] = useState<Record<string, string>>({});
+  const [runsFor, setRunsFor] = useState<string | null>(null);
   const levels = hasLevels(s);
   // On Dharma v3 a level sets what an agent may spend; the meter shows that level's daily limit.
   const limited = (a: AgentView): AgentView => (levels && a.level != null ? { ...a, capUsd: pol.levelLimits![a.level]?.dailyUsd ?? 0 } : a);
@@ -1123,6 +1124,8 @@ function Agents({ ctx }: { ctx: Ctx }) {
   return (
     <div className="stack">
       {reveal && <TokenReveal {...reveal} onDone={() => setReveal(null)} />}
+      {runsFor && <RunsPanel ctx={ctx} agentId={runsFor} onClose={() => setRunsFor(null)} />}
+      <NewAgent ctx={ctx} />
       <form className="card inline-form" onSubmit={add}>
         <label className="field grow"><span>Agent name</span><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Accounts payable agent" /></label>
         {!levels && <label className="field"><span>Daily allowance (USD)</span><input required type="number" min="0" step="0.000001" value={form.cap} onChange={(e) => setForm({ ...form, cap: e.target.value })} /></label>}
@@ -1148,6 +1151,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
                 </div>
                 {a.active && <Meter a={limited(a)} frozen={!!s.frozen} />}
                 {a.active && levels && <AgentLevel a={a} ctx={ctx} />}
+                {a.active && a.built && <BuiltControls a={a} ctx={ctx} openRuns={() => setRunsFor(a.id)} />}
                 {a.active && (
                   <div className="meta">
                     {levels ? null : ed === undefined ? (
@@ -1171,6 +1175,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
                 )}
                 <div className="agent-actions">
                   <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => run(async () => { const r = await api<{ token: string }>(`/agents/${a.id}/rotate-token`, {}); setReveal({ token: r.token, agent: a.name, agentId: a.id }); })}>{a.hasToken ? "Rotate token" : "Issue token"}</button>
+                  {(s.runs ?? []).some((r) => r.agentId === a.id) && <button className="btn btn-ghost btn-sm" onClick={() => setRunsFor(a.id)}>Runs</button>}
                   {a.active && <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => confirm(`Propose removing ${a.name} from Dharma? It goes to a team vote.`) && ctx.change({ op: "RemoveAgent", id: a.id })}>Propose removal</button>}
                 </div>
               </div>
@@ -2215,6 +2220,238 @@ function Computers({ ctx }: { ctx: Ctx }) {
         })}
       </div>
       <div className="log-foot"><span>every tool call is checked against your rules before it runs</span><span>connected computers can be disconnected at any time</span></div>
+    </div>
+  );
+}
+
+// ============================================================== new agent (Karuna builds and runs it)
+
+const SCHEDULE_TEXT = (s: Schedule) =>
+  s.kind === "every" ? (s.minutes! % 60 === 0 ? `Every ${s.minutes! / 60} h` : `Every ${s.minutes} min`) : s.kind === "daily" ? `Daily at ${s.at}` : s.kind === "inbox" ? "When a message arrives in its inbox" : "Only when started";
+
+function ScheduleFields({ value, onChange }: { value: Schedule; onChange: (s: Schedule) => void }) {
+  return (
+    <div className="row-form">
+      <select className="select-sm" aria-label="When it runs" value={value.kind} onChange={(e) => {
+        const kind = e.target.value as Schedule["kind"];
+        onChange(kind === "every" ? { kind, minutes: value.minutes ?? 60 } : kind === "daily" ? { kind, at: value.at ?? "09:00" } : { kind });
+      }}>
+        <option value="manual">Only when started</option>
+        <option value="every">Every…</option>
+        <option value="daily">Daily at…</option>
+        <option value="inbox">When a message arrives</option>
+      </select>
+      {value.kind === "every" && <label className="inline-field"><input className="select-sm mono" type="number" min={15} step={15} value={value.minutes} onChange={(e) => onChange({ ...value, minutes: Number(e.target.value) })} /> minutes</label>}
+      {value.kind === "daily" && <input className="select-sm mono" type="time" aria-label="Time" value={value.at} onChange={(e) => onChange({ ...value, at: e.target.value })} />}
+    </div>
+  );
+}
+
+/** Describe a job; Karuna drafts the agent; members review and propose it; Karuna runs it. */
+function NewAgent({ ctx }: { ctx: Ctx }) {
+  const { s, run, busy, me } = ctx;
+  const [job, setJob] = useState("");
+  const [drafting, setDrafting] = useState(false);
+  const [err, setErr] = useState("");
+  const [d, setD] = useState<AgentDraftView | null>(null);
+  const [keep, setKeep] = useState<Record<number, boolean>>({});
+  const draft = async () => {
+    setDrafting(true);
+    setErr("");
+    try {
+      const r = await api<AgentDraftView>("/agents/draft", { text: job });
+      setD(r);
+      setKeep(Object.fromEntries(r.rules.map((_, i) => [i, true])));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDrafting(false);
+    }
+  };
+  const propose = () =>
+    run(async () => {
+      if (!d) return;
+      const dharma = s.org.dharma!.address as Address;
+      const { id } = await api<{ id: string }>("/agents/build", { name: d.name, instructions: d.instructions, schedule: d.schedule });
+      await submitChange(me, dharma, { kind: Kind.Propose, change: { op: "SetAgent", id, capUsd: 0 }, label: d.name });
+      // Its limits apply to it alone.
+      for (const [i, r] of d.rules.entries()) if (keep[i]) await submitChange(me, dharma, { kind: Kind.Propose, change: { ...r.change, agent: id } });
+      setD(null);
+      setJob("");
+    }, `Proposed. Karuna runs it once the vote passes (${s.policy!.timelock}s), starting at Level 0`);
+  return (
+    <div className="card new-agent">
+      <div className="hd"><h2>New agent</h2><span className="sub">Karuna builds and runs it</span></div>
+      <div className="pad stack-sm">
+        {!d ? (
+          <>
+            <textarea aria-label="Describe the job" rows={3} value={job} onChange={(e) => setJob(e.target.value)} placeholder="e.g. Every morning, check grain prices; if flour is under $35, order from Valley Flour, up to $50 a week." />
+            {err && <p className="err-text">{err}</p>}
+            <div className="row-form"><button className="btn btn-dark" disabled={drafting || job.trim().length < 10} onClick={draft}>{drafting ? <span className="shimmer">Drafting…</span> : "Draft the agent"}</button></div>
+          </>
+        ) : (
+          <>
+            <label className="field"><span>Name</span><input value={d.name} onChange={(e) => setD({ ...d, name: e.target.value })} /></label>
+            <label className="field"><span>Instructions</span><textarea rows={5} value={d.instructions} onChange={(e) => setD({ ...d, instructions: e.target.value })} /></label>
+            <div className="field"><span>When it runs</span><ScheduleFields value={d.schedule} onChange={(schedule) => setD({ ...d, schedule })} /></div>
+            {d.rules.length > 0 && (
+              <div className="field">
+                <span>Its limits (voted with it)</span>
+                {d.rules.map((r, i) => (
+                  <label className="check-row" key={r.change.id}><input type="checkbox" checked={!!keep[i]} onChange={(e) => setKeep({ ...keep, [i]: e.target.checked })} /> {r.sentence.replace(/ for every agent/, "")}</label>
+                ))}
+              </div>
+            )}
+            {(d.note || d.rulesNote) && <p className="muted small">{[d.note, d.rulesNote].filter(Boolean).join(" ")}</p>}
+            <p className="muted small">It starts at Level 0: small payments only, everything else waits for a member until it earns more.</p>
+            <div className="row-form">
+              <button className="btn btn-ghost" onClick={() => setD(null)}>Back</button>
+              <button className="btn btn-dark" disabled={busy || !d.name.trim() || !d.instructions.trim()} onClick={propose}><Icon name="pen" size={14} /> Propose agent</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** On a built agent's card: schedule, Run now, Pause, Edit instructions. */
+function BuiltControls({ a, ctx, openRuns }: { a: AgentView; ctx: Ctx; openRuns: () => void }) {
+  const { run, busy } = ctx;
+  const b = a.built!;
+  const [editing, setEditing] = useState<string | null>(null);
+  return (
+    <div className="built">
+      <div className="level-row">
+        <span className="tag" title="When Karuna starts it"><Icon name="clock" size={11} /> {b.scheduleText}{b.paused ? " · paused" : ""}</span>
+        <span className="muted small">{b.lastRunAt ? `last run ${ago(b.lastRunAt)}` : "hasn't run yet"}</span>
+      </div>
+      {editing !== null ? (
+        <div className="stack-sm">
+          <textarea rows={5} aria-label="Instructions" value={editing} onChange={(e) => setEditing(e.target.value)} />
+          <div className="row-form">
+            <button className="btn btn-ghost btn-sm" onClick={() => setEditing(null)}>Cancel</button>
+            <button className="btn btn-dark btn-sm" disabled={busy || !editing.trim() || editing === b.instructions}
+              onClick={() => confirm(`Change ${a.name}'s instructions?\n\nNow:\n${b.instructions}\n\nNew:\n${editing}`) && run(() => api(`/agents/${a.id}/built`, { instructions: editing }, "PATCH"), "Instructions changed").then((ok) => ok && setEditing(null))}>Save</button>
+          </div>
+        </div>
+      ) : (
+        <div className="agent-actions">
+          <button className="btn btn-dark btn-sm" disabled={busy || b.paused} onClick={() => run(() => api(`/agents/${a.id}/run`, {}).then(openRuns), "Started")}>Run now</button>
+          <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => run(() => api(`/agents/${a.id}/built`, { paused: !b.paused }, "PATCH"), b.paused ? "Resumed" : "Paused")}>{b.paused ? "Resume" : "Pause"}</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => setEditing(b.instructions)}>Edit instructions</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================== the Runs view
+
+/** One agent's runs; open one for its live timeline. */
+function RunsPanel({ ctx, agentId, onClose }: { ctx: Ctx; agentId: string; onClose: () => void }) {
+  const { s } = ctx;
+  const runs = (s.runs ?? []).filter((r) => r.agentId === agentId);
+  const [open, setOpen] = useState<string | null>(runs[0]?.id ?? null);
+  useEffect(() => {
+    if (!open && runs[0]) setOpen(runs[0].id);
+  }, [runs[0]?.id]);
+  const name = s.policy!.agents.find((a) => a.id === agentId)?.name ?? agentId;
+  return (
+    <div className="card runs-panel rise">
+      <div className="hd"><h2>Runs · {name}</h2><button className="btn btn-ghost btn-sm" onClick={onClose}><Icon name="x" size={12} /> Close</button></div>
+      {runs.length === 0 ? (
+        <Empty icon="activity">No runs yet.</Empty>
+      ) : (
+        <div className="runs-split">
+          <div className="runs-list">
+            {runs.map((r) => (
+              <button key={r.id} className={`run-item ${open === r.id ? "on" : ""}`} onClick={() => setOpen(r.id)}>
+                <span className={`run-dot ${r.status}`} />
+                <span><b>{r.trigger}</b><small>{ago(r.startedAt)} · {r.actions} action{r.actions === 1 ? "" : "s"}{r.waiting ? ` · ${r.waiting} waiting` : ""}</small></span>
+              </button>
+            ))}
+          </div>
+          {open && <RunTimeline ctx={ctx} id={open} />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RunTimeline({ ctx, id }: { ctx: Ctx; id: string }) {
+  const { s, me, run, busy } = ctx;
+  const [r, setR] = useState<RunDetail | null>(null);
+  const summary = (s.runs ?? []).find((x) => x.id === id);
+  // Live while it runs: refetch on every change the console hears about (and every 3 s as a fallback).
+  useEffect(() => {
+    let alive = true;
+    const load = () => (PREVIEW ? setR(previewRun(id)) : void api<RunDetail>(`/runs/${id}`).then((x) => alive && setR(x)).catch(() => undefined));
+    load();
+    const t = setInterval(load, 3000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [id, summary?.steps, summary?.status]);
+  if (!r) return <div className="run-timeline"><Loading text="Loading the run…" /></div>;
+  const steps: RunStep[] = r.steps;
+  const live = r.status === "running" || r.status === "starting";
+  const session = s.sandbox.sessions.find((x) => x.agentId === r.agentId);
+  const decide = (proposalId: string, approve: boolean) => {
+    const p = s.proposals.find((x) => x.id === proposalId);
+    if (!p) return;
+    run(() => decidePayment(me, s.org.dharma!.address as Address, p.id, p.payloadHash ?? "0".repeat(64), approve), approve ? "Approved" : "Denied");
+  };
+  return (
+    <div className="run-timeline">
+      <div className="run-head">
+        <span className={`badge ${live ? "badge-allow" : r.status === "done" ? "badge-quiet" : "badge-danger"}`}>{live ? "running" : r.status}</span>
+        <span className="small">{r.trigger} · started {ago(r.startedAt)}{r.host ? ` · ${r.host}` : ""}</span>
+        <span className="small muted">{r.models.length ? `Model: ${r.models.join(", ")}` : ""}</span>
+        <span className="run-head-actions">
+          {session?.viewer && !session.remote && live && <a className="btn btn-ghost btn-sm" href={session.viewer} target="_blank" rel="noreferrer">Watch screen <Icon name="external" size={12} /></a>}
+          {live && <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => confirm("Stop this run now?") && run(() => api(`/runs/${r.id}/stop`, {}), "Stopping")}>Stop</button>}
+        </span>
+      </div>
+      {!r.reasoningVisible && <p className="notice small">This agent's reasoning isn't visible; only its actions are.</p>}
+      {steps.length === 0 && <p className="muted small pad">{live ? <span className="shimmer">Starting…</span> : "Nothing recorded."}</p>}
+      <ol className="steps">
+        {steps.map((st, i) => (
+          <li key={i} className={`step ${st.kind}`}>
+            <span className="step-time mono">{new Date(st.at).toLocaleTimeString()}</span>
+            {st.kind === "model" && (
+              <div className="step-body">
+                <div className="step-title">{st.exchange.model || "Model"} <span className="muted">· {st.exchange.provider}</span></div>
+                {st.exchange.asked && <details><summary className="muted small">Asked</summary><pre className="snippet">{st.exchange.asked}</pre></details>}
+                {st.exchange.thinking && <details><summary className="muted small">Reasoning</summary><pre className="snippet">{st.exchange.thinking}</pre></details>}
+                {st.exchange.said && <p className="step-said">{st.exchange.said}</p>}
+                {st.exchange.toolCalls.map((t, k) => <div key={k} className="tool-call mono small">→ {t.name} {t.input.length > 2 ? t.input : ""}</div>)}
+              </div>
+            )}
+            {st.kind === "raw-model" && <div className="step-body"><div className="step-title">Model call · {st.provider}</div><p className="muted small">Not decoded ({st.status}).</p></div>}
+            {st.kind === "action" && (() => {
+              const now = st.now === "allowed" || st.now === "executed" ? "approved" : st.now === "denied" ? "denied" : st.outcome;
+              return (
+                <div className="step-body">
+                  <div className="step-title">
+                    <Badge v={now === "denied" ? "deny" : now === "waiting" ? "approval" : "allow"}>{now === "waiting" ? "waiting" : now === "approved" ? "approved" : now}</Badge>
+                    <span className="mono small">{st.summary}</span>
+                  </div>
+                  {st.reason && now !== "allowed" && <p className="muted small">{st.reason}</p>}
+                  {now === "waiting" && st.proposalId && (
+                    <div className="row-form">
+                      <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => decide(st.proposalId!, false)}>Deny</button>
+                      <button className="btn btn-approve btn-sm" disabled={busy} onClick={() => decide(st.proposalId!, true)}><Icon name="pen" size={14} /> Approve</button>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+            {st.kind === "note" && <div className="step-body"><div className="step-title muted small">The agent's own notes</div><pre className="snippet note">{st.text}</pre></div>}
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }

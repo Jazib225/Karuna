@@ -74,6 +74,35 @@ export interface AgentView {
   /** The agent's record, rebuilt by the relay from Dharma's events (QuickNode Stream). */
   record?: AgentRecord | null;
   eligibility?: { eligible: boolean; target: number | null; needed: number; have: number } | null;
+  /** An agent Karuna builds and runs (instructions and schedule live in the Gatekeeper). */
+  built?: { instructions: string; schedule: Schedule; scheduleText: string; paused: boolean; lastRunAt: string | null } | null;
+}
+
+export interface Schedule { kind: "manual" | "every" | "daily" | "inbox"; minutes?: number; at?: string }
+
+export interface RunSummary {
+  id: string; agentId: string; agentName: string; trigger: string; startedAt: string; endedAt: string | null;
+  status: "starting" | "running" | "done" | "failed" | "stopped"; built: boolean; host: string | null;
+  steps: number; actions: number; models: string[]; reasoningVisible: boolean; waiting: number;
+}
+
+export interface ModelExchange {
+  provider: string; model: string; asked: string; system: string; toolsOffered: string[]; said: string; thinking: string;
+  toolCalls: { name: string; input: string }[]; stopReason: string; tokensIn?: number; tokensOut?: number;
+}
+
+export type RunStep =
+  | { at: string; kind: "model"; exchange: ModelExchange; status: number }
+  | { at: string; kind: "raw-model"; url: string; provider: string; status: number }
+  | { at: string; kind: "action"; summary: string; outcome: "allowed" | "denied" | "waiting"; ruleId?: string; reason?: string; proposalId?: string; now?: string }
+  | { at: string; kind: "note"; text: string };
+
+export type RunDetail = Omit<RunSummary, "steps"> & { steps: RunStep[] };
+
+export interface AgentDraftView {
+  name: string; instructions: string; schedule: Schedule; limits: string; note: string; model: string;
+  rules: { sentence: string; change: { op: "AddRule"; id: string; outcome: "Deny" | "Approval" | "Allow"; agent?: string; scope: string; target: string; maxUsd?: number } }[];
+  rulesNote: string;
 }
 
 export interface AgentRecord {
@@ -131,6 +160,8 @@ export interface Snapshot {
   devices?: DeviceView[];
   /** The team's connectors (MCP servers), reached only through Karuna. */
   connectors?: ConnectorView[];
+  /** Recent runs (sandboxed agents): open one for its timeline. */
+  runs?: RunSummary[];
   frozen: null | false | { by: string | null; at: string; confirmed: boolean };
   enrollments: { address: string; name: string; requestedAt: string }[];
   shield: {
