@@ -2468,14 +2468,12 @@ function Connectors({ ctx }: { ctx: Ctx }) {
   const rule = (n: string) => s.policy!.rules.find((r) => r.active && r.scope === `connector:${n}`);
   return (
     <div className="stack">
+      <p className="page-line">Chat apps reach these tools only through Karuna, so every call follows your rules.</p>
       <form className="card inline-form" onSubmit={(e) => { e.preventDefault(); ctx.change({ op: "AddRule", id: `conn-${name}`.slice(0, 31), outcome: "Allow", scope: `connector:${name}`, target: form.url.trim() }).then((done) => done && setForm({ name: "", url: "" })); }}>
         <label className="field"><span>Name</span><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. github" /></label>
         <label className="field grow"><span>Address (MCP, https)</span><input required className="mono" value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} placeholder="https://api.example.com/mcp" /></label>
         <button className="btn btn-dark" type="submit" disabled={busy || !ok}><Icon name="plus" /> Propose connector</button>
       </form>
-      <InfoBox id="connectors" icon="plug">
-        <p>Chat apps connected to Karuna get these connectors' tools through Karuna, so every call follows your rules: read-only tools run, others wait for a member until a rule or a trust level allows them. Add a key with the connector's name on the Keys page to sign in to it; the chat app never sees it.</p>
-      </InfoBox>
       {list.length === 0 ? (
         <div className="card"><Empty icon="plug">No connectors yet. Propose one above; it's added after the vote.</Empty></div>
       ) : list.map((c) => (

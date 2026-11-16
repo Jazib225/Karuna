@@ -862,3 +862,6 @@ html, body, * { scrollbar-width: none; }
   .runs-split { grid-template-columns: 1fr; }
   .runs-list { border-right: 0; border-bottom: 1px solid var(--line); max-height: 220px; }
 }
+
+/* One line at the top of a page */
+.page-line { margin: 0; color: var(--n500); font-size: 14px; }
