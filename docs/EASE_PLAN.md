@@ -232,3 +232,11 @@ Where each piece comes from:
 
 A "Karuna without code" section: signing in with email, connecting a chat app, building an agent,
 and what each one does and doesn't cover.
+
+## Next: fast Dharma writes
+
+Today every Dharma write (proposals, votes, approvals' signals, freezes, log anchors) goes through
+the Circle agent wallet, which can take minutes on testnet. Give the Gatekeeper its own key for
+Dharma writes (an EOA topped up with test USDC for gas from the faucet) so they land in about a
+second; the Circle agent wallet keeps holding the money and making every payment. Dharma's
+Gatekeeper address is set at deploy, so the dev org is set up once more after this.
