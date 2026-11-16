@@ -210,11 +210,12 @@ source is live (`QuickNode` or `Arc`). Setup: [`docs/QUICKNODE.md`](docs/QUICKNO
 ## Karuna without code
 For people who don't write code, and for coders who just want their AI kept safe.
 
-**Sign in with email.** Members open Karuna on any device and sign in with their email: Circle emails
-a code (Circle user-controlled wallets, an EOA on Arc), the same account everywhere, so one person is
-one member with one vote. Each vote and approval is confirmed in Circle's window. The Gatekeeper
-holds the Circle API key (`CIRCLE_API_KEY`, `CIRCLE_APP_ID` in `.env`); the browser only gets
-per-login tokens. EOA signatures are plain ECDSA, so Dharma checks them exactly like a device key.
+**Sign in with email and password.** Members sign in on any device with an email and a password: the
+same member everywhere, one vote. The browser locks the member's signing key with the password
+before anything is sent, so Karuna stores only a locked key and a proof of the password; it never
+sees either, and hands the locked key only to someone who proves the password. Creating an account
+saves the key the device already uses, so an existing member stays the same member. A forgotten
+password can't be reset (nothing is emailed): a teammate adds the person back.
 
 **Claude Code and Cursor: every tool call goes through Karuna.** Add Karuna's plugin once:
 ```
@@ -264,7 +265,6 @@ visible; only its actions are."
 | **Circle Agent Wallet** (SCA on `ARC-TESTNET`) | the organization's wallet, held **only** by the Gatekeeper; agents never see it |
 | **Circle CLI** | `circle wallet transfer` (USDC bills), `circle services pay` (x402 purchases, `--estimate` first for Exact Match), `circle wallet execute` (Dharma writes), `circle contract deploy` (each org's Dharma code and proxy), `circle gateway balance`, `circle wallet list` |
 | **x402 + Gateway Nanopayments** | agents buy data per request (e.g. $0.001); the Gatekeeper pays from the wallet's Gateway balance and hands the agent only the response |
-| **User-controlled wallets** (email login, EOA on `ARC-TESTNET`) | members sign in with an email; one account on every device signs their votes and approvals |
 
 ## Run it locally
 ```bash
@@ -335,7 +335,7 @@ Every pull request runs these on GitHub (CI) and needs the owner's review before
 pnpm --dir engine test       # policy engine, every rule kind, Dharma rule ordering, signed log
 pnpm --dir contracts test    # Dharma + proxy (forge): tiers, waits, skip, freeze-cancel, upgrades, trust levels
 pnpm --dir gatekeeper test   # gatekeeper on the real Dharma (anvil): levels, watchdog, v2→v3 upgrade, proxy, drafter,
-                             # email sign-in, Claude Code hook, chat connector + connectors, built agents, runs
+                             # password accounts, Claude Code hook, chat connector + connectors, built agents, runs
 pnpm --dir relay test        # QuickNode signature, replay, decoding, both filters, agent records
 pnpm --dir agents check:no-keys
 # live, on Arc testnet (needs the test seller running):

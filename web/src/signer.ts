@@ -17,6 +17,29 @@ export class SignerUnavailable extends Error {}
 /** What signs: this device's key, or the person's email account (`email` is set for that one). */
 export type Signer = Pick<PrivateKeyAccount, "address" | "signTypedData"> & { email?: string };
 
+/** Use this key on this device from now on (signing in to an account). */
+export function saveSignerKey(key: Hex) {
+  localStorage.setItem(STORAGE_KEY, key);
+}
+
+/** Forget this device's key (signing out); a fresh one is made on next load. */
+export function clearSigner() {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    /* nothing stored */
+  }
+}
+
+/** This device's raw key, to save it to an account. */
+export function signerKey(): Hex | null {
+  try {
+    return localStorage.getItem(STORAGE_KEY) as Hex | null;
+  } catch {
+    return null;
+  }
+}
+
 /** Load this browser's key, creating it on first use. Throws if storage is unavailable. */
 export function loadSigner(): PrivateKeyAccount {
   let key: string | null;

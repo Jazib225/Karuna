@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEven
 import type { Address } from "viem";
 import { isAddr, decodeChange, describeChange, describeScope, waitText, type Change } from "@prekaruna/dharma";
 import { api, useGatekeeper, type LooseningPreview, type AgentView, type AgentDraftView, type Governance, type LogEntry, type Proposal, type Rule, type RunDetail, type RunStep, type Schedule, type Snapshot, type WalletInfo } from "./api.ts";
-import { Kind, SignerUnavailable, decidePayment, loadSigner, submitChange, type Signer } from "./signer.ts";
-import { emailSignInAvailable, emailSigner, loadEmailSession, signInWithEmail, signOutEmail, type EmailSession } from "./circle.ts";
+import { Kind, SignerUnavailable, decidePayment, loadSigner, signerKey, submitChange, type Signer } from "./signer.ts";
+import { accountEmail, createAccount, signIn as accountSignIn, signOut as accountSignOut } from "./account.ts";
 import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
 import { Palette, type Command } from "./palette.tsx";
 import { keccak256, stringToHex } from "viem";
@@ -144,26 +144,34 @@ const useConsoleData = PREVIEW ? usePreviewGatekeeper : useGatekeeper;
 
 export default function App() {
   const gk = useConsoleData();
-  // Who signs: the person's email account if they signed in with it, else this device's key.
-  const [emailSession, setEmailSession] = useState<EmailSession | null>(() => (PREVIEW ? null : loadEmailSession()));
-  const device = useMemo<{ me: Signer | null; error: string | null }>(() => {
+  // Who signs: this device's key, which is your account's key once you sign in with email + password.
+  const [keyVersion, setKeyVersion] = useState(0);
+  const [email, setEmail] = useState<string | null>(() => (PREVIEW ? null : accountEmail()));
+  const signer = useMemo<{ me: Signer | null; error: string | null }>(() => {
     if (PREVIEW) return { me: previewSigner, error: null };
     try {
       return { me: loadSigner(), error: null };
     } catch (e) {
       return { me: null, error: e instanceof SignerUnavailable ? e.message : String(e) };
     }
-  }, []);
-  const signer = useMemo<{ me: Signer | null; error: string | null }>(
-    () => (emailSession ? { me: emailSigner(emailSession, () => setEmailSession(null)), error: null } : device),
-    [emailSession, device],
-  );
+  }, [keyVersion]);
   const account: AccountCtl = {
-    session: emailSession,
-    signIn: async (email) => setEmailSession(await signInWithEmail(email)),
+    email,
+    signIn: async (e, pw) => {
+      await accountSignIn(e, pw);
+      setEmail(accountEmail());
+      setKeyVersion((v) => v + 1);
+    },
+    create: async (e, pw) => {
+      const key = signerKey();
+      if (!key) throw new Error("This device has no key to save");
+      await createAccount(e, pw, key);
+      setEmail(accountEmail());
+    },
     signOut: () => {
-      signOutEmail();
-      setEmailSession(null);
+      accountSignOut();
+      setEmail(null);
+      setKeyVersion((v) => v + 1);
     },
   };
   const [flash, setFlash] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
@@ -360,45 +368,46 @@ function Join({ s, me, run, busy, account }: { s: Snapshot; me: Signer; run: Run
 // ============================================================== who signs: email account or this device's key
 
 interface AccountCtl {
-  session: EmailSession | null;
-  signIn: (email: string) => Promise<void>;
+  email: string | null;
+  signIn: (email: string, password: string) => Promise<void>;
+  create: (email: string, password: string) => Promise<void>;
   signOut: () => void;
 }
 
-/** Shown wherever someone is identified: setup, join, and the "no key" screen. */
+/** Sign in with email and password, or save this device's key to a new account. */
 function AccountBox({ me, account, run, busy }: { me: Signer | null; account: AccountCtl; run: Run; busy: boolean }) {
-  const [available, setAvailable] = useState<boolean | null>(null);
-  const [email, setEmail] = useState("");
-  useEffect(() => {
-    if (PREVIEW) return void setAvailable(true);
-    void emailSignInAvailable().then((c) => setAvailable(c.email));
-  }, []);
-  if (account.session) {
+  const [mode, setMode] = useState<"in" | "create">("in");
+  const [form, setForm] = useState({ email: "", password: "", again: "" });
+  if (account.email) {
     return (
       <div className="keybox">
-        <span className="field-label"><Icon name="check" size={14} /> Signed in with email</span>
-        <div><b>{account.session.email}</b> <span className="mono small muted">{short(account.session.address)}</span></div>
-        <div className="small muted">The same account on every device. Each vote and approval asks you to confirm in Circle's window. <button type="button" className="link-btn" onClick={account.signOut}>Use this device's key instead</button></div>
+        <span className="field-label"><Icon name="check" size={14} /> Signed in</span>
+        <div><b>{account.email}</b>{me && <span className="mono small muted"> {short(me.address)}</span>}</div>
+        <div className="small muted">The same member on every device you sign in on. <button type="button" className="link-btn" onClick={account.signOut}>Sign out</button></div>
       </div>
     );
   }
+  const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim()) && form.password.length >= (mode === "create" ? 10 : 1) && (mode === "in" || form.password === form.again);
   return (
     <div className="keybox">
-      {available && (
-        <div className="email-signin">
-          <span className="field-label"><Icon name="key" size={14} /> Sign in with email</span>
-          <div className="row-form">
-            <input type="email" aria-label="Email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" />
-            <button type="button" className="btn btn-dark" disabled={busy || !email.includes("@")} onClick={() => run(() => account.signIn(email), "Signed in")}>Send code</button>
-          </div>
-          <div className="small muted">One account on every device. Circle emails you a code; no passwords or seed phrases.</div>
+      <div className="email-signin">
+        <span className="field-label"><Icon name="key" size={14} /> {mode === "in" ? "Sign in" : "Save this device's key to an account"}</span>
+        <input type="email" aria-label="Email" autoComplete="username" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="you@company.com" />
+        <input type="password" aria-label="Password" autoComplete={mode === "in" ? "current-password" : "new-password"} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder={mode === "in" ? "Password" : "Password (10+ characters)"} />
+        {mode === "create" && <input type="password" aria-label="Password again" autoComplete="new-password" value={form.again} onChange={(e) => setForm({ ...form, again: e.target.value })} placeholder="Password again" />}
+        <div className="row-form">
+          <button type="button" className="btn btn-dark" disabled={busy || !ok}
+            onClick={() => run(() => (mode === "in" ? account.signIn(form.email, form.password) : account.create(form.email, form.password)), mode === "in" ? "Signed in" : "Account created")}>
+            {mode === "in" ? "Sign in" : "Create account"}
+          </button>
+          <button type="button" className="link-btn small" onClick={() => setMode(mode === "in" ? "create" : "in")}>{mode === "in" ? "Create an account instead" : "I have an account"}</button>
         </div>
-      )}
+        <div className="small muted">{mode === "in" ? "Use the same email and password on any device." : "Your password locks your key in this browser; Karuna can't open it or reset it."}</div>
+      </div>
       {me && (
-        <div className={available ? "device-key" : ""}>
-          <span className="field-label"><Icon name="key" size={14} /> {available ? "Or use this device's key" : "Your signing key · made in this browser"}</span>
+        <div className="device-key">
+          <span className="field-label"><Icon name="key" size={14} /> This device's key</span>
           <div className="mono">{me.address}</div>
-          {!available && <div className="small muted">Every vote and approval you make is signed with it, here. Keep using this browser for Karuna.</div>}
         </div>
       )}
     </div>
@@ -641,7 +650,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
         </nav>
         <div className="member" title="This browser's signing key">
           <span className="av">{myName[0]?.toUpperCase()}</span>
-          <div className="who" title={account.session ? `Signed in as ${account.session.email} · ${myAddr}` : `This device's key · ${myAddr}`}><div>{myName}</div><div>{account.session ? account.session.email : short(myAddr)}</div></div>
+          <div className="who" title={account.email ? `Signed in as ${account.email} · ${myAddr}` : `This device's key · ${myAddr}`}><div>{myName}</div><div>{account.email ?? short(myAddr)}</div></div>
         </div>
       </aside>
 

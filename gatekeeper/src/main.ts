@@ -8,6 +8,7 @@ import { CircleCliWallet } from "./wallet.ts";
 import { Gatekeeper } from "./gatekeeper.ts";
 import { agentApi, consoleApi } from "./server.ts";
 import { publicApi } from "./chat.ts";
+import { Accounts } from "./accounts.ts";
 import { CircleChainWriter, publicClient } from "./chain.ts";
 import { SandboxCA } from "./ca.ts";
 import { SecretStore } from "./secrets.ts";
@@ -77,7 +78,7 @@ const consoleToken = store.loadOrCreateConsoleToken();
 
 const agentServer = agentApi(gk, { proxy: egress, caPem: ca.certPem, secrets });
 agentServer.listen(agentPort, agentHost, () => console.log(`gatekeeper · agent API    http://${agentHost}:${agentPort}`));
-consoleApi(gk, wallet, consoleToken, secrets, ca.certPem).listen(consolePort, "127.0.0.1", () =>
+consoleApi(gk, wallet, consoleToken, secrets, ca.certPem, new Accounts(store)).listen(consolePort, "127.0.0.1", () =>
   console.log(`gatekeeper · console API  http://127.0.0.1:${consolePort}  (data: ${dataDir})`),
 );
 console.log(`gatekeeper · sandbox      egress proxy per run on 127.0.0.1 · sandbox ${gk.requireSandbox ? "required" : "optional"} · ${secrets.list().length} key(s)`);

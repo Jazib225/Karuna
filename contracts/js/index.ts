@@ -385,33 +385,3 @@ export function levelUpEligibility(rec: Pick<AgentRecord, "cleanStreak"> | null 
   const have = rec?.cleanStreak ?? 0;
   return { eligible: !!rec && have >= needed, target, needed, have };
 }
-
-// ---------------------------------------------------------------- email sign-in (Circle)
-
-/**
- * The EIP-712 typed data Karuna signs (actions, payment decisions) as the JSON string Circle's
- * user-controlled wallets sign: EIP712Domain spelled out, big integers as decimal strings. The
- * EIP-712 hash is the same, so the signature verifies exactly as a browser key's would.
- */
-export function toCircleTypedData(td: {
-  domain: { name: string; version: string; chainId: number; verifyingContract: Address };
-  types: Record<string, readonly { name: string; type: string }[]>;
-  primaryType: string;
-  message: Record<string, unknown>;
-}): string {
-  return JSON.stringify(
-    {
-      types: {
-        EIP712Domain: [
-          { name: "name", type: "string" }, { name: "version", type: "string" },
-          { name: "chainId", type: "uint256" }, { name: "verifyingContract", type: "address" },
-        ],
-        ...td.types,
-      },
-      domain: td.domain,
-      primaryType: td.primaryType,
-      message: td.message,
-    },
-    (_k, v) => (typeof v === "bigint" ? v.toString() : v),
-  );
-}
