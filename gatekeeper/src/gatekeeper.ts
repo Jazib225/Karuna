@@ -38,6 +38,7 @@ import { ConnectorClients, exposedName, splitName, toolFingerprint, type Connect
 import type { ModelExchange } from "./models.ts";
 import { draftAgentSpec, type AgentDraft } from "./agent-draft.ts";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { WebTools, searchUrl } from "./web.ts";
 
 // ---------------------------------------------------------------- types
 
@@ -209,6 +210,8 @@ export interface GatekeeperDeps {
   requireSandbox?: boolean; // agent tokens only work from inside a Karuna sandbox (unless voted otherwise)
   requireIsolation?: "gvisor" | "docker"; // refuse runs weaker than this
   connectors?: ConnectorClients; // MCP clients for the team's connectors (tests pass a fake)
+  web?: WebTools; // Karuna's own web_search / web_fetch for chat apps (tests pass a fake fetch)
+  chatUrl?: string; // the public address chat apps reach Karuna at (a tunnel to the public port)
   /** Starts a built agent's sandbox run (`karuna run` with the hosted runner). Returns a stop function. */
   launcher?: (run: { agentId: string; token: string; runId: string; onOutput: (line: string) => void; onExit: (code: number) => void }) => () => void;
 }
@@ -383,6 +386,7 @@ export class Gatekeeper extends EventEmitter {
   private grants = new Map<string, number>();
   /** MCP clients for the team's connectors, and the last error per connector. */
   readonly connectors: ConnectorClients;
+  readonly web: WebTools;
   private connectorErrors = new Map<string, string>();
   /** Stop functions for runs the scheduler launched. */
   private launchStops = new Map<string, () => void>();
@@ -395,6 +399,7 @@ export class Gatekeeper extends EventEmitter {
     super();
     this.now = deps.now ?? (() => new Date());
     this.connectors = deps.connectors ?? new ConnectorClients();
+    this.web = deps.web ?? new WebTools();
     const stored = deps.store.readJson<{ version?: number }>("org.json", emptyOrg);
     if (stored.version !== 2) {
       // Phase 2 kept policy locally; Dharma replaces it. Start a fresh org (old file is kept).
@@ -1989,6 +1994,72 @@ export class Gatekeeper extends EventEmitter {
       ...(changed ? [{ label: "Tool changed", value: "Its definition changed since your team approved this connector", tone: "warn" as const }] : []),
       ...(tool.annotations?.destructiveHint ? [{ label: "Connector says", value: "destructive", tone: "warn" as const }] : []),
     ];
+    return this.governedCall({ agentId, request, base, facts, hash, run, trapInput: { args }, hold: changed ? "tool-changed" : undefined });
+  }
+
+  /**
+   * Karuna's own web tools for chat apps. The Gatekeeper makes the GET itself (public addresses
+   * only), decided like any web request from an agent on someone's computer: allowlisted domains
+   * and Allow rules run, everything else asks a member.
+   */
+  async callWebTool(agentId: string, name: "web_search" | "web_fetch", args: Record<string, unknown>) {
+    this.requireReady();
+    this.touchDevice(agentId);
+    const text = (t: string, isError = false) => ({ content: [{ type: "text" as const, text: t }], ...(isError ? { isError: true } : {}) });
+    let url: string;
+    let run: () => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }>;
+    if (name === "web_search") {
+      const q = String(args.query ?? "").trim().slice(0, 300);
+      if (!q) return text("query is required.", true);
+      url = searchUrl(q);
+      run = async () => {
+        const hits = await this.web.search(q);
+        this.emit("egress-allowed", { agentId, method: "GET", url });
+        return text(hits.length ? hits.map((h, n) => `${n + 1}. ${h.title}\n${h.url}\n${h.snippet}`).join("\n\n") : "No results.");
+      };
+    } else {
+      url = String(args.url ?? "").trim();
+      try {
+        url = (await this.web.checkPublic(url)).href;
+      } catch (e) {
+        return text(e instanceof Error ? e.message : String(e), true);
+      }
+      run = async () => {
+        const page = await this.web.fetchPage(url);
+        this.emit("egress-allowed", { agentId, method: "GET", url });
+        if (page.redirect) return text(`It redirects to ${page.redirect}. Call web_fetch on that address to follow it.`);
+        return text(`${page.status} ${page.url}\n\n${page.text}${page.truncated ? "\n\n(cut short)" : ""}`, page.status >= 400);
+      };
+    }
+    const request: Request = { agent: agentId, host: true, tool: "http", method: "GET", url };
+    const hash = sha256(`web\nGET\n${url}`);
+    const base = {
+      id: randomUUID(), agentId, createdAt: this.now().toISOString(),
+      action: { type: "action" as const, tool: "http" as const, url, method: "GET" },
+      approvals: [],
+    };
+    const facts: Fact[] = [
+      { label: "From", value: this.org.labels.agents[agentId] ?? agentId },
+      { label: "Tool", value: name === "web_search" ? "Web search" : "Read a web page" },
+      { label: name === "web_search" ? "Search" : "Address", value: name === "web_search" ? String(args.query ?? "").slice(0, 300) : url },
+    ];
+    return this.governedCall({ agentId, request, base, facts, hash, run: async () => {
+      try {
+        return await run();
+      } catch (e) {
+        return text(`Karuna couldn't complete that: ${scrub(e)}`, true);
+      }
+    }, trapInput: { args } });
+  }
+
+  /** Rules, levels, freeze and traps for one call from a chat app; a held call waits briefly for a member. */
+  private async governedCall<R>(o: {
+    agentId: string; request: Request; base: Omit<Proposal, "request" | "decision" | "facts" | "status">; facts: Fact[]; hash: string;
+    run: () => Promise<R>; trapInput: Parameters<typeof findTrap>[1]; hold?: string;
+  }): Promise<R | { content: { type: "text"; text: string }[] }> {
+    const { agentId, request, base, facts, hash, run } = o;
+    const pol = this.requireReady();
+    const blocked = { content: [{ type: "text" as const, text: "Karuna blocked this." }] };
     const deny = (ruleId: string, reason: string) => {
       const decision: Decision = { outcome: "deny", ruleId, reason };
       this.logDecision(request, decision);
@@ -1997,7 +2068,7 @@ export class Gatekeeper extends EventEmitter {
       return blocked;
     };
     if (!pol.agents.some((a) => a.id === agentId)) return deny("agent-inactive", "This connection's agent isn't on Dharma yet");
-    const trap = findTrap(this.state.traps, { args });
+    const trap = findTrap(this.state.traps, o.trapInput);
     if (trap) {
       this.state.tainted[agentId] = { at: this.now().toISOString(), secret: trap.secret };
       this.onTripwire([agentId], "trap password");
@@ -2014,8 +2085,8 @@ export class Gatekeeper extends EventEmitter {
       return run();
     }
     const evaluated = evaluate(request, this.ctxFor(pol, false), buildRuleset(pol.rules));
-    const decision: Decision = changed && evaluated.outcome === "allow"
-      ? { outcome: "approval", ruleId: "tool-changed", reason: "The tool changed since the team approved this connector" }
+    const decision: Decision = o.hold && evaluated.outcome === "allow"
+      ? { outcome: "approval", ruleId: o.hold, reason: "The tool changed since the team approved this connector" }
       : evaluated;
     if (decision.outcome === "allow") {
       this.logDecision(request, decision);
@@ -2680,6 +2751,7 @@ export class Gatekeeper extends EventEmitter {
         })),
       })),
       runs: this.runsView(),
+      chatUrl: this.deps.chatUrl ? `${this.deps.chatUrl.replace(/\/+$/, "")}/mcp` : null,
       devices: (this.state.devices ?? []).filter((d) => d.status === "pending" || d.status === "approved").slice(-50).reverse().map((d) => ({
         id: d.id, code: d.code, name: d.name, tool: d.tool, status: d.status, requestedAt: d.requestedAt, agentId: d.agentId ?? null,
         agentName: d.agentId ? (L.agent(d.agentId) ?? d.agentId) : null, lastSeenAt: d.lastSeenAt ?? null, approvedAt: d.approvedAt ?? null,

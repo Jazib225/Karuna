@@ -81,6 +81,18 @@ const KARUNA_TOOLS: Tool[] = [
     annotations: { title: "Buy data" },
   },
   {
+    name: "web_search",
+    description: "Search the web. Use this instead of any built-in web search: your team's Karuna rules decide, and an unlisted request waits for a member's approval.",
+    inputSchema: { type: "object", properties: { query: { type: "string", description: "What to search for" } }, required: ["query"] },
+    annotations: { title: "Search the web", readOnlyHint: true, openWorldHint: true },
+  },
+  {
+    name: "web_fetch",
+    description: "Read a web page as text. Use this instead of any built-in web fetch: your team's Karuna rules decide. Redirects aren't followed; call it again on the new address.",
+    inputSchema: { type: "object", properties: { url: { type: "string", description: "The http(s) address" } }, required: ["url"] },
+    annotations: { title: "Read a web page", readOnlyHint: true, openWorldHint: true },
+  },
+  {
     name: "balance",
     description: "What this connection may still spend today without asking, and its trust level.",
     inputSchema: { type: "object", properties: {} },
@@ -130,6 +142,7 @@ async function callKarunaTool(gk: Gatekeeper, agentId: string, name: string, arg
     const maxUsd = args.max_usd === undefined ? undefined : Number(args.max_usd);
     return say(answer(await gk.propose(agentId, { type: "x402", url, method: typeof args.method === "string" ? args.method : "GET", maxUsd }, typeof args.reason === "string" ? args.reason : undefined)));
   }
+  if (name === "web_search" || name === "web_fetch") return gk.callWebTool(agentId, name, args);
   if (name === "balance") return say(gk.balanceText(agentId));
   if (name === "check_request") return say(answer(gk.agentView(agentId, String(args.id ?? ""))));
   return null;

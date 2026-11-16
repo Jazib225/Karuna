@@ -24,6 +24,15 @@ import { ViemChainWriter } from "../src/chain.ts";
 import { publicApi } from "../src/chat.ts";
 import { ConnectorClients } from "../src/connectors.ts";
 import type { WalletBackend } from "../src/wallet.ts";
+import { WebTools } from "../src/web.ts";
+
+// Karuna's own web tools, against a fake web (no network in tests).
+const webHits: string[] = [];
+const fakeWeb = new WebTools((async (u: URL | string) => {
+  webHits.push(String(u));
+  if (String(u).includes("duckduckgo")) return new Response(`<div class="result results_links"><a class="result__a" href="https://docs.example/">Docs</a><a class="result__snippet">The docs.</a></div>`, { headers: { "content-type": "text/html" } });
+  return new Response("<p>Price list</p>", { headers: { "content-type": "text/html" } });
+}) as typeof fetch, async (host) => (host === "router.example" ? ["192.168.1.1"] : ["93.184.216.34"]));
 
 const PORT = 25545 + Math.floor(Math.random() * 1000);
 const RPC = `http://127.0.0.1:${PORT}`;
@@ -166,7 +175,7 @@ beforeEach(async () => {
   const writer = new ViemChainWriter(createWalletClient({ chain, account: gkAccount, transport: http(RPC) }), client);
   gk = new Gatekeeper({
     store: new Store(dir), wallet, client, writerFor: () => writer, timelockSeconds: 60, anchorEvery: 1000, requireSandbox: true,
-    connectors: new ConnectorClients(0),
+    connectors: new ConnectorClients(0), web: fakeWeb,
   });
   await gk.setup({ orgName: "Chat Org", memberName: "Owner", memberAddress: member.address, walletAddress: gkAccount.address });
   for (const [c, label] of [
@@ -177,6 +186,7 @@ beforeEach(async () => {
   api = publicApi(gk, new Store(dir)).listen(0);
   base = `http://127.0.0.1:${(api.address() as AddressInfo).port}`;
   mailCalls.length = 0;
+  webHits.length = 0;
 }, 60_000);
 afterAll(() => api?.close());
 
@@ -292,4 +302,23 @@ describe("tools in the chat", () => {
       await c.close();
     }
   }, 90_000);
+
+  it("Karuna's web tools: an unlisted site waits for a member, an allowlisted one runs, private addresses never", async () => {
+    const { agentId, token } = await chatAgent();
+    const c = await mcp(token);
+    expect((await c.listTools()).tools.map((t) => t.name)).toEqual(expect.arrayContaining(["web_search", "web_fetch"]));
+    const reading = c.callTool({ name: "web_fetch", arguments: { url: "https://supplier.example/prices" } });
+    await approve(await pendingFor(agentId));
+    expect(text(await reading)).toMatch(/^200 https:\/\/supplier\.example\/prices\n\nPrice list/);
+    const searching = c.callTool({ name: "web_search", arguments: { query: "flour prices" } });
+    await approve(await pendingFor(agentId));
+    expect(text(await searching)).toBe("1. Docs\nhttps://docs.example/\nThe docs.");
+    expect(text(await c.callTool({ name: "web_fetch", arguments: { url: "http://router.example/admin" } }))).toMatch(/private or local/);
+    expect(webHits.some((h) => h.includes("router.example"))).toBe(false);
+    await gk.submitAction(await sign(Kind.Propose, { op: "AddDomain", domain: "supplier.example" }));
+    await passTimelock();
+    expect(text(await c.callTool({ name: "web_fetch", arguments: { url: "https://supplier.example/prices" } }))).toMatch(/Price list/);
+    await c.close();
+  }, 90_000);
 });
+
