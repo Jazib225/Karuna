@@ -15,7 +15,7 @@ type State = "idle" | "working" | "pending" | "approved" | "denied" | "paused" |
 interface Decision { type: "decision"; id: string; action_type: string; summary: string; result: "allow" | "deny" }
 interface ApprovalRequested {
   type: "approval_requested"; id: string; action_type: string; payload: Record<string, unknown>; payload_hash: string;
-  reversible: boolean; agent_reason: string | null; expires_at: string | null;
+  reversible: boolean; agent_reason: string | null; expires_at: string | null; agent?: string;
 }
 type GkEvent =
   | Decision
@@ -49,7 +49,7 @@ matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener("cha
 const LABELS: Record<State, string> = {
   idle: "Watching", working: "Working", pending: "Needs you", approved: "Approved", denied: "Denied", paused: "Paused", offline: "Offline",
 };
-const REASON_CAP = 280;
+const REASON_CAP = 160;
 const RETRACT_MS = 700;
 const DOCK = { halfWidth: 170, maxY: 90 };
 
@@ -84,6 +84,8 @@ let visible = false;
 let dragging = false;
 let transient: { state: State; until: number } | null = null;
 const queue: ApprovalRequested[] = [];
+// Newest first; only the last FEED_MAX are kept, so a new decision pushes the oldest off the bottom.
+const FEED_MAX = 3;
 const feed: { at: number; e: Decision }[] = [];
 const cardStatus = new Map<string, { text: string; err: boolean }>();
 let reasonOpen = false;
@@ -286,50 +288,92 @@ const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: 
 };
 const fmtValue = (v: unknown) => (typeof v === "string" ? v : v === null || v === undefined ? "—" : typeof v === "object" ? JSON.stringify(v, null, 2) : String(v));
 
+// "test-agent" -> "Test agent". The id is Karuna's, not something the agent wrote.
+const agentName = (id?: string) => (id ? id.replace(/[-_]+/g, " ").replace(/^\w/, (c) => c.toUpperCase()) : "An agent");
+const money = (v: unknown) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? `$${n < 0.01 && n > 0 ? n.toFixed(4).replace(/0+$/, "") : n.toFixed(2)}` : "";
+};
+const shortAddr = (s: string) => (/^0x[0-9a-f]{40}$/i.test(s) ? `${s.slice(0, 6)}…${s.slice(-4)}` : s);
+const hostPath = (u: unknown) => {
+  try {
+    const url = new URL(String(u));
+    return url.host + (url.pathname === "/" ? "" : url.pathname);
+  } catch {
+    return String(u ?? "");
+  }
+};
+
+/** Karuna's own one-line headline and the single fact that matters, both from the payload. */
+function describe(a: ApprovalRequested): { title: string; fact: string } {
+  const p = a.payload ?? {};
+  const who = agentName(a.agent);
+  const s = (k: string) => (p[k] === undefined || p[k] === null ? "" : String(p[k]));
+  switch (a.action_type) {
+    case "transfer":
+      return { title: `${who} wants to pay ${money(p.amountUsd)}`, fact: `to ${s("payeeName") || shortAddr(s("to"))}` };
+    case "x402":
+      return { title: `${who} wants to buy data for ${money(p.amountUsd)}`, fact: hostPath(p.url) };
+    case "http": {
+      const m = (s("method") || "GET").toUpperCase();
+      const verb = m === "DELETE" ? "delete something on" : m === "GET" || m === "HEAD" ? "open" : "send data to";
+      let host = s("url");
+      try { host = new URL(host).host; } catch { /* keep raw */ }
+      return { title: `${who} wants to ${verb} ${host}`, fact: `${m} ${hostPath(p.url)}` };
+    }
+    case "shell":
+      return { title: `${who} wants to run a command`, fact: s("command") };
+    case "file":
+      return { title: `${who} wants to ${s("body") ? "write" : "change"} a file`, fact: s("path") };
+    case "message":
+      return { title: `${who} wants to message another agent`, fact: s("to") };
+    default:
+      return { title: `${who} needs your approval`, fact: a.action_type };
+  }
+}
+
 function approvalCard(a: ApprovalRequested): HTMLElement {
   const box = el("div", "appr");
+  const { title, fact } = describe(a);
+
   const head = el("div", "appr-head");
-  head.append(el("span", "appr-type", a.action_type));
-  const exp = el("span", "appr-exp");
-  exp.dataset.expires = a.expires_at ?? "";
-  head.append(exp);
-  box.append(el("div", "eyebrow", "Approval needed"), head);
+  head.append(el("h2", "appr-title", title));
+  if (a.expires_at) {
+    const exp = el("span", "appr-exp");
+    exp.dataset.expires = a.expires_at;
+    head.append(exp);
+  }
+  box.append(head);
+  if (fact) box.append(el("div", "appr-fact", fact));
 
-  const payload = el("div", "payload");
-  payload.append(el("div", "lbl", "Exact payload"));
-  const dl = el("dl");
-  for (const [k, v] of Object.entries(a.payload ?? {})) dl.append(el("dt", undefined, k), el("dd", undefined, fmtValue(v)));
-  payload.append(dl);
-  box.append(payload);
-
-  const meta = el("div", "meta");
-  const hash = el("span", "hash", shortHash(a.payload_hash));
-  hash.title = a.payload_hash;
-  const m1 = el("span");
-  m1.append(el("span", "k", "hash "), hash);
-  const m2 = el("span");
-  m2.append(el("span", "k", "reversible "), document.createTextNode(a.reversible ? "yes" : "no"));
-  meta.append(m1, m2);
-  box.append(meta);
-
+  // The agent's own explanation: shown short and quiet, and marked as its words, not Karuna's.
   if (a.agent_reason) {
+    const text = String(a.agent_reason).trim();
     const r = el("div", "reason");
-    r.append(el("div", "lbl", "Agent-authored, untrusted"));
-    const text = String(a.agent_reason);
-    const long = text.length > REASON_CAP;
-    const p = el("p", undefined, long && !reasonOpen ? `${text.slice(0, REASON_CAP)}…` : text);
-    r.append(p);
-    if (long) {
-      const more = el("button", "more", reasonOpen ? "Show less" : "Show all");
-      more.type = "button";
-      more.onclick = () => {
-        reasonOpen = !reasonOpen;
-        render();
-      };
-      r.append(more);
-    }
+    r.append(el("p", undefined, text.length > REASON_CAP ? `${text.slice(0, REASON_CAP)}…` : text));
+    r.append(el("div", "lbl", "Agent's note · not verified"));
     box.append(r);
   }
+
+  // Everything else stays one click away: the exact payload, hash and reversibility.
+  const more = el("details", "appr-more");
+  more.open = reasonOpen;
+  more.ontoggle = () => {
+    reasonOpen = more.open;
+    requestAnimationFrame(reportRects);
+  };
+  more.append(el("summary", undefined, "Details"));
+  const dl = el("dl");
+  for (const [k, v] of Object.entries(a.payload ?? {})) dl.append(el("dt", undefined, k), el("dd", undefined, fmtValue(v)));
+  if (!/^0*$/.test(a.payload_hash.replace(/^0x/, ""))) {
+    const hash = el("dd", "hash", shortHash(a.payload_hash));
+    hash.title = a.payload_hash;
+    dl.append(el("dt", undefined, "hash"), hash);
+  }
+  dl.append(el("dt", undefined, "undo"), el("dd", undefined, a.reversible ? "possible" : "not possible"));
+  if (a.agent_reason && String(a.agent_reason).trim().length > REASON_CAP) dl.append(el("dt", undefined, "note"), el("dd", undefined, String(a.agent_reason)));
+  more.append(dl);
+  box.append(more);
 
   const st = cardStatus.get(a.id);
   const status = el("div", `status-line${st?.err ? " err" : ""}`, st?.text ?? "");
@@ -371,7 +415,7 @@ function feedView(): HTMLElement {
     return wrap;
   }
   const list = el("div", "feed");
-  for (const { at, e } of feed.slice(0, 6)) {
+  for (const { at, e } of feed.slice(0, FEED_MAX)) {
     const row = el("div", `row ${e.result}`);
     row.append(el("span", "t", fmtTime(at)), el("span", "s", `${e.action_type} · ${e.summary}`), el("span", `verdict ${e.result}`, e.result));
     list.append(row);
@@ -441,7 +485,7 @@ function tickExpiry() {
   if (!n) return;
   const at = n.dataset.expires ? Date.parse(n.dataset.expires) : NaN;
   if (Number.isNaN(at)) {
-    n.textContent = "no expiry";
+    n.textContent = "";
     return;
   }
   const left = Math.max(0, Math.round((at - Date.now()) / 1000));
@@ -593,7 +637,7 @@ function onEvent(ev: GkEvent) {
   switch (ev.type) {
     case "decision":
       feed.unshift({ at: Date.now(), e: ev });
-      if (feed.length > 40) feed.length = 40;
+      if (feed.length > FEED_MAX) feed.length = FEED_MAX;
       if (ev.result === "deny") flash("denied", 1800);
       else flash("working", 1600);
       break;
