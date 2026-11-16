@@ -81,6 +81,11 @@ export interface AgentRecord {
   cleanStreak: number; levelChanges: { level: number; reason: string; block: number | null; txHash: string | null }[]; lastBlock: number | null;
 }
 
+export interface ConnectorView {
+  name: string; url: string; hasKey: boolean; error: string | null;
+  tools: { key: string; name: string; description: string; firstSeenAt: string; changed: { fingerprint: string; description: string; seenAt: string } | null }[];
+}
+
 export interface DeviceView {
   id: string; code: string; name: string; tool: string; status: "pending" | "approved";
   requestedAt: string; agentId: string | null; agentName: string | null; lastSeenAt: string | null; approvedAt: string | null;
@@ -122,8 +127,10 @@ export interface Snapshot {
     records?: { at: string; source: string } | null;
   };
   watchdog?: { wallet: string | null; gateway: string; events: WatchdogEvent[] };
-  /** Computers running Claude Code or Cursor with the Karuna plugin. */
+  /** Computers running Claude Code or Cursor with the Karuna plugin, and connected chat apps. */
   devices?: DeviceView[];
+  /** The team's connectors (MCP servers), reached only through Karuna. */
+  connectors?: ConnectorView[];
   frozen: null | false | { by: string | null; at: string; confirmed: boolean };
   enrollments: { address: string; name: string; requestedAt: string }[];
   shield: {

@@ -826,3 +826,6 @@ html, body, * { scrollbar-width: none; }
 .email-signin .row-form input { flex: 1 1 200px; }
 .device-key { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); display: grid; gap: 4px; }
 .link-btn { background: none; border: 0; padding: 0; color: var(--ink); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; font: inherit; }
+
+/* Connector tool descriptions come from outside the org */
+.untrusted-text { font-style: italic; }

@@ -211,6 +211,7 @@ export function consoleApi(
       if (method === "POST" && (m = path.match(/^\/devices\/([\w-]+)\/approve$/))) return send(res, 200, gk.approveDevice(m[1], body));
       if (method === "POST" && (m = path.match(/^\/devices\/([\w-]+)\/deny$/))) return send(res, 200, gk.denyDevice(m[1]));
       if (method === "POST" && (m = path.match(/^\/devices\/([\w-]+)\/revoke$/))) return send(res, 200, gk.revokeDevice(m[1]));
+      if (method === "POST" && (m = path.match(/^\/connectors\/tools\/(.+)\/accept$/))) return send(res, 200, gk.acceptToolChange(decodeURIComponent(m[1])));
       if (method === "POST" && path === "/auth/email/start") return send(res, 200, await circle.emailToken(String(body.email ?? ""), String(body.deviceId ?? "")));
       if (method === "POST" && path === "/auth/circle/init") return send(res, 200, await circle.initialize(String(body.userToken ?? "")));
       if (method === "POST" && path === "/auth/circle/wallet") return send(res, 200, await circle.wallet(String(body.userToken ?? "")));

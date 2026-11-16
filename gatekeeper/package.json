@@ -14,6 +14,7 @@
     "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@prekaruna/dharma": "workspace:*",
     "@prekaruna/engine": "workspace:*",
     "dotenv": "^18.0.10",

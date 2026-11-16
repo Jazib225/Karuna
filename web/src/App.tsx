@@ -15,20 +15,20 @@ import { eventName, NAMED_KEYS } from "./eventNames.ts";
 
 // One job per page. The menu groups them: everyday work first, then the automatic safety systems,
 // settings, and a testing tool. Older names (pop-ups, saved state) still resolve.
-type Page = "overview" | "approvals" | "votes" | "agents" | "payees" | "activity" | "shield" | "swarm" | "rules" | "keys" | "team" | "appearance" | "inbox";
+type Page = "overview" | "approvals" | "votes" | "agents" | "payees" | "activity" | "shield" | "swarm" | "rules" | "keys" | "connectors" | "team" | "appearance" | "inbox";
 type View = Page | "dharma" | "safety" | "policy";
 const PAGE_OF: Record<View, Page> = {
   overview: "overview", approvals: "approvals", votes: "votes", agents: "agents", payees: "payees", activity: "activity",
-  shield: "shield", swarm: "swarm", rules: "rules", keys: "keys", team: "team", appearance: "appearance", inbox: "inbox",
+  shield: "shield", swarm: "swarm", rules: "rules", keys: "keys", connectors: "connectors", team: "team", appearance: "appearance", inbox: "inbox",
   dharma: "votes", safety: "shield", policy: "rules",
 };
 const TITLES: Record<Page, string> = {
   overview: "Home", approvals: "Approvals", votes: "Votes", agents: "Agents", payees: "Payments", activity: "Activity",
-  shield: "Drills", swarm: "Tripwire", rules: "Rules", keys: "Keys", team: "Team", appearance: "Appearance", inbox: "Inbox",
+  shield: "Drills", swarm: "Tripwire", rules: "Rules", keys: "Keys", connectors: "Connectors", team: "Team", appearance: "Appearance", inbox: "Inbox",
 };
 const ICON: Record<Page, IconName> = {
   overview: "home", approvals: "approvals", votes: "votes", agents: "agents", payees: "payees", activity: "activity",
-  shield: "shield", swarm: "swarm", rules: "rules", keys: "key", team: "team", appearance: "sun", inbox: "inbox",
+  shield: "shield", swarm: "swarm", rules: "rules", keys: "key", connectors: "plug", team: "team", appearance: "sun", inbox: "inbox",
 };
 /** One line under each page title: what the page is for. */
 const LEDE: Record<Page, string> = {
@@ -42,6 +42,7 @@ const LEDE: Record<Page, string> = {
   swarm: "",
   rules: "",
   keys: "",
+  connectors: "",
   appearance: "",
   team: "",
   inbox: "",
@@ -49,7 +50,7 @@ const LEDE: Record<Page, string> = {
 const NAV: { label: string | null; hint?: string; pages: Page[] }[] = [
   { label: null, pages: ["overview", "approvals", "votes", "agents", "payees", "activity"] },
   { label: "Safety", pages: ["shield", "swarm", "inbox"] },
-  { label: "Settings", pages: ["rules", "keys", "team", "appearance"] },
+  { label: "Settings", pages: ["rules", "keys", "connectors", "team", "appearance"] },
 ];
 /** Arc explorer link for a transaction hash (payments, Dharma writes, freezes, anchors). */
 const isTx = (v: unknown): v is string => typeof v === "string" && /^0x[0-9a-fA-F]{64}$/.test(v);
@@ -718,6 +719,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
           {view === "team" && <Team ctx={ctx} />}
           {view === "keys" && <Keys ctx={ctx} />}
           {view === "appearance" && <Appearance />}
+          {view === "connectors" && <Connectors ctx={ctx} />}
           {view === "inbox" && <Shield ctx={ctx} part="messages" />}
           {view === "activity" && <Activity ctx={ctx} log={log} />}
         </div>
@@ -2170,7 +2172,7 @@ function Computers({ ctx }: { ctx: Ctx }) {
   const devices = s.devices ?? [];
   const pending = devices.filter((d) => d.status === "pending");
   const connected = devices.filter((d) => d.status === "approved");
-  const toolName = (t: string) => (t === "cursor" ? "Cursor" : "Claude Code");
+  const toolName = (t: string) => (t === "cursor" ? "Cursor" : t === "chat" ? "Chat app" : "Claude Code");
   const approve = (d: (typeof devices)[number]) =>
     run(async () => {
       const dharma = s.org.dharma!.address as Address;
@@ -2182,14 +2184,14 @@ function Computers({ ctx }: { ctx: Ctx }) {
   if (!devices.length) {
     return (
       <div className="card">
-        <div className="hd"><h2>Computers</h2><span className="sub">Claude Code · Cursor</span></div>
-        <Empty icon="agents">No computers yet. In Claude Code, run <span className="mono">/plugin install karuna</span>; its first tool call shows a code to approve here.</Empty>
+        <div className="hd"><h2>Computers &amp; chats</h2><span className="sub">Claude Code · Cursor · chat apps</span></div>
+        <Empty icon="agents">Nothing connected yet. In Claude Code, run <span className="mono">/plugin install karuna</span>; in a chat app, add Karuna's address as a connector. Each shows a code to approve here.</Empty>
       </div>
     );
   }
   return (
     <div className="card">
-      <div className="hd"><h2>Computers</h2><span className="sub">{connected.length} connected{pending.length ? ` · ${pending.length} waiting` : ""}</span></div>
+      <div className="hd"><h2>Computers &amp; chats</h2><span className="sub">{connected.length} connected{pending.length ? ` · ${pending.length} waiting` : ""}</span></div>
       <div className="resolved">
         {pending.map((d) => (
           <div className="res" key={d.id}>
@@ -2213,6 +2215,57 @@ function Computers({ ctx }: { ctx: Ctx }) {
         })}
       </div>
       <div className="log-foot"><span>every tool call is checked against your rules before it runs</span><span>connected computers can be disconnected at any time</span></div>
+    </div>
+  );
+}
+
+// ============================================================== connectors (chat apps' tools, through Karuna)
+
+/** The team's connectors: other MCP servers whose tools chat apps reach only through Karuna. */
+function Connectors({ ctx }: { ctx: Ctx }) {
+  const { s, busy, run } = ctx;
+  const list = s.connectors ?? [];
+  const [form, setForm] = useState({ name: "", url: "" });
+  const name = form.name.trim().toLowerCase();
+  const ok = /^[a-z0-9-]{2,24}$/.test(name) && /^https:\/\/\S+$/.test(form.url.trim());
+  const rule = (n: string) => s.policy!.rules.find((r) => r.active && r.scope === `connector:${n}`);
+  return (
+    <div className="stack">
+      <form className="card inline-form" onSubmit={(e) => { e.preventDefault(); ctx.change({ op: "AddRule", id: `conn-${name}`.slice(0, 31), outcome: "Allow", scope: `connector:${name}`, target: form.url.trim() }).then((done) => done && setForm({ name: "", url: "" })); }}>
+        <label className="field"><span>Name</span><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. github" /></label>
+        <label className="field grow"><span>Address (MCP, https)</span><input required className="mono" value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} placeholder="https://api.example.com/mcp" /></label>
+        <button className="btn btn-dark" type="submit" disabled={busy || !ok}><Icon name="plus" /> Propose connector</button>
+      </form>
+      <InfoBox id="connectors" icon="plug">
+        <p>Chat apps connected to Karuna get these connectors' tools through Karuna, so every call follows your rules: read-only tools run, others wait for a member until a rule or a trust level allows them. Add a key with the connector's name on the Keys page to sign in to it; the chat app never sees it.</p>
+      </InfoBox>
+      {list.length === 0 ? (
+        <div className="card"><Empty icon="plug">No connectors yet. Propose one above; it's added after the vote.</Empty></div>
+      ) : list.map((c) => (
+        <div className="card" key={c.name}>
+          <div className="hd">
+            <h2>{c.name}</h2>
+            <span className="sub mono">{c.url}</span>
+          </div>
+          <div className="resolved">
+            {c.error && <div className="res"><Badge v="deny">unreachable</Badge><span className="small">{c.error}</span><span /></div>}
+            {!c.error && c.tools.length === 0 && <div className="res"><Badge v="approval">no tools yet</Badge><span className="small muted">Its tools appear here once a chat app lists them.</span><span /></div>}
+            {c.tools.map((t) => (
+              <div className="res" key={t.key}>
+                {t.changed ? <Badge v="deny">changed</Badge> : <Badge v="allow">approved</Badge>}
+                <span className="small"><b className="mono">{t.name}</b> <span className="muted untrusted-text">{(t.changed?.description ?? t.description).slice(0, 220)}</span></span>
+                {t.changed
+                  ? <button className="btn btn-ghost btn-sm" disabled={busy} title="Its description, inputs or hints changed since your team approved this connector" onClick={() => confirm(`Accept the new definition of ${t.name}?\n\nBefore: ${t.description}\n\nNow: ${t.changed!.description}`) && run(() => api(`/connectors/tools/${encodeURIComponent(t.key)}/accept`, {}), "Change accepted")}>Review change</button>
+                  : <span className="muted small">since {ago(t.firstSeenAt)}</span>}
+              </div>
+            ))}
+          </div>
+          <div className="log-foot">
+            <span>{c.hasKey ? "signs in with the key named " + c.name : "no key: add one named " + c.name + " on the Keys page if it needs sign-in"}</span>
+            {rule(c.name) && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => confirm(`Remove the ${c.name} connector? Chat apps lose its tools.`) && ctx.change({ op: "RemoveRule", id: rule(c.name)!.id })}>Remove</button>}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

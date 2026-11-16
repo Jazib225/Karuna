@@ -7,6 +7,7 @@ import { Store } from "./store.ts";
 import { CircleCliWallet } from "./wallet.ts";
 import { Gatekeeper } from "./gatekeeper.ts";
 import { agentApi, consoleApi } from "./server.ts";
+import { publicApi } from "./chat.ts";
 import { CircleChainWriter, publicClient } from "./chain.ts";
 import { SandboxCA } from "./ca.ts";
 import { SecretStore } from "./secrets.ts";
@@ -63,6 +64,14 @@ if (remotePort) {
   gk.remote = { port: remotePort, host: remoteHost, names };
   remoteListener({ gk, ca, names, proxy: egress, agentApi: agentServer }).listen(remotePort, remoteHost, () =>
     console.log(`gatekeeper · remote port  https://${remoteHost}:${remotePort} for karuna run on other machines (names: ${names.join(", ")})`),
+  );
+}
+// Chat apps (claude.ai, Claude Desktop, ChatGPT): Karuna's MCP endpoint and its sign-in, on their
+// own port. Bound to 127.0.0.1 and reached through a tunnel (cloudflared → this port).
+const publicPort = Number(process.env.KARUNA_PUBLIC_PORT ?? 8792);
+if (publicPort) {
+  publicApi(gk, store).listen(publicPort, "127.0.0.1", () =>
+    console.log(`gatekeeper · chat apps    http://127.0.0.1:${publicPort}/mcp (MCP + sign-in; expose it with a tunnel)`),
   );
 }
 // Local event pipe for the desktop app (island). Approvals over it still need a member signature.
