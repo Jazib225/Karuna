@@ -8,6 +8,7 @@ import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { USAGE, parseArgs, type RunArgs } from "./args.ts";
 import { scanForSecrets } from "./scan.ts";
+import { ensureDocker } from "./docker.ts";
 import {
   DESKTOP_BASE_DOCKERFILE, DESKTOP_BASE_TAG, DESKTOP_BROWSER, DESKTOP_ENTRY,
   REMOTE_RELAY_DOCKERFILE, REMOTE_RELAY_JS, REMOTE_RELAY_TAG,
@@ -127,6 +128,8 @@ async function main() {
       throw new Error("Refusing to box a folder that contains real keys. Move them into Karuna (Keys page) and use the placeholder variable instead.");
     }
   }
+  // Docker must be up: start Docker Desktop if it's installed but stopped (nobody opens it by hand).
+  await ensureDocker(say);
   const isolation = pickIsolation(a.isolation);
 
   const tmp = mkdtempSync(join(tmpdir(), "karuna-run-"));
