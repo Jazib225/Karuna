@@ -2,14 +2,16 @@
 import { config as loadEnv } from "dotenv";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Address } from "viem";
+import { createWalletClient, formatEther, http, type Address, type Hex } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { arcTestnet } from "viem/chains";
 import { Store } from "./store.ts";
 import { CircleCliWallet } from "./wallet.ts";
 import { Gatekeeper } from "./gatekeeper.ts";
 import { agentApi, consoleApi } from "./server.ts";
 import { publicApi } from "./chat.ts";
 import { Accounts } from "./accounts.ts";
-import { CircleChainWriter, publicClient } from "./chain.ts";
+import { CircleChainWriter, RelayedChainWriter, ViemChainWriter, publicClient, scrub } from "./chain.ts";
 import { SandboxCA } from "./ca.ts";
 import { SecretStore } from "./secrets.ts";
 import { EgressProxy } from "./proxy.ts";
@@ -30,11 +32,21 @@ const store = new Store(dataDir);
 const secrets = new SecretStore(dataDir);
 const wallet = new CircleCliWallet();
 const client = publicClient(process.env.ARC_RPC_URL);
+// KARUNA_RELAYER_KEY: a plain key (holding only test USDC for gas) that delivers member-signed
+// Dharma writes in about a second instead of through the Circle wallet. It can't change anything
+// members didn't sign; Dharma checks their signatures. Without it, every write uses the Circle wallet.
+const relayKey = process.env.KARUNA_RELAYER_KEY?.trim();
+const relay = relayKey && /^0x[0-9a-fA-F]{64}$/.test(relayKey)
+  ? new ViemChainWriter(createWalletClient({ account: privateKeyToAccount(relayKey as Hex), chain: arcTestnet, transport: http(process.env.ARC_RPC_URL || undefined, { retryCount: 3 }) }), client)
+  : null;
 const gk = new Gatekeeper({
   store,
   wallet,
   client,
-  writerFor: (address: Address) => new CircleChainWriter(address, client),
+  writerFor: (address: Address) => {
+    const circle = new CircleChainWriter(address, client);
+    return relay ? new RelayedChainWriter(circle, relay, (e) => console.error(`gatekeeper · relayer failed, used the Circle wallet: ${scrub(e)}`)) : circle;
+  },
   timelockSeconds: Number(process.env.KARUNA_TIMELOCK_SECONDS ?? 60),
   chatUrl: process.env.KARUNA_CHAT_URL || undefined,
   coreTimelockSeconds: Number(process.env.KARUNA_CORE_TIMELOCK_SECONDS ?? 86_400),
@@ -83,6 +95,14 @@ consoleApi(gk, wallet, consoleToken, secrets, ca.certPem, new Accounts(store)).l
   console.log(`gatekeeper · console API  http://127.0.0.1:${consolePort}  (data: ${dataDir})`),
 );
 console.log(`gatekeeper · sandbox      egress proxy per run on 127.0.0.1 · sandbox ${gk.requireSandbox ? "required" : "optional"} · ${secrets.list().length} key(s)`);
+if (relay) {
+  void client.getBalance({ address: relay.from }).then(
+    (b) => console.log(`gatekeeper · relayer      ${relay.from} delivers members' proposals, votes and executions (~1s) · ${formatEther(b)} USDC for gas${b < 10n ** 17n ? " · LOW: top it up" : ""}`),
+    () => console.log(`gatekeeper · relayer      ${relay.from} delivers members' proposals, votes and executions (~1s)`),
+  );
+} else if (relayKey) {
+  console.error("gatekeeper · relayer      KARUNA_RELAYER_KEY isn't a 0x… private key; every write uses the Circle wallet");
+}
 // S6: boxes on other machines. Off unless a port is set; bind 0.0.0.0 (or a LAN/VPN IP) to expose it.
 const remotePort = Number(process.env.KARUNA_REMOTE_PORT ?? 0);
 if (remotePort) {

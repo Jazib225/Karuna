@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 
 const ARGV_WRAPPER = fileURLToPath(new URL("./circle-argv.mjs", import.meta.url));
 import {
-  BaseError, ContractFunctionRevertedError, createPublicClient, encodeDeployData, encodeFunctionData, http,
+  BaseError, ContractFunctionRevertedError, createPublicClient, encodeDeployData, encodeFunctionData, http, zeroAddress,
   type Address, type Chain, type Hex, type PublicClient, type WalletClient,
 } from "viem";
 import { arcTestnet } from "viem/chains";
@@ -158,6 +158,51 @@ async function simulate(client: PublicClient, from: Address, contract: Address, 
   }
 }
 
+// ---------------------------------------------------------------- fast relay for member-signed writes
+
+/**
+ * Calls Dharma accepts from anyone, because it checks a member's own signature: proposing, voting,
+ * executing a passed change, and a member's own tighten (Freeze, lowering a level). Only the
+ * Gatekeeper's calls (signer 0: Drills, Tripwire, anchors, approval signals) must come from
+ * Dharma.gatekeeper, the org's Circle wallet.
+ */
+export const isMemberSigned = (fn: WriteFn, args: readonly unknown[]) =>
+  fn === "propose" || fn === "vote" || fn === "execute" || (fn === "tighten" && String(args[2] ?? "").toLowerCase() !== zeroAddress);
+
+/**
+ * Member-signed writes go through `relay` (a plain key that only pays gas: about a second on Arc)
+ * instead of the Circle wallet (up to minutes). One at a time, so its nonces never collide. If the
+ * relay fails for any reason other than Dharma refusing the call (out of gas money, RPC trouble),
+ * the write falls back to the Circle wallet, so it's slower, never lost.
+ */
+export class RelayedChainWriter implements ChainWriter {
+  private queue: Promise<unknown> = Promise.resolve();
+  constructor(private readonly gk: ChainWriter, private readonly relay: ChainWriter, private readonly onFallback?: (e: unknown) => void) {}
+  get from() {
+    return this.gk.from;
+  }
+  deploy(a: DeployArgs) {
+    return this.gk.deploy(a);
+  }
+  deployCode() {
+    return this.gk.deployCode();
+  }
+  write(contract: Address, fn: WriteFn, args: readonly unknown[]) {
+    if (!isMemberSigned(fn, args)) return this.gk.write(contract, fn, args);
+    const run = this.queue.then(async () => {
+      try {
+        return await this.relay.write(contract, fn, args);
+      } catch (e) {
+        if (e instanceof ChainError && e.reason) throw e; // Dharma said no: the Circle wallet would hear the same
+        this.onFallback?.(e);
+        return this.gk.write(contract, fn, args);
+      }
+    });
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+}
+
 // ---------------------------------------------------------------- local key (tests / anvil)
 
 export class ViemChainWriter implements ChainWriter {
@@ -188,7 +233,8 @@ export class ViemChainWriter implements ChainWriter {
     const hash = await this.wallet.writeContract({
       address: contract, abi: DHARMA_ABI, functionName: fn, args: args as never, account: this.wallet.account!, chain: this.wallet.chain,
     });
-    const r = await this.client.waitForTransactionReceipt({ hash });
+    // Arc confirms in under a second; check every half second rather than the default 4 s.
+    const r = await this.client.waitForTransactionReceipt({ hash, pollingInterval: 500 });
     if (r.status !== "success") throw new ChainError(`${fn} reverted`);
     return { txRef: hash };
   }
