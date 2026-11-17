@@ -133,6 +133,42 @@ describe("trust levels", () => {
     expect(gk.snapshot().shield.alerts.some((a) => a.kind === "level-lowered")).toBe(true);
   }, 60_000);
 
+  /** Up to Level 2 the normal way: a clean record, then a vote, one level at a time. */
+  async function toLevel2() {
+    for (const [target, clean] of [[1, 10], [2, 25]] as const) {
+      streak(clean);
+      await gk.submitAction(await sign(Kind.Propose, { op: "SetLevel", agent, level: target, reason: "vote" }));
+      await passTimelock();
+    }
+    expect(level()).toBe(2);
+  }
+
+  it("from Level 2, a failed Drill drops exactly one level (to 1, not 0)", async () => {
+    await toLevel2();
+    gk.runTest({ agentId: agent, template: "supplier-invoice", category: "data" });
+    const msg = gk.agentInbox(agent)[0];
+    const bait = msg.body.match(/0x[0-9a-f]{40}/i)![0];
+    expect((await gk.propose(agent, { type: "transfer", to: bait, amountUsd: 12, sourceMessageId: msg.id })).status).toBe("denied");
+    await gk.idle();
+    await gk.sync(true);
+    expect(level()).toBe(1);
+  }, 90_000);
+
+  it("from Level 2, a Tripwire drops the agent all the way to Level 0", async () => {
+    await toLevel2();
+    const trap = gk.mintTrapSet(agent);
+    await gk.propose(agent, { type: "action", tool: "http", method: "GET", url: `https://api.github.com/user?token=${trap.secrets[0].value}` });
+    await gk.idle();
+    await gk.sync(true);
+    expect(level()).toBe(0);
+  }, 90_000);
+
+  it("a member lowers by more than one level at once (2 to 0), with no vote or wait", async () => {
+    await toLevel2();
+    await gk.submitAction(await sign(Kind.Tighten, { op: "SetLevel", agent, level: 0, reason: "member" }));
+    expect(level()).toBe(0);
+  }, 90_000);
+
   it("a failed Drill lowers the agent one level", async () => {
     streak(10);
     await gk.submitAction(await sign(Kind.Propose, { op: "SetLevel", agent, level: 1, reason: "vote" }));
