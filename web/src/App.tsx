@@ -9,6 +9,7 @@ import { Palette, type Command } from "./palette.tsx";
 import { keccak256, stringToHex } from "viem";
 import { PREVIEW, previewLog, previewRun, previewSigner, previewSnapshot, previewWallet } from "./preview.ts";
 import { Badge, Icon, type IconName } from "./icons.tsx";
+import { askConfirm } from "./confirm.tsx";
 import { IN_APP, getIslandEnabled, setDesktopSigner, setIslandEnabled } from "./desktop.ts";
 import { setThemePref, useThemePref, type ThemePref } from "./theme.ts";
 import { eventName, NAMED_KEYS } from "./eventNames.ts";
@@ -76,9 +77,32 @@ function Loading({ text }: { text: string }) {
 
 const usd = (n: number) => (isNoLimit(n) ? "no limit" : `$${n > 0 && n < 0.01 ? n.toFixed(4).replace(/0+$/, "") : n.toFixed(2)}`);
 const short = (s?: string | null) => (s ? `${s.slice(0, 6)}…${s.slice(-4)}` : "—");
+/**
+ * How far this computer's clock is ahead of Arc (ms), from the latest block the Gatekeeper read.
+ * Chain times (a proposal's creation, its wait's end) are compared against Arc's clock, not this
+ * computer's: a wrong system clock would otherwise show "5h ago" for a new proposal and a countdown
+ * that already says "executing…". Differences under a minute are just the block being a few seconds old.
+ */
+let chainSkewMs = 0;
+function setChainTime(chainTimeSec?: number | null) {
+  if (!chainTimeSec) return;
+  const skew = Date.now() - chainTimeSec * 1000;
+  chainSkewMs = Math.abs(skew) > 60_000 ? skew : 0;
+}
+/** Now, on Arc's clock (ms). */
+const chainNow = () => Date.now() - chainSkewMs;
+/** "5 hours", "12 minutes": how far the clock is off. */
+const fmtSkew = (min: number) => {
+  const m = Math.abs(min);
+  if (m < 90) return `${m} minute${m === 1 ? "" : "s"}`;
+  const h = Math.round(m / 60);
+  return h < 48 ? `${h} hour${h === 1 ? "" : "s"}` : `${Math.round(h / 24)} days`;
+};
+
+/** "5m ago". A number is a chain timestamp (seconds, Arc's clock); a string is the Gatekeeper's ISO time. */
 const ago = (iso: string | number) => {
   const t = typeof iso === "number" ? iso * 1000 : Date.parse(iso);
-  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  const s = Math.max(0, Math.round(((typeof iso === "number" ? chainNow() : Date.now()) - t) / 1000));
   if (s < 60) return `${s}s ago`;
   const m = Math.round(s / 60);
   if (m < 60) return `${m}m ago`;
@@ -516,6 +540,8 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
   }, [view]);
 
   const pol = s.policy!;
+  setChainTime(pol.chainTime); // before anything below renders a chain time
+  const clockOffMin = Math.round(chainSkewMs / 60_000);
   const dharma = s.org.dharma!.address as Address;
   const myAddr = me.address.toLowerCase();
   const myName = pol.members.find((m) => m.address === myAddr)?.name ?? short(myAddr);
@@ -601,7 +627,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
     { id: "sidebar", label: sideHidden ? "Pin the sidebar" : "Hide the sidebar", hint: "View", icon: sideHidden ? "pin" : "panel", keywords: "menu nav", run: toggleSide },
     ...(frozen
       ? [{ id: "unfreeze", label: "Unfreeze agents (goes to a vote)", hint: "Safety", icon: "stop" as IconName, run: () => (openUnfreeze ? setView("votes") : void ctx.change({ op: "Unfreeze" })) }]
-      : [{ id: "freeze", label: "Freeze all agents", hint: "Safety", icon: "stop" as IconName, keywords: "panic stop", run: () => confirm("Freeze every agent now? Unfreezing needs a vote.") && void ctx.change({ op: "Freeze" }) }]),
+      : [{ id: "freeze", label: "Freeze all agents", hint: "Safety", icon: "stop" as IconName, keywords: "panic stop", run: () => void askConfirm("Freeze every agent now? Unfreezing needs a vote.", { action: "Freeze all agents", danger: true, icon: "stop" }).then((ok) => ok && ctx.change({ op: "Freeze" })) }]),
   ];
 
 
@@ -704,6 +730,15 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
         </div>
 
         <div className="content" key={view}>
+          {Math.abs(clockOffMin) >= 5 && (
+            <div className="clock-note" role="status">
+              <Icon name="clock" size={16} />
+              <span>
+                This computer's clock is {fmtSkew(clockOffMin)} {clockOffMin > 0 ? "ahead of" : "behind"} Arc's. Vote times and countdowns are corrected; to fix it for good, turn on
+                <b> Settings → Time &amp; language → Date &amp; time → Set time automatically</b>, then <b>Sync now</b>.
+              </span>
+            </div>
+          )}
           {frozen && (
             <div className="freeze-banner" role="alert">
               <Icon name="stop" size={20} />
@@ -933,7 +968,7 @@ function Ballots({ ctx }: { ctx: Ctx }) {
     <>
       {live.map((g, i) => {
         const voted = g.voters.includes(myAddr);
-        const remaining = g.eta ? Math.max(0, g.eta - Math.floor(now / 1000)) : null;
+        const remaining = g.eta ? Math.max(0, g.eta - Math.floor((now - chainSkewMs) / 1000)) : null;
         const need = Number.isFinite(g.needed) ? g.needed : pol.required;
         // Every member can skip the wait on a normal change (not Unfreeze, never core).
         const canSkip = g.status === "queued" && !g.core && g.change.op !== "Unfreeze" && team && !voted && !!remaining;
@@ -994,8 +1029,8 @@ function Waits({ ctx }: { ctx: Ctx }) {
         </select>
         <button className="btn btn-ghost btn-sm" disabled={ctx.busy || !ok}
           title={sec < min || sec > max ? `Between ${waitText(min) === "no wait" ? "0" : waitText(min)} and ${waitText(max)}` : undefined}
-          onClick={() => {
-            if (op === "SetTimelock" && sec === 0 && !confirm("No wait means a passed change applies at once, so stolen keys could loosen rules immediately. Propose it anyway?")) return;
+          onClick={async () => {
+            if (op === "SetTimelock" && sec === 0 && !(await askConfirm("No wait means a passed change applies at once, so stolen keys could loosen rules immediately. Propose it anyway?", { action: "Propose anyway", danger: true }))) return;
             ctx.change({ op, seconds: sec } as Change);
           }}>Propose</button>
       </div>
@@ -1122,7 +1157,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
                 <div className="agent-actions">
                   <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => run(async () => { const r = await api<{ token: string }>(`/agents/${a.id}/rotate-token`, {}); setReveal({ token: r.token, agent: a.name, agentId: a.id }); })}>{a.hasToken ? "Rotate token" : "Issue token"}</button>
                   {(s.runs ?? []).some((r) => r.agentId === a.id) && <button className="btn btn-ghost btn-sm" onClick={() => setRunsFor(a.id)}>Runs</button>}
-                  {a.active && <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => confirm(`Propose removing ${a.name} from Dharma? It goes to a team vote.`) && ctx.change({ op: "RemoveAgent", id: a.id })}>Propose removal</button>}
+                  {a.active && <button className="btn btn-deny btn-sm" disabled={busy} onClick={async () => (await askConfirm(`Propose removing ${a.name} from Dharma? It goes to a team vote.`, { action: "Propose removal", danger: true })) && ctx.change({ op: "RemoveAgent", id: a.id })}>Propose removal</button>}
                 </div>
               </div>
             );
@@ -1299,7 +1334,7 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
                 )}
                 {r.core && r.active && (
                   <button className="btn btn-ghost btn-sm" disabled={busy}
-                    onClick={() => confirm(`${r.id} is a core rule. Removing it needs every member's vote and a ${waitText(pol.coreTimelock)} wait, and any freeze cancels it. Propose anyway?`) && ctx.change({ op: "RemoveRule", id: r.id })}>
+                    onClick={async () => (await askConfirm(`${r.id} is a core rule. Removing it needs every member's vote and a ${waitText(pol.coreTimelock)} wait, and any freeze cancels it. Propose anyway?`, { action: "Propose anyway", danger: true, icon: "lock" })) && ctx.change({ op: "RemoveRule", id: r.id })}>
                     propose removal
                   </button>
                 )}
@@ -1436,11 +1471,48 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
 
 // ============================================================== signed log
 
+const LOG_PAGE = 15;
+
 function Activity({ ctx, log }: { ctx: Ctx; log: LogEntry[] }) {
   const { s } = ctx;
   const [filter, setFilter] = useState<"all" | "decisions" | "events" | "on Arc">("all");
   const onArc = (e: LogEntry) => !!e.event && isTx((e.event as Record<string, unknown>).txRef);
-  const shown = useMemo(() => log.filter((e) => filter === "all" || (filter === "on Arc" ? onArc(e) : filter === "decisions" ? !!e.decision : !!e.event)), [log, filter]);
+  // The newest LOG_PAGE entries first; scrolling to the end adds LOG_PAGE more, fetching older
+  // entries from the Gatekeeper (`log` only holds the newest few hundred) until there are none left.
+  const [count, setCount] = useState(LOG_PAGE);
+  const [older, setOlder] = useState<LogEntry[]>([]);
+  const [noOlder, setNoOlder] = useState(PREVIEW);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  useEffect(() => setCount(LOG_PAGE), [filter]);
+  const merged = useMemo(() => {
+    const bySeq = new Map<number, LogEntry>();
+    for (const e of [...older, ...log]) bySeq.set(e.seq, e);
+    return [...bySeq.values()].sort((a, b) => b.seq - a.seq);
+  }, [log, older]);
+  const matching = useMemo(() => merged.filter((e) => filter === "all" || (filter === "on Arc" ? onArc(e) : filter === "decisions" ? !!e.decision : !!e.event)), [merged, filter]);
+  const oldestLoaded = merged.length ? merged[merged.length - 1].seq : 0;
+  const olderOnServer = !noOlder && oldestLoaded > 0;
+  const shown = matching.slice(0, count);
+  const hasMore = matching.length > count || olderOnServer;
+  // Not enough loaded to fill the next page (a filter can skip many entries): fetch the next older batch.
+  useEffect(() => {
+    if (matching.length >= count || !olderOnServer || loadingOlder) return;
+    setLoadingOlder(true);
+    api<LogEntry[]>(`/log?limit=100&before=${oldestLoaded}`)
+      .then((page) => (page.length ? setOlder((prev) => [...prev, ...page]) : setNoOlder(true)))
+      .catch(() => setNoOlder(true))
+      .finally(() => setLoadingOlder(false));
+  }, [matching.length, count, olderOnServer, oldestLoaded, loadingOlder]);
+  const sentinel = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = sentinel.current;
+    if (!el || !hasMore) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((x) => x.isIntersecting)) setCount((c) => (c < matching.length + LOG_PAGE ? c + LOG_PAGE : c));
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [hasMore, matching.length]);
   const who = (id: unknown) => {
     const v = String(id ?? "");
     return v.startsWith("0x") ? ctx.name(v) : s.policy!.agents.find((a) => a.id === v)?.name ?? v;
@@ -1486,6 +1558,9 @@ function Activity({ ctx, log }: { ctx: Ctx; log: LogEntry[] }) {
               </div>
             );
           })}
+          <div ref={sentinel} className="log-more muted small" aria-live="polite">
+            {hasMore ? (loadingOlder ? "Loading more…" : "Scroll for more") :`That's everything${filter === "all" ? "" : ` under “${filter}”`} · ${shown.length} shown`}
+          </div>
         </div>
       )}
       <div className="log-foot">
@@ -2038,7 +2113,7 @@ function Keys({ ctx }: { ctx: Ctx }) {
                     <input className="select-sm mono bind-input" aria-label={`Bind ${k.name} to a host`} placeholder="api.example.com" value={bind[k.name] ?? ""} onChange={(e) => setBind({ ...bind, [k.name]: e.target.value })} />
                     <button className="btn btn-ghost btn-sm" disabled={busy || !bind[k.name]} onClick={() => ctx.change({ op: "AddRule", id: ruleId(`k-${k.name}`), outcome: "Allow", scope: `key:${k.name}`, target: bind[k.name].trim().toLowerCase() })}>Propose binding</button>
                   </>}
-                  <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => confirm(`Delete key ${k.name}? Boxes using it start failing at once.`) && run(() => api(`/keys/${k.name}`, undefined, "DELETE"), "Key deleted")}>Delete</button>
+                  <button className="btn btn-deny btn-sm" disabled={busy} onClick={async () => (await askConfirm(`Delete key ${k.name}? Boxes using it start failing at once.`, { action: "Delete key", danger: true, icon: "key" })) && run(() => api(`/keys/${k.name}`, undefined, "DELETE"), "Key deleted")}>Delete</button>
                 </span>
               </div>
             ))}
@@ -2202,7 +2277,7 @@ function Computers({ ctx }: { ctx: Ctx }) {
             <div className="res" key={d.id}>
               <Badge v={seen !== null && seen < 10 * 60_000 ? "allow" : "approval"}>{seen !== null && seen < 10 * 60_000 ? "active" : "connected"}</Badge>
               <span className="small"><b>{d.agentName ?? d.name}</b> · {toolName(d.tool)} · {d.lastSeenAt ? `last call ${ago(d.lastSeenAt)}` : "no calls yet"}</span>
-              <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => confirm(`Disconnect ${d.name}? Its tool calls stop working at once.`) && run(() => api(`/devices/${d.id}/revoke`, {}), "Disconnected")}>Disconnect</button>
+              <button className="btn btn-ghost btn-sm" disabled={busy} onClick={async () => (await askConfirm(`Disconnect ${d.name}? Its tool calls stop working at once.`, { action: "Disconnect", danger: true })) && run(() => api(`/devices/${d.id}/revoke`, {}), "Disconnected")}>Disconnect</button>
             </div>
           );
         })}
@@ -2321,7 +2396,7 @@ function BuiltControls({ a, ctx, openRuns }: { a: AgentView; ctx: Ctx; openRuns:
           <div className="row-form">
             <button className="btn btn-ghost btn-sm" onClick={() => setEditing(null)}>Cancel</button>
             <button className="btn btn-dark btn-sm" disabled={busy || !editing.trim() || editing === b.instructions}
-              onClick={() => confirm(`Change ${a.name}'s instructions?\n\nNow:\n${b.instructions}\n\nNew:\n${editing}`) && run(() => api(`/agents/${a.id}/built`, { instructions: editing }, "PATCH"), "Instructions changed").then((ok) => ok && setEditing(null))}>Save</button>
+              onClick={async () => (await askConfirm(`Change ${a.name}'s instructions?\n\nNow:\n${b.instructions}\n\nNew:\n${editing}`, { action: "Change instructions", icon: "pen" })) && run(() => api(`/agents/${a.id}/built`, { instructions: editing }, "PATCH"), "Instructions changed").then((ok) => ok && setEditing(null))}>Save</button>
           </div>
         </div>
       ) : (
@@ -2400,7 +2475,7 @@ function RunTimeline({ ctx, id }: { ctx: Ctx; id: string }) {
         <span className="small muted">{r.models.length ? `Model: ${r.models.join(", ")}` : ""}</span>
         <span className="run-head-actions">
           {session?.viewer && !session.remote && live && <a className="btn btn-ghost btn-sm" href={session.viewer} target="_blank" rel="noreferrer">Watch screen <Icon name="external" size={12} /></a>}
-          {live && <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => confirm("Stop this run now?") && run(() => api(`/runs/${r.id}/stop`, {}), "Stopping")}>Stop</button>}
+          {live && <button className="btn btn-deny btn-sm" disabled={busy} onClick={async () => (await askConfirm("Stop this run now?", { action: "Stop run", danger: true, icon: "stop" })) && run(() => api(`/runs/${r.id}/stop`, {}), "Stopping")}>Stop</button>}
         </span>
       </div>
       {!r.reasoningVisible && <p className="notice small">This agent's reasoning isn't visible; only its actions are.</p>}
@@ -2468,14 +2543,14 @@ function Connectors({ ctx }: { ctx: Ctx }) {
           <div className="res">
             {c.error ? <Badge v="deny">unreachable</Badge> : <span className="intro-mark"><Icon name="plug" size={15} /></span>}
             <span className="small"><b>{c.name}</b> <span className="mono muted">{c.url}</span>{c.error && <span className="muted"> · {c.error}</span>}{!c.hasKey && <span className="muted"> · no key (add one named {c.name} if it needs sign-in)</span>}</span>
-            {rule(c.name) ? <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => confirm(`Remove the ${c.name} connector? Chat apps lose its tools.`) && ctx.change({ op: "RemoveRule", id: rule(c.name)!.id })}>Remove</button> : <span />}
+            {rule(c.name) ? <button className="btn btn-ghost btn-sm" disabled={busy} onClick={async () => (await askConfirm(`Remove the ${c.name} connector? Chat apps lose its tools.`, { action: "Remove connector", danger: true, icon: "plug" })) && ctx.change({ op: "RemoveRule", id: rule(c.name)!.id })}>Remove</button> : <span />}
           </div>
           {c.tools.map((t) => (
             <div className="res tool-row" key={t.key}>
               {t.changed ? <Badge v="deny">changed</Badge> : <Badge v="allow">approved</Badge>}
               <span className="small"><b className="mono">{t.name}</b> <span className="muted untrusted-text">{(t.changed?.description ?? t.description).slice(0, 220)}</span></span>
               {t.changed
-                ? <button className="btn btn-ghost btn-sm" disabled={busy} title="Its description, inputs or hints changed since your team approved this connector" onClick={() => confirm(`Accept the new definition of ${t.name}?\n\nBefore: ${t.description}\n\nNow: ${t.changed!.description}`) && run(() => api(`/connectors/tools/${encodeURIComponent(t.key)}/accept`, {}), "Change accepted")}>Review change</button>
+                ? <button className="btn btn-ghost btn-sm" disabled={busy} title="Its description, inputs or hints changed since your team approved this connector" onClick={async () => (await askConfirm(`Accept the new definition of ${t.name}?\n\nBefore: ${t.description}\n\nNow: ${t.changed!.description}`, { action: "Accept change", icon: "plug" })) && run(() => api(`/connectors/tools/${encodeURIComponent(t.key)}/accept`, {}), "Change accepted")}>Review change</button>
                 : <span />}
             </div>
           ))}
@@ -2499,8 +2574,8 @@ function AgentLevel({ a, ctx }: { a: AgentView; ctx: Ctx }) {
   const rec = a.record;
   const e = a.eligibility;
   const pending = s.policy!.proposals.some((g) => (g.status === "open" || g.status === "queued") && g.change.op === "SetLevel" && g.change.agent === a.id);
-  const lower = () =>
-    confirm(`Lower ${a.name} to ${levelText(level - 1)} now? This applies immediately. Raising it again needs a clean record and a vote.`) &&
+  const lower = async () =>
+    (await askConfirm(`Lower ${a.name} to ${levelText(level - 1)} now? This applies immediately. Raising it again needs a clean record and a vote.`, { action: `Lower to Level ${level - 1}`, danger: true })) &&
     ctx.change({ op: "SetLevel", agent: a.id, level: level - 1, reason: "member" });
   return (
     <div className="agent-level">

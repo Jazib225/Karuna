@@ -2795,8 +2795,11 @@ export class Gatekeeper extends EventEmitter {
     };
   }
 
-  logTail(limit = 200) {
-    return this.log.all().slice(-limit).reverse();
+  /** The newest `limit` log entries, newest first; with `before`, the ones older than that seq (paging back). */
+  logTail(limit = 200, before?: number) {
+    const all = this.log.all();
+    const older = before === undefined ? all : all.filter((e) => e.seq < before);
+    return older.slice(-limit).reverse();
   }
 }
 

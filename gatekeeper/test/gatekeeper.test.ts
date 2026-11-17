@@ -17,7 +17,7 @@ import {
 import { Store } from "../src/store.ts";
 import { SecretStore } from "../src/secrets.ts";
 import { Gatekeeper, GatekeeperError, type SignedAction } from "../src/gatekeeper.ts";
-import { ViemChainWriter, ChainError } from "../src/chain.ts";
+import { ViemChainWriter, ChainError, RelayedChainWriter, type ChainWriter } from "../src/chain.ts";
 import type { WalletBackend, X402Quote } from "../src/wallet.ts";
 
 const PORT = 18545 + Math.floor(Math.random() * 1000);
@@ -332,6 +332,74 @@ describe("panic button", () => {
     await waitTimelock();
     expect(gk.policy!.frozen).toBe(false);
     expect((await gk.propose(agent, { type: "action", tool: "shell", command: "ls" })).status).toBe("allowed");
+  }, 30_000);
+});
+
+describe("fast relay for members' own writes", () => {
+  const relayAccount = privateKeyToAccount("0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"); // anvil's account #1
+  const writers = () => ({
+    gkW: new ViemChainWriter(createWalletClient({ chain, account: gkAccount, transport: http(RPC) }), client),
+    relayW: new ViemChainWriter(createWalletClient({ chain, account: relayAccount, transport: http(RPC) }), client),
+  });
+
+  it("proposals and executions go through the relay key; the Gatekeeper's own writes still come from Dharma.gatekeeper", async () => {
+    const { gkW, relayW } = writers();
+    await gk.idle(); // the org beforeEach made shares Dharma.gatekeeper's account: let its writes land
+    gk = new Gatekeeper({ store: new Store(mkdtempSync(join(tmpdir(), "karuna-relay-"))), wallet, client, writerFor: () => new RelayedChainWriter(gkW, relayW), timelockSeconds: 60, anchorEvery: 1000 });
+    await gk.setup({ orgName: "Relay Org", memberName: "Alice", memberAddress: alice.address, walletAddress: gkAccount.address });
+    await gk.idle();
+    const relayed: string[] = [];
+    const own: string[] = [];
+    const deliver = relayW.write.bind(relayW);
+    relayW.write = async (c, fn, a) => (relayed.push(fn), deliver(c, fn, a));
+    const gkDeliver = gkW.write.bind(gkW);
+    gkW.write = async (c, fn, a) => (own.push(fn), gkDeliver(c, fn, a));
+    await activateAgent(1); // 2 proposals by Alice, then the Gatekeeper executes both
+    await gk.idle();
+    expect(gk.policy!.agents).toHaveLength(1); // Dharma accepted what the relay key delivered
+    expect(relayed).toEqual(["propose", "propose", "execute", "execute"]);
+    // Only the Gatekeeper's own calls used Dharma.gatekeeper (here: publishing the new agent's record).
+    expect(own.filter((fn) => ["propose", "vote", "execute"].includes(fn))).toEqual([]);
+    await gk.anchorNow(); // a Gatekeeper-only call
+    expect(own.at(-1)).toMatch(/^anchor/);
+    expect(relayed).toHaveLength(4);
+  }, 60_000);
+
+  it("a refusal from Dharma isn't retried elsewhere; any other relay failure falls back to the Gatekeeper's wallet", async () => {
+    const calls: string[] = [];
+    const fake = (name: string, fail?: Error): ChainWriter => ({
+      from: gkAccount.address,
+      deploy: async () => { throw new Error("unused"); },
+      deployCode: async () => { throw new Error("unused"); },
+      write: async (_c, fn) => { calls.push(`${name}:${fn}`); if (fail) throw fail; return { txRef: `0x${name}` }; },
+    });
+    const dharma = "0x0000000000000000000000000000000000000001" as Address;
+    const sig = [0, "0x", alice.address, 0n, "0x"];
+    // Out of gas money (no revert reason): delivered through the Gatekeeper's wallet instead.
+    let w = new RelayedChainWriter(fake("circle"), fake("relay", new Error("insufficient funds for gas")));
+    expect(await w.write(dharma, "propose", sig)).toEqual({ txRef: "0xcircle" });
+    // Dharma refused it: the same answer everywhere, so no second try.
+    w = new RelayedChainWriter(fake("circle"), fake("relay", new ChainError("Dharma rejected this: MembersMustPropose", "MembersMustPropose")));
+    await expect(w.write(dharma, "propose", sig)).rejects.toThrow(/MembersMustPropose/);
+    // The Gatekeeper's own tighten (signer 0) never goes through the relay.
+    w = new RelayedChainWriter(fake("circle"), fake("relay"));
+    await w.write(dharma, "tighten", [0, "0x", "0x0000000000000000000000000000000000000000", 0n, "0x"]);
+    await w.write(dharma, "anchorLog", ["0x", 1n]);
+    expect(calls).toEqual(["relay:propose", "circle:propose", "relay:propose", "circle:tighten", "circle:anchorLog"]);
+  });
+});
+
+describe("the decision log pages back through every entry", () => {
+  it("newest first, then the entries older than a given seq, until none are left", async () => {
+    await activateAgent(1);
+    const total = gk.log.length;
+    expect(total).toBeGreaterThan(3);
+    const first = gk.logTail(2);
+    expect(first.map((e) => e.seq)).toEqual([total - 1, total - 2]);
+    const seen = [...first];
+    for (let page = gk.logTail(2, first.at(-1)!.seq); page.length; page = gk.logTail(2, seen.at(-1)!.seq)) seen.push(...page);
+    expect(seen.map((e) => e.seq)).toEqual([...Array(total).keys()].reverse()); // all of them, once, newest first
+    expect(gk.logTail(5, 0)).toEqual([]);
   }, 30_000);
 });
 
