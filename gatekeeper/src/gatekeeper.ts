@@ -560,6 +560,30 @@ export class Gatekeeper extends EventEmitter {
     await this.anchorIfDue();
     this.shieldHousekeeping();
     this.scheduleBuiltAgents();
+    this.watchConnectors();
+  }
+
+  private connectorsCheckedAt = 0;
+  private connectorsChecking = false;
+  /**
+   * Read each connector's tools on our own, not only when a chat app asks: a newly voted connector's
+   * tools are recorded (and shown in the console) right after the vote, so the approved definition
+   * is the one the team approved, and a tool that changes later is caught even if no chat is open.
+   * A connector not read yet is tried every 10 s; the rest about once a minute (their tool lists
+   * are cached that long anyway).
+   */
+  private watchConnectors() {
+    if (!this.timer) return; // only while running on its timer (start()), not when driven by hand
+    const defs = this.connectorDefs();
+    if (!defs.length || this.connectorsChecking) return;
+    const unseen = defs.some((c) => !Object.keys(this.state.toolSnapshots ?? {}).some((k) => k.startsWith(`${c.name}:`)));
+    if (Date.now() - this.connectorsCheckedAt < (unseen ? 10_000 : 60_000)) return;
+    this.connectorsChecking = true;
+    this.connectorsCheckedAt = Date.now();
+    void this.connectorTools()
+      .then(() => this.emit("change"))
+      .catch(() => undefined)
+      .finally(() => (this.connectorsChecking = false));
   }
 
   /** Anyone may execute a passed proposal after its timelock; the Gatekeeper does it promptly. */

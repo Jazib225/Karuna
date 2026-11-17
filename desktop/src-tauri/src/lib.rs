@@ -49,6 +49,34 @@ fn island_error(app: &AppHandle, id: &str, error: &str) {
     let _ = app.emit_to(island::LABEL, "gk-event", json!({ "type": "error", "id": id, "error": error }));
 }
 
+/// Sites the console may open in the default browser: the Arc block explorers and Circle.
+const EXTERNAL_HOSTS: &[&str] = &["arcscan.app", "arc.io", "arc.network", "circle.com"];
+
+/// An https link to one of EXTERNAL_HOSTS (or a subdomain), with nothing a shell could misread.
+fn external_link_allowed(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else { return false };
+    if url.len() > 2048 || url.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '"' | '\'' | '<' | '>' | '`' | '^' | '|' | '\\')) {
+        return false;
+    }
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("").to_ascii_lowercase();
+    if host.contains('@') || host.contains(':') {
+        return false;
+    }
+    EXTERNAL_HOSTS.iter().any(|h| host == *h || host.ends_with(&format!(".{h}")))
+}
+
+fn open_in_browser(url: &str) {
+    #[cfg(windows)]
+    let r = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open").arg(url).spawn();
+    if let Err(e) = r {
+        eprintln!("karuna-desktop: couldn't open {url}: {e}");
+    }
+}
+
 #[tauri::command]
 fn island_rects(state: tauri::State<'_, Arc<IslandState>>, rects: Vec<Rect>) {
     *state.rects.lock().unwrap() = rects.into_iter().take(8).collect();
@@ -145,6 +173,15 @@ pub fn run() {
                 island_error(&h, &id, msg.get("error").and_then(Value::as_str).unwrap_or("The console couldn't sign this."));
             });
 
+            // The console asks to open a link in the default browser (its window can't open tabs).
+            // Only Arc explorer and Circle pages: nothing the console shows can open anything else.
+            app.listen_any("karuna://open-url", move |event| {
+                let Ok(msg) = serde_json::from_str::<Value>(event.payload()) else { return };
+                if let Some(url) = msg.get("url").and_then(Value::as_str).filter(|u| external_link_allowed(u)) {
+                    open_in_browser(url);
+                }
+            });
+
             // Minimize -> island. Tauri has no reliable minimize event on Windows: check on resize.
             if let Some(main) = app.get_webview_window("main") {
                 let h = handle.clone();
@@ -173,4 +210,24 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running the Karuna desktop app");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::external_link_allowed as ok;
+
+    #[test]
+    fn opens_only_arc_explorer_and_circle_links() {
+        assert!(ok("https://testnet.arcscan.app/tx/0xc2b5a637eb5b55b242fb303c7b02ac1d2bcabd642cb4bbda327f2d9c2c278815"));
+        assert!(ok("https://testnet.arcscan.app/address/0xe49fb1e8bbd7f8154e5a90c4275128965b7defe8"));
+        assert!(ok("https://explorer.testnet.arc.io/tx/0xabc"));
+        assert!(ok("https://faucet.circle.com"));
+        assert!(!ok("http://testnet.arcscan.app/tx/0xabc")); // https only
+        assert!(!ok("https://evil.example/tx/0xabc"));
+        assert!(!ok("https://arcscan.app.evil.example/"));
+        assert!(!ok("https://evilarcscan.app/"));
+        assert!(!ok("https://user@evil.example/"));
+        assert!(!ok("https://testnet.arcscan.app/\" & calc"));
+        assert!(!ok("file:///C:/Windows/System32/calc.exe"));
+    }
 }

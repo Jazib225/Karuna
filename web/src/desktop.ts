@@ -69,6 +69,15 @@ export function startDesktopBridge() {
   void tauri.event.listen("karuna://appearance-request", () => sendAppearance());
   onThemeChange(sendAppearance);
   sendAppearance();
+  // The app's window can't open new tabs, so a link meant for a new tab (an "Arc tx" link, the
+  // Dharma contract) would do nothing. Hand it to the app, which opens explorer links in the
+  // default browser (and nothing else; see lib.rs).
+  document.addEventListener("click", (e) => {
+    const a = (e.target as Element | null)?.closest?.("a[href]") as HTMLAnchorElement | null;
+    if (!a || a.target !== "_blank" || !a.href.startsWith("https://")) return;
+    e.preventDefault();
+    void tauri.event.emit("karuna://open-url", { url: a.href });
+  }, true);
   void tauri.event.listen("karuna://sign-request", async (e) => {
     const req = e.payload as SignRequest;
     if (!req?.id || !/^(0x)?[0-9a-fA-F]{64}$/.test(req.payload_hash ?? "") || (req.decision !== "approve" && req.decision !== "deny")) return;
