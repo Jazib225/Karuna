@@ -8,6 +8,7 @@ import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { USAGE, parseArgs, type RunArgs } from "./args.ts";
 import { scanForSecrets } from "./scan.ts";
+import { ensureDocker } from "./docker.ts";
 import {
   DESKTOP_BASE_DOCKERFILE, DESKTOP_BASE_TAG, DESKTOP_BROWSER, DESKTOP_ENTRY,
   REMOTE_RELAY_DOCKERFILE, REMOTE_RELAY_JS, REMOTE_RELAY_TAG,
@@ -127,6 +128,8 @@ async function main() {
       throw new Error("Refusing to box a folder that contains real keys. Move them into Karuna (Keys page) and use the placeholder variable instead.");
     }
   }
+  // Docker must be up: start Docker Desktop if it's installed but stopped (nobody opens it by hand).
+  await ensureDocker(say);
   const isolation = pickIsolation(a.isolation);
 
   const tmp = mkdtempSync(join(tmpdir(), "karuna-run-"));
@@ -141,6 +144,8 @@ async function main() {
   }
   const sess = await api(a, "/v1/sessions", a.token, "POST", {
     host: hostname(), mounts: a.mounts.filter((m) => m.writable).map((m) => resolve(m.host)), isolation, desktop: a.desktop, remote,
+    // When Karuna itself started this run (an agent it builds and runs), its run record.
+    ...(process.env.KARUNA_RUN_ID ? { runId: process.env.KARUNA_RUN_ID } : {}),
   });
   const session = String(sess.session);
   const id = String(sess.id);
@@ -229,9 +234,39 @@ async function main() {
       }
     }, 5000);
 
+    // What the box prints goes to this terminal as before, and to its run in Karuna (shown there as
+    // the agent's own notes), a second at a time.
+    let pending: string[] = [];
+    let partial = "";
+    const flush = () => {
+      if (!pending.length) return;
+      const lines = pending.splice(0, 200);
+      void api(a, "/v1/sessions/output", session, "POST", { lines }).catch(() => undefined);
+    };
+    const shipper = setInterval(flush, 1000);
+    const collect = (buf: Buffer) => {
+      const text = partial + buf.toString("utf8");
+      const parts = text.split(/\r?\n/);
+      partial = parts.pop() ?? "";
+      for (const l of parts) if (l.trim()) pending.push(l.slice(0, 2000));
+      if (pending.length > 2000) pending = pending.slice(-2000);
+    };
     const code = await new Promise<number>((done) => {
-      const p = spawn("docker", args, { stdio: "inherit" });
-      p.on("exit", (c) => done(c ?? 1));
+      const p = spawn("docker", args, { stdio: ["inherit", "pipe", "pipe"] });
+      p.stdout!.on("data", (b: Buffer) => {
+        process.stdout.write(b);
+        collect(b);
+      });
+      p.stderr!.on("data", (b: Buffer) => {
+        process.stderr.write(b);
+        collect(b);
+      });
+      p.on("exit", (c) => {
+        if (partial.trim()) pending.push(partial);
+        clearInterval(shipper);
+        flush();
+        done(c ?? 1);
+      });
       const stop = () => spawnSync("docker", ["kill", box], { stdio: "ignore" });
       process.once("SIGINT", stop);
       process.once("SIGTERM", stop);

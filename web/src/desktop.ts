@@ -4,7 +4,7 @@
 // window (the console, which holds this member's browser key) to sign that exact decision: the
 // request id + payload hash + approve/deny. The signed decision goes back over the Gatekeeper's
 // pipe, and the Gatekeeper verifies the signature like any console approval.
-import type { PrivateKeyAccount } from "viem/accounts";
+import type { Signer } from "./signer.ts";
 import type { Address } from "viem";
 import { signDecision } from "./signer.ts";
 import { getThemePref, onThemeChange } from "./theme.ts";
@@ -28,10 +28,10 @@ interface SignRequest {
   decision: "approve" | "deny";
 }
 
-let current: { me: PrivateKeyAccount; dharma: Address; isMember: boolean } | null = null;
+let current: { me: Signer; dharma: Address; isMember: boolean } | null = null;
 
 /** Called by the console once it knows who this browser is. */
-export function setDesktopSigner(me: PrivateKeyAccount | null, dharma: Address | null, isMember: boolean) {
+export function setDesktopSigner(me: Signer | null, dharma: Address | null, isMember: boolean) {
   // Without a loaded org (Gatekeeper offline, or the mock) we still sign: a signature is useless to
   // anyone but the real Gatekeeper, which checks it against Dharma and its members.
   current = me ? { me, dharma: dharma ?? "0x0000000000000000000000000000000000000000", isMember } : null;

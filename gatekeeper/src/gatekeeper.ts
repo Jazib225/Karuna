@@ -29,10 +29,16 @@ import {
   TEMPLATES, assertShieldSafe, autoRule, isAutoRule, makeTest, tracesTo,
   type InboxMessage, type ShieldTest, type TestTemplate,
 } from "./shield.ts";
-import { band, bandLabel, learnedDenyRule, previewLoosening, suggestions, LOOSENING_OPS, type PastRequest, type Precedent, type Preview } from "./learn.ts";
+import { band, bandLabel, learnedDenyRule, previewLoosening, suggestions, isLoosening, type PastRequest, type Precedent, type Preview } from "./learn.ts";
 import { PivotTracker, findCredential, findTrap, mintTraps, targetOf, trapEnvFile, trapLeakMessage, type TrapSet } from "./swarm.ts";
 import { SecretStore } from "./secrets.ts";
 import { DRAFT_KEYS, NoDrafterError, draftRules, freshIds, type DraftResult } from "./draft.ts";
+import { hookRequest, type HookCall } from "./hook.ts";
+import { ConnectorClients, exposedName, splitName, toolFingerprint, type ConnectorDef } from "./connectors.ts";
+import type { ModelExchange } from "./models.ts";
+import { draftAgentSpec, type AgentDraft } from "./agent-draft.ts";
+import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { WebTools, searchUrl } from "./web.ts";
 
 // ---------------------------------------------------------------- types
 
@@ -129,6 +135,29 @@ interface State {
   chainRecords?: { at: string; source: string; records: Record<string, AgentRecord> } | null;
   /** The wallet watchdog: every USDC transfer that left the org's wallet, and what it matched. */
   watchdog?: WatchdogEvent[];
+  /** Computers running Claude Code or Cursor with the Karuna plugin, each tied to an agent. */
+  devices?: Device[];
+  /** What each sandbox run did: model exchanges, actions and decisions, the agent's own notes. */
+  runs?: Run[];
+  /** Agents Karuna builds and runs: their instructions and schedule (the agent itself is on Dharma). */
+  builtAgents?: Record<string, BuiltAgent>;
+  /** Each connector tool as first seen after the team approved its connector (to catch changes). */
+  toolSnapshots?: Record<string, { fingerprint: string; description: string; firstSeenAt: string; changed?: { fingerprint: string; description: string; seenAt: string } }>;
+}
+
+export interface Device {
+  id: string;
+  secretHash: string; // the plugin's polling secret, hashed
+  code: string; // shown on the computer and in the console, so the member knows which is which
+  name: string;
+  tool: string; // "claude-code" | "cursor"
+  requestedAt: string;
+  status: "pending" | "approved" | "denied" | "revoked" | "expired";
+  agentId?: string;
+  pendingToken?: string; // handed to the plugin once, then removed
+  approvedBy?: string;
+  approvedAt?: string;
+  lastSeenAt?: string;
 }
 
 export interface WatchdogEvent {
@@ -180,6 +209,11 @@ export interface GatekeeperDeps {
   secrets?: SecretStore; // the org's API keys; only the egress proxy ever sees values
   requireSandbox?: boolean; // agent tokens only work from inside a Karuna sandbox (unless voted otherwise)
   requireIsolation?: "gvisor" | "docker"; // refuse runs weaker than this
+  connectors?: ConnectorClients; // MCP clients for the team's connectors (tests pass a fake)
+  web?: WebTools; // Karuna's own web_search / web_fetch for chat apps (tests pass a fake fetch)
+  chatUrl?: string; // the public address chat apps reach Karuna at (a tunnel to the public port)
+  /** Starts a built agent's sandbox run (`karuna run` with the hosted runner). Returns a stop function. */
+  launcher?: (run: { agentId: string; token: string; runId: string; onOutput: (line: string) => void; onExit: (code: number) => void }) => () => void;
 }
 
 /** One `karuna run`: an agent in a box, reachable only through the egress proxy. */
@@ -198,6 +232,7 @@ export interface SandboxSession {
   denied: number;
   lastRequest: string | null;
   stopRequested: boolean;
+  runId?: string; // the run record this session's steps go to
 }
 
 /** One HTTP(S) request leaving a box, as the proxy saw it. */
@@ -223,6 +258,100 @@ const lower = (a: string) => a.toLowerCase();
 /** Seconds past a timelock before the Gatekeeper executes (the wallet provider's node can trail our RPC). */
 const EXECUTE_MARGIN_S = 3;
 const MAX_PROPOSALS_KEPT = 5000;
+
+// ---------------------------------------------------------------- runs and built agents
+
+export interface Run {
+  id: string;
+  agentId: string;
+  trigger: string; // "Run now", "Every 60 min", "Daily at 09:00", "Message in its inbox", "karuna run on <host>"
+  startedAt: string;
+  endedAt?: string;
+  status: "starting" | "running" | "done" | "failed" | "stopped";
+  steps: RunStep[];
+  built: boolean; // an agent Karuna runs (vs. a developer's `karuna run`)
+  exitCode?: number;
+  host?: string | null;
+  isolation?: string;
+}
+
+export type RunStep =
+  | { at: string; kind: "model"; exchange: ModelExchange; status: number }
+  | { at: string; kind: "raw-model"; url: string; provider: string; status: number }
+  | { at: string; kind: "action"; summary: string; outcome: "allowed" | "denied" | "waiting"; ruleId?: string; reason?: string; proposalId?: string }
+  | { at: string; kind: "note"; text: string };
+
+export interface Schedule {
+  kind: "manual" | "every" | "daily" | "inbox";
+  minutes?: number; // every N minutes (15 … 10080)
+  at?: string; // daily, "HH:MM" (Gatekeeper's local time)
+}
+
+export interface BuiltAgent {
+  instructions: string;
+  schedule: Schedule;
+  paused: boolean;
+  createdAt: string;
+  lastRunAt?: string;
+  inboxWaiting?: boolean;
+  model?: string;
+}
+
+const MAX_RUNS = 200;
+const MAX_RUN_STEPS = 500;
+
+export function parseSchedule(v: unknown): Schedule {
+  const o = (v && typeof v === "object" ? v : {}) as Record<string, unknown>;
+  const kind = ["manual", "every", "daily", "inbox"].includes(String(o.kind)) ? (String(o.kind) as Schedule["kind"]) : "manual";
+  if (kind === "every") {
+    const minutes = Math.round(Number(o.minutes));
+    if (!Number.isFinite(minutes) || minutes < 15 || minutes > 10_080) throw new GatekeeperError("Run every 15 minutes to 7 days");
+    return { kind, minutes };
+  }
+  if (kind === "daily") {
+    const at = String(o.at ?? "");
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(at)) throw new GatekeeperError("Daily time is HH:MM");
+    return { kind, at };
+  }
+  return { kind };
+}
+
+export function scheduleText(s: Schedule): string {
+  if (s.kind === "every") return s.minutes! % 60 === 0 ? `Every ${s.minutes! / 60} h` : `Every ${s.minutes} min`;
+  if (s.kind === "daily") return `Daily at ${s.at}`;
+  if (s.kind === "inbox") return "When a message arrives in its inbox";
+  return "Only when started";
+}
+
+/** Why a built agent should start now, or null. */
+export function dueReason(b: BuiltAgent, now: Date): string | null {
+  const last = b.lastRunAt ? Date.parse(b.lastRunAt) : 0;
+  const s = b.schedule;
+  if (s.kind === "every" && now.getTime() - last >= s.minutes! * 60_000) return scheduleText(s);
+  if (s.kind === "daily") {
+    const [h, m] = s.at!.split(":").map(Number);
+    const today = new Date(now);
+    today.setHours(h, m, 0, 0);
+    if (now >= today && last < today.getTime()) return scheduleText(s);
+  }
+  if (s.kind === "inbox" && b.inboxWaiting) return "Message in its inbox";
+  return null;
+}
+
+function runSummary(r: Run, agentName: string) {
+  const models = [...new Set(r.steps.flatMap((s) => (s.kind === "model" ? [`${s.exchange.model || "model"} (${s.exchange.provider})`] : s.kind === "raw-model" ? [s.provider] : [])))];
+  const actions = r.steps.filter((s) => s.kind === "action").length;
+  const modelSteps = r.steps.filter((s) => s.kind === "model" || s.kind === "raw-model").length;
+  return {
+    id: r.id, agentId: r.agentId, agentName, trigger: r.trigger, startedAt: r.startedAt, endedAt: r.endedAt ?? null, status: r.status,
+    built: r.built, host: r.host ?? null, steps: r.steps.length, actions, models,
+    reasoningVisible: modelSteps > 0 || actions === 0,
+    waiting: r.steps.filter((s) => s.kind === "action" && s.outcome === "waiting").length,
+  };
+}
+
+/** How long a computer's connection request waits for a member. */
+const DEVICE_TTL_MS = 30 * 60_000;
 /** Circle Gateway's wallet contract on EVM testnets: deposits there stay the org's money. */
 export const GATEWAY_WALLET = (process.env.KARUNA_GATEWAY_WALLET ?? "0x0077777d7EBA4688BDeF3E311b846F25870A19B9").toLowerCase();
 const KIND_NAMES = ["tighten", "propose", "vote"] as const;
@@ -255,6 +384,12 @@ export class Gatekeeper extends EventEmitter {
   remote: { port: number; host: string; names: string[] } | null = null;
   /** One-time passes for HTTP requests a member approved: request hash -> expiry. */
   private grants = new Map<string, number>();
+  /** MCP clients for the team's connectors, and the last error per connector. */
+  readonly connectors: ConnectorClients;
+  readonly web: WebTools;
+  private connectorErrors = new Map<string, string>();
+  /** Stop functions for runs the scheduler launched. */
+  private launchStops = new Map<string, () => void>();
   /** Level drops sent but not yet read back from the chain. */
   private pendingLevel = new Map<string, number>();
   /** When each agent last tripped a Tripwire (reported once a minute at most). */
@@ -263,6 +398,8 @@ export class Gatekeeper extends EventEmitter {
   constructor(private readonly deps: GatekeeperDeps) {
     super();
     this.now = deps.now ?? (() => new Date());
+    this.connectors = deps.connectors ?? new ConnectorClients();
+    this.web = deps.web ?? new WebTools();
     const stored = deps.store.readJson<{ version?: number }>("org.json", emptyOrg);
     if (stored.version !== 2) {
       // Phase 2 kept policy locally; Dharma replaces it. Start a fresh org (old file is kept).
@@ -422,6 +559,7 @@ export class Gatekeeper extends EventEmitter {
     await this.executeReady();
     await this.anchorIfDue();
     this.shieldHousekeeping();
+    this.scheduleBuiltAgents();
   }
 
   /** Anyone may execute a passed proposal after its timelock; the Gatekeeper does it promptly. */
@@ -983,6 +1121,12 @@ export class Gatekeeper extends EventEmitter {
     return this.capabilityRules("unsandboxed").some((r) => r.target === agentId);
   }
 
+  /** A connected computer or chat's agent can be used: active on Dharma and, where sandboxes are
+   *  required, voted to run outside one. Until then its calls are refused. */
+  agentReady(agentId: string) {
+    return !!this.policy?.agents.some((a) => a.id === agentId) && (!this.requireSandbox || this.isUnsandboxed(agentId));
+  }
+
   /** Voted onchain: this agent may mount `hostPath` writable. Read-only mounts need no rule. */
   mayMountWritable(agentId: string, hostPath: string) {
     const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
@@ -1003,7 +1147,7 @@ export class Gatekeeper extends EventEmitter {
   }
 
   /** `karuna run` asks for a box. The agent must be on Dharma and the org not frozen. */
-  startSession(agentId: string, meta: { host?: unknown; isolation?: unknown; desktop?: unknown; remote?: unknown } = {}): SandboxSession {
+  startSession(agentId: string, meta: { host?: unknown; isolation?: unknown; desktop?: unknown; remote?: unknown; runId?: unknown } = {}): SandboxSession {
     const pol = this.requireReady();
     if (!pol.agents.some((a) => a.id === agentId)) throw new GatekeeperError("This agent is not active in Dharma yet", 403);
     if (this.isFrozen()) throw new GatekeeperError("All agents are frozen", 423);
@@ -1017,6 +1161,13 @@ export class Gatekeeper extends EventEmitter {
       isolation, desktop: meta.desktop === true, remote: meta.remote === true, viewer: null,
       requests: 0, denied: 0, lastRequest: null, stopRequested: false,
     };
+    // Its run: the one the scheduler made for it, or a new one for a developer's `karuna run`.
+    const planned = typeof meta.runId === "string" ? (this.state.runs ?? []).find((r) => r.id === meta.runId && r.agentId === agentId && r.status === "starting") : undefined;
+    const run = planned ?? this.newRun(agentId, `karuna run${s.host ? ` on ${s.host}` : ""}`, false);
+    run.status = "running";
+    run.host = s.host;
+    run.isolation = isolation;
+    s.runId = run.id;
     this.sessions.set(s.token, s);
     this.logEvent({ type: "sandbox-started", agent: agentId, session: s.id, host: s.host, isolation, desktop: s.desktop, remote: s.remote });
     this.save();
@@ -1051,6 +1202,11 @@ export class Gatekeeper extends EventEmitter {
     const s = this.sessions.get(token);
     if (!s) return;
     this.sessions.delete(token);
+    const run = s.runId ? (this.state.runs ?? []).find((r) => r.id === s.runId) : undefined;
+    if (run && run.status === "running") {
+      run.status = s.stopRequested ? "stopped" : why === "idle" ? "failed" : "done";
+      run.endedAt = this.now().toISOString();
+    }
     this.logEvent({ type: "sandbox-ended", agent: s.agentId, session: s.id, why, requests: s.requests, denied: s.denied });
     this.emit("session-end", token);
     this.save();
@@ -1070,7 +1226,21 @@ export class Gatekeeper extends EventEmitter {
    * rules, signed log), plus key bindings. Approvals become cards; a member's yes is a one-time
    * pass for exactly this request (method + URL + body hash) for 10 minutes.
    */
+  /** A request leaving a box: decided, and added to the box's run with its decision. */
   egress(token: string, r: EgressRequest): EgressVerdict {
+    const v = this.egressDecide(token, r);
+    let where = r.url;
+    try {
+      const u = new URL(r.url);
+      where = `${u.host}${u.pathname}`;
+    } catch {
+      /* keep raw */
+    }
+    this.recordAction(token, `${r.method.toUpperCase()} ${where}`, v.verdict === "allow" ? "allowed" : v.verdict === "pending" ? "waiting" : "denied", v.verdict === "allow" ? undefined : v.proposalId);
+    return v;
+  }
+
+  private egressDecide(token: string, r: EgressRequest): EgressVerdict {
     const s = this.session(token);
     if (!s) return { verdict: "deny" };
     s.lastSeen = Date.now();
@@ -1356,6 +1526,7 @@ export class Gatekeeper extends EventEmitter {
     const fromName = this.org.labels.agents[from] ?? from;
     const m: InboxMessage = { id: randomUUID(), agentId: to, from: `${fromName} (agent)`, subject: `Message from ${fromName}`, body, receivedAt: this.now().toISOString() };
     this.state.inbox.push(m);
+    this.wakeOnInbox(to);
   }
 
   /** Freeze every agent: instantly here, then onchain (a Gatekeeper-only tightening). */
@@ -1536,6 +1707,633 @@ export class Gatekeeper extends EventEmitter {
     })());
   }
 
+  // ================================================================ Claude Code / Cursor (ease 2a)
+
+  /**
+   * A computer asks to connect (the plugin's first run). It gets a short code to show its person; a
+   * member approves it in the console, which gives the computer its own agent. Unauthenticated, so
+   * only a handful can wait at once and each request expires.
+   */
+  requestDevice(input: { name?: unknown; tool?: unknown }) {
+    if (!isSetUp(this.org)) throw new GatekeeperError("This Karuna isn't set up yet", 409);
+    const devices = (this.state.devices ??= []);
+    const now = this.now().getTime();
+    for (const d of devices) if (d.status === "pending" && now - Date.parse(d.requestedAt) > DEVICE_TTL_MS) d.status = "expired";
+    if (devices.filter((d) => d.status === "pending").length >= 10) throw new GatekeeperError("Too many computers are waiting to connect; ask a member to review them", 429);
+    const name = requireText(input.name ?? "Claude Code", "Name", 60);
+    const tool = typeof input.tool === "string" && /^[a-z-]{2,20}$/.test(input.tool) ? input.tool : "claude-code";
+    const secret = randomBytes(24).toString("base64url");
+    const code = `${randomBytes(2).toString("hex")}-${randomBytes(2).toString("hex")}`.toUpperCase();
+    const d: Device = { id: randomUUID(), secretHash: sha256(secret), code, name, tool, requestedAt: this.now().toISOString(), status: "pending" };
+    devices.push(d);
+    if (devices.length > 200) this.state.devices = devices.slice(-200);
+    this.logEvent({ type: "device-requested", device: d.id, name, tool, code });
+    this.save();
+    return { deviceId: d.id, secret, code };
+  }
+
+  /** The plugin polls until a member approves; the agent token is handed over exactly once. */
+  pollDevice(input: { deviceId?: unknown; secret?: unknown }) {
+    const d = (this.state.devices ?? []).find((x) => x.id === input.deviceId);
+    if (!d || d.secretHash !== sha256(String(input.secret ?? ""))) throw new GatekeeperError("Unknown connection request", 404);
+    if (d.status === "pending" && this.now().getTime() - Date.parse(d.requestedAt) > DEVICE_TTL_MS) d.status = "expired";
+    if (d.status !== "approved" || !d.pendingToken) return { status: d.status === "approved" ? "connected" : d.status };
+    const token = d.pendingToken;
+    delete d.pendingToken;
+    this.save();
+    return { status: "approved", agentId: d.agentId, token };
+  }
+
+  /**
+   * A member approves a computer. The console has already proposed its agent on Dharma (and the
+   * outside-sandbox grant); here the computer gets that agent's token.
+   */
+  approveDevice(id: string, input: { agentId?: unknown; by?: unknown }) {
+    const d = (this.state.devices ?? []).find((x) => x.id === id);
+    if (!d || d.status !== "pending") throw new GatekeeperError("No such connection request waiting", 404);
+    const agentId = typeof input.agentId === "string" && input.agentId ? input.agentId : null;
+    const { id: agent, token } = agentId ? { id: agentId, ...this.rotateAgentToken(agentId) } : this.prepareAgent(d.name);
+    d.status = "approved";
+    d.agentId = agent;
+    d.pendingToken = token;
+    d.approvedBy = typeof input.by === "string" ? lower(input.by) : undefined;
+    d.approvedAt = this.now().toISOString();
+    this.logEvent({ type: "device-approved", device: d.id, agent, by: d.approvedBy ?? null });
+    this.save();
+    return { agentId: agent };
+  }
+
+  denyDevice(id: string) {
+    const d = (this.state.devices ?? []).find((x) => x.id === id);
+    if (!d || d.status !== "pending") throw new GatekeeperError("No such connection request waiting", 404);
+    d.status = "denied";
+    this.logEvent({ type: "device-denied", device: d.id });
+    this.save();
+    return { ok: true };
+  }
+
+  /** Disconnect a computer: its token stops working at once. */
+  revokeDevice(id: string) {
+    const d = (this.state.devices ?? []).find((x) => x.id === id);
+    if (!d || d.status !== "approved" || !d.agentId) throw new GatekeeperError("No such connected computer", 404);
+    this.rotateAgentToken(d.agentId); // the new token is discarded: nothing holds it
+    d.status = "revoked";
+    delete d.pendingToken;
+    this.logEvent({ type: "device-revoked", device: d.id, agent: d.agentId });
+    this.save();
+    return { ok: true };
+  }
+
+  /**
+   * One tool call from Claude Code or Cursor, before it runs. Same engine, rules, levels, Tripwire,
+   * freeze and log as any agent. "pending" means a member must approve it (waitHook).
+   */
+  hookCall(agentId: string, call: HookCall): { decision: "allow" | "deny" | "pending"; proposalId?: string } {
+    const pol = this.requireReady();
+    const device = (this.state.devices ?? []).find((d) => d.agentId === agentId && d.status === "approved");
+    if (device) device.lastSeenAt = this.now().toISOString();
+    const t = hookRequest(agentId, { tool: String(call.tool ?? ""), input: call.input && typeof call.input === "object" ? call.input : {}, cwd: String(call.cwd ?? "") });
+    if (t.kind !== "request") return { decision: "allow" };
+    const request = t.request;
+    const base = {
+      id: randomUUID(), agentId, createdAt: this.now().toISOString(),
+      action: { type: "action" as const, tool: (request.tool === "tool" ? "http" : request.tool) as "shell" | "file" | "http", command: request.command, path: request.path, url: request.url, method: request.method },
+      approvals: [],
+    };
+    const facts: Fact[] = [
+      { label: "From", value: `${this.org.labels.agents[agentId] ?? agentId} (${device?.tool === "cursor" ? "Cursor" : "Claude Code"}${device ? ` · ${device.name}` : ""})` },
+      { label: "Tool", value: String(call.tool).slice(0, 80) },
+      { label: "Action", value: t.summary || "(empty)" },
+    ];
+    const deny = (ruleId: string, reason: string) => {
+      const decision: Decision = { outcome: "deny", ruleId, reason };
+      this.logDecision(request, decision);
+      this.state.proposals.push({ ...base, request, decision, facts, status: "denied" });
+      this.save();
+      return { decision: "deny" as const, proposalId: base.id };
+    };
+    if (!pol.agents.some((a) => a.id === agentId)) return deny("agent-inactive", "This computer's agent isn't on Dharma yet (waiting for the vote)");
+
+    // A planted trap key in a command, a URL or a file write is proof of misbehavior.
+    const trap = findTrap(this.state.traps, { input: call.input });
+    if (trap) {
+      const first = !this.state.tainted[agentId];
+      this.state.tainted[agentId] = { at: this.now().toISOString(), secret: trap.secret };
+      const name = this.org.labels.agents[agentId] ?? agentId;
+      if (first) {
+        this.alert({ kind: "trap-touched", agentId, title: `${name} used a trap password`, body: `Its ${String(call.tool)} call contained ${trap.secret}, a fake credential planted by Karuna.` });
+        this.onTripwire([agentId], "trap password");
+      }
+      this.logEvent({ type: "trap-touched", agent: agentId, secret: trap.secret, trapSet: trap.trap.id, via: "hook" });
+      return deny("trap-password", `Used trap credential ${trap.secret}`);
+    }
+    if (this.isFrozen()) return deny("panic-freeze", "All agents are frozen");
+    if (this.state.paused) return deny("paused", `Agents are paused (by ${this.state.paused.by})`);
+
+    const decision = evaluate(request, this.ctxFor(pol, false), buildRuleset(pol.rules));
+    if (decision.outcome === "allow") {
+      this.logDecision(request, decision);
+      this.emit("egress-allowed", { agentId, method: String(call.tool), url: t.summary });
+      this.save();
+      return { decision: "allow" };
+    }
+    if (decision.outcome === "deny") return deny(decision.ruleId, decision.reason);
+    // Approval: the same call while one is waiting joins that card.
+    const hash = sha256(`hook\n${String(call.tool)}\n${JSON.stringify(call.input ?? {})}\n${String(call.cwd ?? "")}`);
+    const open = this.state.proposals.find((p) => p.status === "pending" && p.agentId === agentId && p.payloadHash === hash);
+    if (open) return { decision: "pending", proposalId: open.id };
+    this.logDecision(request, decision);
+    this.state.proposals.push({ ...base, request, decision, facts, payloadHash: hash, status: "pending" });
+    this.save();
+    return { decision: "pending", proposalId: base.id };
+  }
+
+  // ================================================================ chat apps and connectors (ease 2b)
+
+  /** A connected computer or chat was just used. */
+  touchDevice(agentId: string) {
+    const d = (this.state.devices ?? []).find((x) => x.agentId === agentId && x.status === "approved");
+    if (d) d.lastSeenAt = this.now().toISOString();
+  }
+
+  /** A payee by the name the team saved, or by address; null if it isn't one of the team's payees. */
+  resolvePayee(nameOrAddress: string): string | null {
+    const pol = this.policy;
+    if (!pol) return null;
+    const q = nameOrAddress.trim().toLowerCase();
+    const byAddr = pol.payees.find((p) => lower(p.account) === q);
+    if (byAddr) return lower(byAddr.account);
+    const byName = pol.payees.filter((p) => (this.org.labels.payees[lower(p.account)] ?? "").toLowerCase() === q);
+    return byName.length === 1 ? lower(byName[0].account) : null;
+  }
+
+  /** What an agent may still spend today without asking, in plain words. */
+  balanceText(agentId: string): string {
+    const pol = this.requireReady();
+    const a = pol.agents.find((x) => x.id === agentId);
+    if (!a) return "This connection's agent isn't active on Dharma yet.";
+    const spent = this.spentToday()[agentId] ?? 0;
+    const lvl = pol.version >= 3 && pol.levelLimits ? pol.levelLimits[a.level ?? 0] : null;
+    const daily = lvl ? lvl.dailyUsd : a.capUsd;
+    const left = Math.max(0, Math.round((daily - spent) * 1e6) / 1e6);
+    return [
+      lvl ? `Level ${a.level ?? 0}.` : null,
+      `Spent today: ${usd(spent)} of ${usd(daily)}; ${usd(left)} left without asking.`,
+      lvl ? `Each payment up to ${usd(lvl.perPaymentUsd)} runs on its own; anything more waits for a member.` : null,
+    ].filter(Boolean).join(" ");
+  }
+
+  /** The team's connectors, as voted on Dharma (capability rules `connector:<name>`, target = URL). */
+  connectorDefs(): ConnectorDef[] {
+    return (this.policy?.rules ?? [])
+      .filter((r) => r.active && !r.builtin && r.outcome === "allow" && r.scope.startsWith("connector:") && /^https:\/\/|^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(r.target))
+      .map((r) => {
+        const name = r.scope.slice("connector:".length).toLowerCase();
+        const key = this.deps.secrets?.list().some((k) => k.name === name) ? this.revealKey(name) : null;
+        return { name, url: r.target, key };
+      });
+  }
+
+  /** Every connector's tools, as chat apps see them (`<connector>__<tool>`); changed tools say so. */
+  async connectorTools(): Promise<Tool[]> {
+    const out: Tool[] = [];
+    for (const c of this.connectorDefs()) {
+      let tools: Tool[];
+      try {
+        tools = await this.connectors.listTools(c);
+        this.connectorErrors.delete(c.name);
+      } catch (e) {
+        this.connectorErrors.set(c.name, scrub(e));
+        continue;
+      }
+      for (const t of tools) {
+        const changed = this.noteTool(c.name, t);
+        out.push({
+          ...t,
+          name: exposedName(c.name, t.name),
+          description: `[${c.name}] ${t.description ?? ""}${changed ? " (This tool changed since your team approved it; calls wait for a member to review it.)" : ""}`.slice(0, 2000),
+        });
+      }
+    }
+    return out;
+  }
+
+  /** Remember a tool as first seen; report whether it has changed since. */
+  private noteTool(connector: string, t: Tool): boolean {
+    const key = `${connector}:${t.name}`;
+    const fp = toolFingerprint(t);
+    const snaps = (this.state.toolSnapshots ??= {});
+    const known = snaps[key];
+    if (!known) {
+      snaps[key] = { fingerprint: fp, description: (t.description ?? "").slice(0, 2000), firstSeenAt: this.now().toISOString() };
+      this.save();
+      return false;
+    }
+    if (known.fingerprint === fp) {
+      if (known.changed) {
+        delete known.changed;
+        this.save();
+      }
+      return false;
+    }
+    if (known.changed?.fingerprint !== fp) {
+      known.changed = { fingerprint: fp, description: (t.description ?? "").slice(0, 2000), seenAt: this.now().toISOString() };
+      this.alert({ kind: "agent-reported", agentId: "", title: `${connector} changed its ${t.name} tool`, body: "Calls to it wait for a member until someone reviews the change (Settings → Connectors)." });
+      this.logEvent({ type: "connector-tool-changed", connector, tool: t.name });
+      this.save();
+    }
+    return true;
+  }
+
+  /** A member reviewed a changed tool and accepts its new definition. */
+  acceptToolChange(key: string) {
+    const s = this.state.toolSnapshots?.[key];
+    if (!s?.changed) throw new GatekeeperError("No change to review for that tool", 404);
+    s.fingerprint = s.changed.fingerprint;
+    s.description = s.changed.description;
+    delete s.changed;
+    this.logEvent({ type: "connector-tool-accepted", tool: key });
+    this.save();
+    return { ok: true };
+  }
+
+  /**
+   * A chat app calls a connector's tool through Karuna. Decided like any action (rules, levels,
+   * freeze, traps); a held call waits briefly for a member, then tells the chat to check back.
+   */
+  async callConnectorTool(agentId: string, exposed: string, args: Record<string, unknown>) {
+    const parts = splitName(exposed);
+    const c = parts && this.connectorDefs().find((x) => x.name === parts.connector);
+    if (!parts || !c) return null;
+    const blocked = { content: [{ type: "text" as const, text: "Karuna blocked this." }] };
+    let tool: Tool | undefined;
+    try {
+      tool = (await this.connectors.listTools(c)).find((t) => t.name === parts.tool);
+    } catch {
+      return { content: [{ type: "text" as const, text: `Karuna couldn't reach the ${c.name} connector.` }], isError: true };
+    }
+    if (!tool) return null;
+    const pol = this.requireReady();
+    this.touchDevice(agentId);
+    const changed = this.noteTool(c.name, tool);
+    const request: Request = {
+      agent: agentId, host: true, tool: "tool", toolName: `${c.name}:${tool.name}`.toLowerCase(),
+      readOnly: tool.annotations?.readOnlyHint === true, destructive: tool.annotations?.destructiveHint === true,
+    };
+    const argText = JSON.stringify(args ?? {});
+    const hash = sha256(`tool\n${request.toolName}\n${argText}`);
+    const run = async () => {
+      const r = await this.connectors.callTool(c, tool!.name, args ?? {});
+      this.emit("egress-allowed", { agentId, method: "tool", url: request.toolName });
+      return r;
+    };
+    const base = {
+      id: randomUUID(), agentId, createdAt: this.now().toISOString(),
+      action: { type: "action" as const, tool: "http" as const, url: `mcp://${c.name}/${tool.name}`, body: argText.slice(0, 2000) },
+      approvals: [],
+    };
+    const facts: Fact[] = [
+      { label: "From", value: this.org.labels.agents[agentId] ?? agentId },
+      { label: "Connector", value: c.name },
+      { label: "Tool", value: tool.name },
+      { label: "Arguments", value: argText.slice(0, 300) || "{}" },
+      ...(changed ? [{ label: "Tool changed", value: "Its definition changed since your team approved this connector", tone: "warn" as const }] : []),
+      ...(tool.annotations?.destructiveHint ? [{ label: "Connector says", value: "destructive", tone: "warn" as const }] : []),
+    ];
+    return this.governedCall({ agentId, request, base, facts, hash, run, trapInput: { args }, hold: changed ? "tool-changed" : undefined });
+  }
+
+  /**
+   * Karuna's own web tools for chat apps. The Gatekeeper makes the GET itself (public addresses
+   * only), decided like any web request from an agent on someone's computer: allowlisted domains
+   * and Allow rules run, everything else asks a member.
+   */
+  async callWebTool(agentId: string, name: "web_search" | "web_fetch", args: Record<string, unknown>) {
+    this.requireReady();
+    this.touchDevice(agentId);
+    const text = (t: string, isError = false) => ({ content: [{ type: "text" as const, text: t }], ...(isError ? { isError: true } : {}) });
+    let url: string;
+    let run: () => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }>;
+    if (name === "web_search") {
+      const q = String(args.query ?? "").trim().slice(0, 300);
+      if (!q) return text("query is required.", true);
+      url = searchUrl(q);
+      run = async () => {
+        const hits = await this.web.search(q);
+        this.emit("egress-allowed", { agentId, method: "GET", url });
+        return text(hits.length ? hits.map((h, n) => `${n + 1}. ${h.title}\n${h.url}\n${h.snippet}`).join("\n\n") : "No results.");
+      };
+    } else {
+      url = String(args.url ?? "").trim();
+      try {
+        url = (await this.web.checkPublic(url)).href;
+      } catch (e) {
+        return text(e instanceof Error ? e.message : String(e), true);
+      }
+      run = async () => {
+        const page = await this.web.fetchPage(url);
+        this.emit("egress-allowed", { agentId, method: "GET", url });
+        if (page.redirect) return text(`It redirects to ${page.redirect}. Call web_fetch on that address to follow it.`);
+        return text(`${page.status} ${page.url}\n\n${page.text}${page.truncated ? "\n\n(cut short)" : ""}`, page.status >= 400);
+      };
+    }
+    const request: Request = { agent: agentId, host: true, tool: "http", method: "GET", url };
+    const hash = sha256(`web\nGET\n${url}`);
+    const base = {
+      id: randomUUID(), agentId, createdAt: this.now().toISOString(),
+      action: { type: "action" as const, tool: "http" as const, url, method: "GET" },
+      approvals: [],
+    };
+    const facts: Fact[] = [
+      { label: "From", value: this.org.labels.agents[agentId] ?? agentId },
+      { label: "Tool", value: name === "web_search" ? "Web search" : "Read a web page" },
+      { label: name === "web_search" ? "Search" : "Address", value: name === "web_search" ? String(args.query ?? "").slice(0, 300) : url },
+    ];
+    return this.governedCall({ agentId, request, base, facts, hash, run: async () => {
+      try {
+        return await run();
+      } catch (e) {
+        return text(`Karuna couldn't complete that: ${scrub(e)}`, true);
+      }
+    }, trapInput: { args } });
+  }
+
+  /** Rules, levels, freeze and traps for one call from a chat app; a held call waits briefly for a member. */
+  private async governedCall<R>(o: {
+    agentId: string; request: Request; base: Omit<Proposal, "request" | "decision" | "facts" | "status">; facts: Fact[]; hash: string;
+    run: () => Promise<R>; trapInput: Parameters<typeof findTrap>[1]; hold?: string;
+  }): Promise<R | { content: { type: "text"; text: string }[] }> {
+    const { agentId, request, base, facts, hash, run } = o;
+    const pol = this.requireReady();
+    const blocked = { content: [{ type: "text" as const, text: "Karuna blocked this." }] };
+    const deny = (ruleId: string, reason: string) => {
+      const decision: Decision = { outcome: "deny", ruleId, reason };
+      this.logDecision(request, decision);
+      this.state.proposals.push({ ...base, request, decision, facts, status: "denied" });
+      this.save();
+      return blocked;
+    };
+    if (!pol.agents.some((a) => a.id === agentId)) return deny("agent-inactive", "This connection's agent isn't on Dharma yet");
+    const trap = findTrap(this.state.traps, o.trapInput);
+    if (trap) {
+      this.state.tainted[agentId] = { at: this.now().toISOString(), secret: trap.secret };
+      this.onTripwire([agentId], "trap password");
+      return deny("trap-password", `Used trap credential ${trap.secret}`);
+    }
+    if (this.isFrozen()) return deny("panic-freeze", "All agents are frozen");
+    if (this.state.paused) return deny("paused", `Agents are paused (by ${this.state.paused.by})`);
+
+    // A member already approved exactly this call.
+    const grant = this.grants.get(hash);
+    if (grant && grant > Date.now()) {
+      this.grants.delete(hash);
+      this.logDecision(request, { outcome: "allow", ruleId: "human-approved", reason: "One-time pass from a member's approval" });
+      return run();
+    }
+    const evaluated = evaluate(request, this.ctxFor(pol, false), buildRuleset(pol.rules));
+    const decision: Decision = o.hold && evaluated.outcome === "allow"
+      ? { outcome: "approval", ruleId: o.hold, reason: "The tool changed since the team approved this connector" }
+      : evaluated;
+    if (decision.outcome === "allow") {
+      this.logDecision(request, decision);
+      this.save();
+      return run();
+    }
+    if (decision.outcome === "deny") return deny(decision.ruleId, decision.reason);
+    let open = this.state.proposals.find((p) => p.status === "pending" && p.agentId === agentId && p.payloadHash === hash);
+    if (!open) {
+      this.logDecision(request, decision);
+      open = { ...base, request, decision, facts, payloadHash: hash, status: "pending" };
+      this.state.proposals.push(open);
+      this.save();
+    }
+    const outcome = await this.waitForDecision(open.id, 20_000);
+    if (outcome === "allowed") {
+      this.grants.delete(hash);
+      return run();
+    }
+    if (outcome === "denied") return blocked;
+    return { content: [{ type: "text" as const, text: `Waiting for your team to approve this in Karuna (request ${open.id}). Try again once it's approved.` }] };
+  }
+
+  // ================================================================ runs (what an agent did), built agents (ease 3)
+
+  private runOf(token: string): Run | null {
+    const s = this.sessions.get(token);
+    if (!s?.runId) return null;
+    return (this.state.runs ?? []).find((r) => r.id === s.runId) ?? null;
+  }
+
+  private addStep(run: Run | null, step: RunStep) {
+    if (!run) return;
+    run.steps.push(step);
+    if (run.steps.length > MAX_RUN_STEPS) run.steps.splice(0, run.steps.length - MAX_RUN_STEPS);
+    this.emit("run-step", { runId: run.id, step });
+    this.emit("change");
+  }
+
+  /** A new run record (the scheduler makes one before launching; `karuna run` gets one at session start). */
+  private newRun(agentId: string, trigger: string, built: boolean): Run {
+    const run: Run = { id: randomUUID(), agentId, trigger, startedAt: this.now().toISOString(), status: "starting", steps: [], built };
+    const runs = (this.state.runs ??= []);
+    runs.push(run);
+    if (runs.length > MAX_RUNS) this.state.runs = runs.slice(-MAX_RUNS);
+    return run;
+  }
+
+  /** The egress proxy read a model call (Claude, GPT, Gemini, a local model) for this box. */
+  recordModelExchange(token: string, call: { url: string; status: number; exchange: ModelExchange | null; provider: string }) {
+    const run = this.runOf(token);
+    if (!run) return;
+    if (call.exchange) this.addStep(run, { at: this.now().toISOString(), kind: "model", exchange: call.exchange, status: call.status });
+    else this.addStep(run, { at: this.now().toISOString(), kind: "raw-model", url: call.url.slice(0, 300), provider: call.provider, status: call.status });
+  }
+
+  /** Lines the agent printed (captured by `karuna run`): its own account, not a record. */
+  noteOutput(token: string, lines: unknown) {
+    const run = this.runOf(token);
+    if (!run || !Array.isArray(lines)) return { ok: true };
+    for (const l of lines.slice(0, 200)) {
+      const text = String(l ?? "").replace(/\s+$/, "");
+      if (text) this.addStep(run, { at: this.now().toISOString(), kind: "note", text: text.slice(0, 2000) });
+    }
+    this.save();
+    return { ok: true };
+  }
+
+  /** An action from a box and Karuna's decision on it. */
+  private recordAction(token: string, summary: string, outcome: "allowed" | "denied" | "waiting", proposalId?: string) {
+    const run = this.runOf(token);
+    if (!run) return;
+    const p = proposalId ? this.state.proposals.find((x) => x.id === proposalId) : undefined;
+    this.addStep(run, {
+      at: this.now().toISOString(), kind: "action", summary: summary.slice(0, 300), outcome,
+      ruleId: p?.decision.ruleId, reason: p?.decision.reason, proposalId,
+    });
+  }
+
+  /** A proposal made from inside a box (payments, messages): add it to the box's run. */
+  noteRunProposal(token: string, r: AgentResponse) {
+    const p = this.state.proposals.find((x) => x.id === r.id);
+    if (!p) return;
+    const summary = p.facts.map((f) => `${f.label}: ${f.value}`).join(" · ") || p.request.tool;
+    this.recordAction(token, summary, r.status === "pending" ? "waiting" : r.status === "denied" || r.status === "failed" ? "denied" : "allowed", p.id);
+  }
+
+  runsView(agentId?: string) {
+    const L = this.labels();
+    return (this.state.runs ?? [])
+      .filter((r) => !agentId || r.agentId === agentId)
+      .slice(-60)
+      .reverse()
+      .map((r) => runSummary(r, L.agent(r.agentId) ?? r.agentId));
+  }
+
+  runView(id: string) {
+    const r = (this.state.runs ?? []).find((x) => x.id === id);
+    if (!r) throw new GatekeeperError("No such run", 404);
+    // Held actions show their current state (approved or denied since).
+    const steps = r.steps.map((st) => {
+      if (st.kind !== "action" || !st.proposalId) return st;
+      const p = this.state.proposals.find((x) => x.id === st.proposalId);
+      return p ? { ...st, now: p.status } : st;
+    });
+    return { ...runSummary(r, this.labels().agent(r.agentId) ?? r.agentId), steps };
+  }
+
+  /** Console: stop a run now (its box stops on the next heartbeat; its network is cut at once). */
+  stopRun(id: string) {
+    const r = (this.state.runs ?? []).find((x) => x.id === id);
+    if (!r) throw new GatekeeperError("No such run", 404);
+    const s = [...this.sessions.values()].find((x) => x.runId === id);
+    if (s) {
+      s.stopRequested = true;
+      this.logEvent({ type: "run-stop-requested", agent: r.agentId, run: id });
+    }
+    this.launchStops.get(id)?.();
+    r.status = "stopped";
+    r.endedAt ??= this.now().toISOString();
+    this.save();
+    return { ok: true };
+  }
+
+  // ---- built agents: Karuna drafts, stores and runs them
+
+  /** Plain English → a draft agent (name, instructions, schedule) and the rules it needs. Never proposes. */
+  async draftAgent(text: unknown) {
+    const pol = this.requireReady();
+    const job = requireText(text, "Job", 2000);
+    const keys = Object.fromEntries(DRAFT_KEYS.map((k) => [k, this.deps.secrets?.drafterKey(k) ?? this.deps.secrets?.reveal(k) ?? null]));
+    const payees = pol.payees.map((p) => ({ address: lower(p.account), name: this.org.labels.payees[lower(p.account)] ?? p.account, category: p.category }));
+    let out: AgentDraft;
+    try {
+      out = await draftAgentSpec(job, { payees, domains: pol.domains }, keys);
+    } catch (e) {
+      if (e instanceof NoDrafterError) throw new GatekeeperError(e.message, 503);
+      throw new GatekeeperError(scrub(e), 502);
+    }
+    // The limits it needs, as rules (the same drafter as the Rules page), for every agent for now:
+    // the console scopes them to the new agent when it proposes.
+    let rules: DraftResult | null = null;
+    if (out.limits.trim()) rules = await this.draftRules(out.limits).catch(() => null);
+    return { ...out, rules: rules?.rules ?? [], rulesNote: rules?.note ?? "" };
+  }
+
+  /** Create a built agent locally (its existence, payees and rules go to Dharma from the console). */
+  buildAgent(input: { name?: unknown; instructions?: unknown; schedule?: unknown }) {
+    const instructions = requireText(input.instructions, "Instructions", 6000);
+    const schedule = parseSchedule(input.schedule);
+    const { id } = this.prepareAgent(input.name); // its token is never kept: each run gets a fresh one
+    (this.state.builtAgents ??= {})[id] = { instructions, schedule, paused: false, createdAt: this.now().toISOString() };
+    this.logEvent({ type: "agent-built", agent: id, schedule: scheduleText(schedule) });
+    this.save();
+    return { id };
+  }
+
+  updateBuiltAgent(id: string, input: { instructions?: unknown; schedule?: unknown; paused?: unknown }) {
+    const b = this.state.builtAgents?.[id];
+    if (!b) throw new GatekeeperError("Not an agent Karuna runs", 404);
+    if (input.instructions !== undefined) b.instructions = requireText(input.instructions, "Instructions", 6000);
+    if (input.schedule !== undefined) b.schedule = parseSchedule(input.schedule);
+    if (input.paused !== undefined) b.paused = input.paused === true;
+    this.logEvent({ type: "agent-built-updated", agent: id, paused: b.paused, schedule: scheduleText(b.schedule) });
+    this.save();
+    return { ok: true };
+  }
+
+  /** What a built agent's box reads at start: its instructions and why this run started. */
+  jobFor(token: string) {
+    const s = this.session(token);
+    if (!s) throw new GatekeeperError("Unknown run", 401);
+    const b = this.state.builtAgents?.[s.agentId];
+    if (!b) throw new GatekeeperError("Not an agent Karuna runs", 404);
+    const run = this.runOf(token);
+    return { agentId: s.agentId, name: this.org.labels.agents[s.agentId] ?? s.agentId, instructions: b.instructions, trigger: run?.trigger ?? "Run now", runId: run?.id ?? null, model: b.model ?? null };
+  }
+
+  /** Start a built agent now (Run now, its schedule, or a message in its inbox). */
+  runBuiltAgent(id: string, trigger = "Run now") {
+    const pol = this.requireReady();
+    const b = this.state.builtAgents?.[id];
+    if (!b) throw new GatekeeperError("Not an agent Karuna runs", 404);
+    if (!pol.agents.some((a) => a.id === id)) throw new GatekeeperError("This agent isn't on Dharma yet (waiting for the vote)", 409);
+    if (this.isFrozen()) throw new GatekeeperError("All agents are frozen", 423);
+    if ((this.state.runs ?? []).some((r) => r.agentId === id && (r.status === "starting" || r.status === "running"))) throw new GatekeeperError("It's already running", 409);
+    if (!this.deps.launcher) throw new GatekeeperError("This Gatekeeper can't start sandboxes (no launcher)", 501);
+    const run = this.newRun(id, trigger, true);
+    b.lastRunAt = run.startedAt;
+    b.inboxWaiting = false;
+    const { token } = this.rotateAgentToken(id); // a fresh token for this run only
+    this.logEvent({ type: "run-started", agent: id, run: run.id, trigger });
+    this.save();
+    const stop = this.deps.launcher({
+      agentId: id, token, runId: run.id,
+      onOutput: (line) => {
+        this.addStep(run, { at: this.now().toISOString(), kind: "note", text: line.slice(0, 2000) });
+      },
+      onExit: (code) => {
+        this.launchStops.delete(run.id);
+        if (run.status !== "stopped") run.status = code === 0 ? "done" : "failed";
+        run.exitCode = code;
+        run.endedAt = this.now().toISOString();
+        this.logEvent({ type: "run-ended", agent: id, run: run.id, code });
+        this.save();
+      },
+    });
+    this.launchStops.set(run.id, stop);
+    return { runId: run.id };
+  }
+
+  /** The scheduler: start each built agent that's due (part of housekeeping). */
+  private scheduleBuiltAgents() {
+    const pol = this.policy;
+    if (!pol || !this.deps.launcher || this.isFrozen()) return;
+    const now = this.now();
+    for (const [id, b] of Object.entries(this.state.builtAgents ?? {})) {
+      if (b.paused || !pol.agents.some((a) => a.id === id)) continue;
+      if ((this.state.runs ?? []).some((r) => r.agentId === id && (r.status === "starting" || r.status === "running"))) continue;
+      const why = dueReason(b, now);
+      if (!why) continue;
+      try {
+        this.runBuiltAgent(id, why);
+      } catch (e) {
+        this.logEvent({ type: "run-start-failed", agent: id, detail: scrub(e) });
+      }
+    }
+  }
+
+  /** The team's saved payees, as an agent may see them (the only accounts Karuna pays). */
+  agentPayees() {
+    const pol = this.requireReady();
+    return pol.payees.map((p) => ({ name: this.org.labels.payees[lower(p.account)] ?? p.account, address: lower(p.account), category: p.category }));
+  }
+
+  /** A message arrived for an agent Karuna runs "when a message arrives": start it soon. */
+  private wakeOnInbox(agentId: string) {
+    const b = this.state.builtAgents?.[agentId];
+    if (b && b.schedule.kind === "inbox" && !b.paused) b.inboxWaiting = true;
+  }
+
   /** Mint a trap set (for one agent, or all) to plant in sandboxes. */
   mintTrapSet(agentId?: unknown) {
     this.requireReady();
@@ -1660,7 +2458,7 @@ export class Gatekeeper extends EventEmitter {
   previewFor(govId: number): Preview | null {
     const pol = this.policy;
     const g = pol?.proposals.find((x) => x.id === govId);
-    if (!pol || !g?.change || !LOOSENING_OPS.has(g.change.op)) return null;
+    if (!pol || !g?.change || !isLoosening(g.change)) return null;
     const key = `${govId}:${pol.policyVersion}:${this.state.proposals.length}`;
     const hit = this.previewCache.get(key);
     if (hit) return hit;
@@ -1689,6 +2487,7 @@ export class Gatekeeper extends EventEmitter {
       body: requireText(input.body, "Body", 4000), receivedAt: this.now().toISOString(),
     };
     this.state.inbox.push(m);
+    this.wakeOnInbox(m.agentId);
     if (this.state.inbox.length > 2000) this.state.inbox = this.state.inbox.slice(-2000);
     this.logEvent({ type: "inbox-message", agent: agentId, messageId: m.id, from: m.from });
     this.save();
@@ -1738,6 +2537,7 @@ export class Gatekeeper extends EventEmitter {
       memberName: memberNames.length ? memberNames[Math.floor(Math.random() * memberNames.length)] : undefined, now: this.now(),
     });
     this.state.inbox.push(message);
+    this.wakeOnInbox(message.agentId);
     this.state.tests.push(test);
     if (this.state.tests.length > 1000) this.state.tests = this.state.tests.slice(-1000);
     this.logEvent({ type: "shield-test-sent", testId: test.id, agent: agentId, template, category });
@@ -1840,7 +2640,7 @@ export class Gatekeeper extends EventEmitter {
       p.status = "allowed";
       p.resolvedAt = this.now().toISOString();
       // A held sandbox request: this approval is a one-time pass for exactly that request.
-      if (p.request.tool === "http" && p.payloadHash) this.grants.set(p.payloadHash, Date.now() + GRANT_MS);
+      if ((p.request.tool === "http" || p.request.tool === "tool") && p.payloadHash) this.grants.set(p.payloadHash, Date.now() + GRANT_MS);
       // A held agent-to-agent message: deliver exactly what was approved.
       if (p.request.tool === "message" && p.action.type === "message") this.deliverMessage(p.agentId, String(p.action.to), String(p.action.body ?? "").slice(0, 4000));
       this.save();
@@ -1885,12 +2685,16 @@ export class Gatekeeper extends EventEmitter {
             return {
               id: a.id, name: L.agent(a.id) ?? a.id, capUsd: a.capUsd, spentTodayUsd: spent[a.id] ?? 0, active: true, hasToken: !!this.org.agentTokens[a.id],
               level, record, localRecord: this.state.record?.[a.id] ?? { completed: 0, denied: 0 },
+              built: (() => {
+                const b = this.state.builtAgents?.[a.id];
+                return b ? { instructions: b.instructions, schedule: b.schedule, scheduleText: scheduleText(b.schedule), paused: b.paused, lastRunAt: b.lastRunAt ?? null } : null;
+              })(),
               eligibility: level === null ? null : levelUpEligibility(record, level),
             };
           }),
           ...Object.keys(this.org.agentTokens)
             .filter((id) => !pol.agents.some((a) => a.id === id))
-            .map((id) => ({ id, name: L.agent(id) ?? id, capUsd: 0, spentTodayUsd: 0, active: false, hasToken: true })),
+            .map((id) => ({ id, name: L.agent(id) ?? id, capUsd: 0, spentTodayUsd: 0, active: false, hasToken: true, level: null, record: null, eligibility: null, built: null })),
         ],
         payees: pol.payees.map((p) => ({ account: lower(p.account), category: p.category, name: L.payee(p.account) ?? null })),
         domains: pol.domains,
@@ -1946,6 +2750,18 @@ export class Gatekeeper extends EventEmitter {
       }),
       proposals: this.state.proposals.slice(-300).reverse().map((p) => ({ ...p, approvalsNeeded: this.approvalsNeeded(p) })),
       sandbox: this.sandboxView(),
+      connectors: this.connectorDefs().map((c) => ({
+        name: c.name, url: c.url, hasKey: !!c.key, error: this.connectorErrors.get(c.name) ?? null,
+        tools: Object.entries(this.state.toolSnapshots ?? {}).filter(([k]) => k.startsWith(`${c.name}:`)).map(([k, v]) => ({
+          key: k, name: k.slice(c.name.length + 1), description: v.description, firstSeenAt: v.firstSeenAt, changed: v.changed ?? null,
+        })),
+      })),
+      runs: this.runsView(),
+      chatUrl: this.deps.chatUrl ? `${this.deps.chatUrl.replace(/\/+$/, "")}/mcp` : null,
+      devices: (this.state.devices ?? []).filter((d) => d.status === "pending" || d.status === "approved").slice(-50).reverse().map((d) => ({
+        id: d.id, code: d.code, name: d.name, tool: d.tool, status: d.status, requestedAt: d.requestedAt, agentId: d.agentId ?? null,
+        agentName: d.agentId ? (L.agent(d.agentId) ?? d.agentId) : null, lastSeenAt: d.lastSeenAt ?? null, approvedAt: d.approvedAt ?? null,
+      })),
       watchdog: {
         wallet: this.org.wallet?.address ?? null,
         gateway: GATEWAY_WALLET,

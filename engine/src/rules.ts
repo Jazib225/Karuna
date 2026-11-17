@@ -34,6 +34,10 @@ const FORKBOMB = /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/;
 const MKFS = /\bmkfs(\.\w+)?\b/i;
 const PKG_INSTALL = /\b(npm|pnpm|yarn)\s+(install|add|i)\b|\bpip3?\s+install\b/i;
 const WORKSPACE_READ = /^(ls|cat|grep)\b/i;
+/** A coding agent's project folder is presented to the engine as ./workspace. */
+const inProject = (p: string) => /^(\.\/)?workspace(\/|$)/i.test(p.trim().replace(/\\/g, "/"));
+/** Shell commands a coding agent never runs on its own, at any level: they leave the machine or can't be undone. */
+const RISKY_SHELL = /\bgit\s+push\b|\b(curl|wget|ssh|scp|sftp|rsync|nc|ncat|telnet|ftp)\b|\bsudo\b|\bchmod\s+-R\b|\bnpm\s+publish\b|\bdocker\s+push\b/i;
 
 // --- the ruleset -----------------------------------------------------------
 
@@ -174,6 +178,55 @@ export const defaultRules: Rule[] = [
   },
 ];
 
+// ---------------------------------------------------------------- coding agents and connector tools
+
+/** Before unlisted-domain: a coding agent on someone's computer reading the web asks instead of failing. */
+export const hostWebRules: Rule[] = [
+  // A coding agent on someone's computer reading the web (docs, issues) asks instead of failing.
+  {
+    id: "host-web-approval",
+    description: "Web request from an agent on someone's computer to a domain that isn't allowlisted",
+    outcome: "approval",
+    match: (r) => r.tool === "http" && !!r.host && (r.method ?? "GET").toUpperCase() === "GET",
+  },
+];
+
+/**
+ * Before default-deny: connector tools (read-only run, others ask) and coding agents on someone's
+ * computer (reading the project is fine; other shell and file access asks instead of failing).
+ * Kept out of defaultRules, which is the documented default policy.
+ */
+export const hostToolRules: Rule[] = [
+  // Connector (MCP) tools: read-only ones run; anything else asks (the team can write rules).
+  {
+    id: "tool-read-only",
+    description: "Connector tool marked read-only",
+    outcome: "allow",
+    match: (r) => r.tool === "tool" && !!r.readOnly && !r.destructive,
+  },
+  {
+    id: "tool-approval",
+    description: "Connector tool that isn't read-only",
+    outcome: "approval",
+    match: (r) => r.tool === "tool",
+  },
+
+  // Coding agents on someone's computer: reading the project is fine; everything else that no rule
+  // or level allowed asks a member instead of failing (shell commands, files outside the project).
+  {
+    id: "host-project-read",
+    description: "Reading a file in the project (coding agent)",
+    outcome: "allow",
+    match: (r) => !!r.host && r.tool === "file" && (r.fileOp ?? "read") === "read" && inProject(r.path ?? ""),
+  },
+  {
+    id: "host-approval",
+    description: "Shell command or file access by a coding agent that no rule or level allows",
+    outcome: "approval",
+    match: (r) => !!r.host && (r.tool === "shell" || r.tool === "file"),
+  },
+];
+
 // Karuna's default allowlist (website rule 8). Organizations can add or remove domains.
 export const DEFAULT_ALLOWLISTED_DOMAINS = ["github.com", "stripe.com", "pypi.org", "npmjs.com"];
 
@@ -196,6 +249,8 @@ export const LEVEL_GRANTS: { id: string; min: number; what: string }[] = [
   { id: "level-http-mutations", min: 2, what: "POST/PUT/DELETE to allowlisted domains" },
   { id: "level-package-install", min: 2, what: "Package installs" },
   { id: "level-file-writes", min: 3, what: "File writes anywhere in the sandbox" },
+  { id: "level-host-shell", min: 1, what: "Shell commands in the project (coding agents), except pushes, network tools and sudo" },
+  { id: "level-tools", min: 2, what: "Connector tools that aren't destructive" },
 ];
 
 const levelOf = (r: Request, ctx: PolicyContext): AgentLevel | undefined => (r.agent ? ctx.levels?.[r.agent] : undefined);
@@ -215,7 +270,8 @@ export const levelRules: Rule[] = [
     id: "level-file-writes",
     description: `Level ${minFor("level-file-writes")}+: file writes anywhere in the sandbox`,
     outcome: "allow",
-    match: (r, ctx) => r.tool === "file" && r.fileOp === "write" && atLeast(r, ctx, "level-file-writes"),
+    // Only inside a sandbox: an agent on someone's computer never writes outside its project on its own.
+    match: (r, ctx) => r.tool === "file" && r.fileOp === "write" && !r.host && atLeast(r, ctx, "level-file-writes"),
   },
   {
     id: "level-http-mutations",
@@ -227,6 +283,19 @@ export const levelRules: Rule[] = [
       !!r.url &&
       isAllowlisted(r.url, ctx) &&
       atLeast(r, ctx, "level-http-mutations"),
+  },
+  {
+    id: "level-host-shell",
+    description: `Level ${minFor("level-host-shell")}+: shell commands in the project`,
+    outcome: "allow",
+    match: (r, ctx) =>
+      !!r.host && r.tool === "shell" && !RM_RF_ANY.test(cmd(r)) && !PKG_INSTALL.test(cmd(r)) && !RISKY_SHELL.test(cmd(r)) && atLeast(r, ctx, "level-host-shell"),
+  },
+  {
+    id: "level-tools",
+    description: `Level ${minFor("level-tools")}+: connector tools that aren't destructive`,
+    outcome: "allow",
+    match: (r, ctx) => r.tool === "tool" && !r.destructive && atLeast(r, ctx, "level-tools"),
   },
   {
     id: "level-package-install",
@@ -394,6 +463,11 @@ export function customRule(r: OnchainRule): Rule {
       if (kind === "message") {
         return req.tool === "message" && (!target || (req.recipient ?? "").toLowerCase() === target);
       }
+      if (kind === "tool") {
+        // target: "gmail:send_email", "gmail:*" (every tool of a connector), "" (every tool)
+        if (req.tool !== "tool") return false;
+        return !target || globRe(target).test((req.toolName ?? "").toLowerCase());
+      }
       // key:<name>, mount, unsandboxed: capability grants the Gatekeeper reads, never request rules.
       return false;
     },
@@ -422,7 +496,8 @@ export function matchCustomRules(req: Request, onchain: OnchainRule[]): { outcom
  *   4. custom approval rules
  *   5. trust-level grants (Dharma v3; only agents with a level)
  *   6. custom allow rules
- *   7. every other default rule still active (in default order; default-deny last)
+ *   7. every other default rule still active (in default order; default-deny last), with the coding
+ *      agent and connector tool rules just before unlisted-domain and default-deny
  * A default rule the chain doesn't mention at all is kept (fail closed). Core rules can be turned
  * off only by a core change on Dharma (every member + the core wait); when one is, it stops applying.
  * The final no-match denial in evaluate() still fails closed even without default-deny.
@@ -445,6 +520,6 @@ export function buildRuleset(onchain: OnchainRule[]): Rule[] {
     ...custom.filter((r) => r.outcome === "approval"),
     ...levelRules,
     ...custom.filter((r) => r.outcome === "allow"),
-    ...rest,
+    ...rest.flatMap((r) => (r.id === "unlisted-domain" ? [...hostWebRules, r] : r.id === "default-deny" ? [...hostToolRules, r] : [r])),
   ];
 }

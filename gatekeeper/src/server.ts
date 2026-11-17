@@ -13,6 +13,7 @@ import { GatekeeperError, type AgentAction, type Gatekeeper, type SignedAction, 
 import type { WalletBackend } from "./wallet.ts";
 import type { EgressProxy } from "./proxy.ts";
 import type { SecretStore } from "./secrets.ts";
+import type { Accounts } from "./accounts.ts";
 
 /** What the agent API needs to hand out sandbox runs. Absent = sandboxes not available. */
 export interface SandboxDeps {
@@ -66,6 +67,9 @@ export function agentApi(gk: Gatekeeper, sandbox?: SandboxDeps): Server {
     try {
       const url = new URL(req.url ?? "/", "http://x");
       if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true });
+      // Connecting a computer (the Claude Code / Cursor plugin): no token yet, a member approves it.
+      if (req.method === "POST" && url.pathname === "/v1/devices") return send(res, 200, gk.requestDevice(await readBody(req)));
+      if (req.method === "POST" && url.pathname === "/v1/devices/poll") return send(res, 200, gk.pollDevice(await readBody(req)));
       const token = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
       const who = gk.authAgent(token);
       if (!who) return send(res, 401, { error: "Unknown agent token" });
@@ -76,7 +80,7 @@ export function agentApi(gk: Gatekeeper, sandbox?: SandboxDeps): Server {
         if (who.session) return send(res, 403, { error: "Start runs from outside the sandbox" });
         if (!sandbox) return send(res, 501, { error: "This Gatekeeper has no sandbox support" });
         const body = await readBody(req);
-        const s = gk.startSession(agentId, { host: body.host, isolation: body.isolation, desktop: body.desktop, remote: body.remote });
+        const s = gk.startSession(agentId, { host: body.host, isolation: body.isolation, desktop: body.desktop, remote: body.remote, runId: body.runId });
         const proxyPort = await sandbox.proxy.open(s.token);
         return send(res, 200, {
           session: s.token, id: s.id, agentId, proxyPort, caPem: sandbox.caPem,
@@ -88,6 +92,17 @@ export function agentApi(gk: Gatekeeper, sandbox?: SandboxDeps): Server {
         if (!who.session) return send(res, 400, { error: "Heartbeat with the run's session token" });
         const hb = await readBody(req);
         return send(res, 200, gk.heartbeat(token, { viewer: hb.viewer }));
+      }
+      // What the box printed (karuna run forwards it): the agent's own account, shown in its run.
+      if (req.method === "POST" && url.pathname === "/v1/sessions/output") {
+        if (!who.session) return send(res, 400, { error: "Send output with the run's session token" });
+        const out = await readBody(req);
+        return send(res, 200, gk.noteOutput(token, out.lines));
+      }
+      // A built agent's box asks what to do this run.
+      if (req.method === "GET" && url.pathname === "/v1/job") {
+        if (!who.session) return send(res, 400, { error: "Ask from inside the run" });
+        return send(res, 200, gk.jobFor(token));
       }
       if (req.method === "DELETE" && url.pathname === "/v1/sessions") {
         if (who.session) gk.endSession(token, "runner exited");
@@ -102,9 +117,23 @@ export function agentApi(gk: Gatekeeper, sandbox?: SandboxDeps): Server {
         const body = await readBody(req);
         const action = body.action as AgentAction | undefined;
         if (!action || typeof action !== "object") return send(res, 400, { error: "action is required" });
-        return send(res, 200, await gk.propose(agentId, action, body.reason as string | undefined));
+        const r = await gk.propose(agentId, action, body.reason as string | undefined);
+        if (who.session) gk.noteRunProposal(token, r);
+        return send(res, 200, r);
+      }
+      // Claude Code / Cursor: decide one tool call before it runs; wait for a member when it's held.
+      if (req.method === "POST" && url.pathname === "/v1/hook") {
+        const body = await readBody(req);
+        return send(res, 200, gk.hookCall(agentId, body as never));
+      }
+      const hw = url.pathname.match(/^\/v1\/hook\/([\w-]+)\/wait$/);
+      if (req.method === "GET" && hw) {
+        if (!gk.agentView(agentId, hw[1])) return send(res, 404, { error: "Not found" });
+        const ms = Math.min(25_000, Math.max(0, Number(url.searchParams.get("ms") ?? 20_000)));
+        return send(res, 200, { status: await gk.waitForDecision(hw[1], ms) });
       }
       if (req.method === "GET" && url.pathname === "/v1/inbox") return send(res, 200, { messages: gk.agentInbox(agentId) });
+      if (req.method === "GET" && url.pathname === "/v1/payees") return send(res, 200, { payees: gk.agentPayees() });
       const r = url.pathname.match(/^\/v1\/inbox\/([\w-]+)\/report$/);
       if (req.method === "POST" && r) {
         const body = await readBody(req);
@@ -124,7 +153,10 @@ export function agentApi(gk: Gatekeeper, sandbox?: SandboxDeps): Server {
 
 // ---------------------------------------------------------------- console API
 
-export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: string, secrets?: SecretStore, caPem?: string): Server {
+export function consoleApi(
+  gk: Gatekeeper, wallet: WalletBackend, consoleToken: string, secrets?: SecretStore, caPem?: string,
+  accounts: Accounts | null = null,
+): Server {
   let walletCache: { at: number; value: unknown } | null = null;
 
   return createServer(async (req, res) => {
@@ -149,6 +181,10 @@ export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: 
         return;
       }
       if (method === "GET" && path === "/state") return send(res, 200, gk.snapshot());
+      if (method === "GET" && path === "/runs") return send(res, 200, gk.runsView(url.searchParams.get("agent") ?? undefined));
+      if (method === "GET" && path.startsWith("/runs/")) return send(res, 200, gk.runView(decodeURIComponent(path.slice("/runs/".length))));
+      // Sign in with email and password: the browser locks the member's key with the password.
+      if (method === "GET" && path === "/auth/config") return send(res, 200, { accounts: !!accounts });
       if (method === "GET" && path === "/sandbox/ca") {
         // Public certificate (not a secret): remote machines pin it to trust only this Gatekeeper.
         res.writeHead(200, { "content-type": "application/x-pem-file", "content-disposition": "attachment; filename=karuna-ca.pem" });
@@ -187,6 +223,19 @@ export function consoleApi(gk: Gatekeeper, wallet: WalletBackend, consoleToken: 
       }
       // The relay's QuickNode Streams: a USDC transfer out of the org's wallet (watchdog), and the
       // agents' records rebuilt from Dharma's events (trust levels).
+      if (method === "POST" && (m = path.match(/^\/devices\/([\w-]+)\/approve$/))) return send(res, 200, gk.approveDevice(m[1], body));
+      if (method === "POST" && (m = path.match(/^\/devices\/([\w-]+)\/deny$/))) return send(res, 200, gk.denyDevice(m[1]));
+      if (method === "POST" && (m = path.match(/^\/devices\/([\w-]+)\/revoke$/))) return send(res, 200, gk.revokeDevice(m[1]));
+      if (method === "POST" && (m = path.match(/^\/connectors\/tools\/(.+)\/accept$/))) return send(res, 200, gk.acceptToolChange(decodeURIComponent(m[1])));
+      // Agents Karuna builds and runs, and every run's timeline.
+      if (method === "POST" && path === "/agents/draft") return send(res, 200, await gk.draftAgent(body.text));
+      if (method === "POST" && path === "/agents/build") return send(res, 200, gk.buildAgent(body));
+      if (method === "PATCH" && (m = path.match(/^\/agents\/([\w-]+)\/built$/))) return send(res, 200, gk.updateBuiltAgent(m[1], body));
+      if (method === "POST" && (m = path.match(/^\/agents\/([\w-]+)\/run$/))) return send(res, 200, gk.runBuiltAgent(m[1], "Run now"));
+      if (method === "POST" && (m = path.match(/^\/runs\/([\w-]+)\/stop$/))) return send(res, 200, gk.stopRun(m[1]));
+      if (accounts && method === "POST" && path === "/auth/salt") return send(res, 200, accounts.salt(body.email));
+      if (accounts && method === "POST" && path === "/auth/create") return send(res, 200, accounts.create(body));
+      if (accounts && method === "POST" && path === "/auth/sign-in") return send(res, 200, accounts.signIn(body));
       if (method === "POST" && path === "/dharma/code") return send(res, 200, await gk.prepareUpgrade());
       if (method === "POST" && path === "/watchdog/transfer") return send(res, 200, gk.watchdogTransfer(body as never));
       if (method === "POST" && path === "/records") return send(res, 200, gk.setChainRecords(body as never));

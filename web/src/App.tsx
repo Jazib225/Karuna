@@ -1,55 +1,30 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import type { Address } from "viem";
-import type { PrivateKeyAccount } from "viem/accounts";
-import { isAddr, decodeChange, describeChange, describeScope, waitText, type Change } from "@prekaruna/dharma";
-import { api, useGatekeeper, type LooseningPreview, type AgentView, type Governance, type LogEntry, type Proposal, type Rule, type Snapshot, type WalletInfo } from "./api.ts";
-import { Kind, SignerUnavailable, decidePayment, loadSigner, submitChange } from "./signer.ts";
+import { isAddr, isNoLimit, decodeChange, describeChange, describeScope, NO_LIMIT_USD, waitText, type Change } from "@prekaruna/dharma";
+import { api, useGatekeeper, type LooseningPreview, type AgentView, type AgentDraftView, type Governance, type LogEntry, type Proposal, type Rule, type RunDetail, type RunStep, type Schedule, type Snapshot, type WalletInfo } from "./api.ts";
+import { Kind, SignerUnavailable, decidePayment, loadSigner, signerKey, submitChange, type Signer } from "./signer.ts";
+import { accountEmail, createAccount, signIn as accountSignIn, signOut as accountSignOut } from "./account.ts";
 import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
 import { Palette, type Command } from "./palette.tsx";
 import { keccak256, stringToHex } from "viem";
-import { PREVIEW, previewLog, previewSigner, previewSnapshot, previewWallet } from "./preview.ts";
+import { PREVIEW, previewLog, previewRun, previewSigner, previewSnapshot, previewWallet } from "./preview.ts";
 import { Badge, Icon, type IconName } from "./icons.tsx";
 import { IN_APP, getIslandEnabled, setDesktopSigner, setIslandEnabled } from "./desktop.ts";
 import { setThemePref, useThemePref, type ThemePref } from "./theme.ts";
 import { eventName, NAMED_KEYS } from "./eventNames.ts";
 
-// One job per page. The menu groups them: everyday work first, then the automatic safety systems,
-// settings, and a testing tool. Older names (pop-ups, saved state) still resolve.
-type Page = "overview" | "approvals" | "votes" | "agents" | "payees" | "activity" | "shield" | "swarm" | "rules" | "keys" | "team" | "appearance" | "inbox";
-type View = Page | "dharma" | "safety" | "policy";
+// The menu: everyday work first, then settings. Older page names (pop-ups, saved state) still resolve.
+type Page = "overview" | "activity" | "agents" | "safety" | "proposals" | "team" | "rules" | "appearance";
+type View = Page | "approvals" | "votes" | "dharma" | "payees" | "keys" | "connectors" | "shield" | "swarm" | "inbox" | "policy";
 const PAGE_OF: Record<View, Page> = {
-  overview: "overview", approvals: "approvals", votes: "votes", agents: "agents", payees: "payees", activity: "activity",
-  shield: "shield", swarm: "swarm", rules: "rules", keys: "keys", team: "team", appearance: "appearance", inbox: "inbox",
-  dharma: "votes", safety: "shield", policy: "rules",
+  overview: "overview", activity: "activity", agents: "agents", safety: "safety", proposals: "proposals", team: "team", rules: "rules", appearance: "appearance",
+  approvals: "activity", votes: "activity", dharma: "activity", payees: "proposals",
+  keys: "agents", connectors: "agents", shield: "safety", swarm: "safety", inbox: "safety", policy: "rules",
 };
-const TITLES: Record<Page, string> = {
-  overview: "Home", approvals: "Approvals", votes: "Votes", agents: "Agents", payees: "Payments", activity: "Activity",
-  shield: "Drills", swarm: "Tripwire", rules: "Rules", keys: "Keys", team: "Team", appearance: "Appearance", inbox: "Inbox",
-};
-const ICON: Record<Page, IconName> = {
-  overview: "home", approvals: "approvals", votes: "votes", agents: "agents", payees: "payees", activity: "activity",
-  shield: "shield", swarm: "swarm", rules: "rules", keys: "key", team: "team", appearance: "sun", inbox: "inbox",
-};
-/** One line under each page title: what the page is for. */
-const LEDE: Record<Page, string> = {
-  overview: "",
-  approvals: "",
-  votes: "",
-  agents: "",
-  payees: "",
-  activity: "",
-  shield: "",
-  swarm: "",
-  rules: "",
-  keys: "",
-  appearance: "",
-  team: "",
-  inbox: "",
-};
+const TITLES: Record<Page, string> = { overview: "Home", activity: "Activity", agents: "Agents", safety: "Safety", proposals: "Proposals", team: "Team", rules: "Rules", appearance: "Appearance" };
+const ICON: Record<Page, IconName> = { overview: "home", activity: "activity", agents: "agents", safety: "shield", proposals: "votes", team: "team", rules: "rules", appearance: "sun" };
 const NAV: { label: string | null; hint?: string; pages: Page[] }[] = [
-  { label: null, pages: ["overview", "approvals", "votes", "agents", "payees", "activity"] },
-  { label: "Safety", pages: ["shield", "swarm", "inbox"] },
-  { label: "Settings", pages: ["rules", "keys", "team", "appearance"] },
+  { label: null, pages: ["overview", "activity", "proposals", "agents", "safety", "team", "rules", "appearance"] },
 ];
 /** Arc explorer link for a transaction hash (payments, Dharma writes, freezes, anchors). */
 const isTx = (v: unknown): v is string => typeof v === "string" && /^0x[0-9a-fA-F]{64}$/.test(v);
@@ -99,7 +74,7 @@ function Loading({ text }: { text: string }) {
   return <div className="center"><Backdrop /><div className="loading"><img src="/brand/lotus.png" alt="" /><span className="shimmer mono small">{text}</span></div></div>;
 }
 
-const usd = (n: number) => `$${n > 0 && n < 0.01 ? n.toFixed(4).replace(/0+$/, "") : n.toFixed(2)}`;
+const usd = (n: number) => (isNoLimit(n) ? "no limit" : `$${n > 0 && n < 0.01 ? n.toFixed(4).replace(/0+$/, "") : n.toFixed(2)}`);
 const short = (s?: string | null) => (s ? `${s.slice(0, 6)}…${s.slice(-4)}` : "—");
 const ago = (iso: string | number) => {
   const t = typeof iso === "number" ? iso * 1000 : Date.parse(iso);
@@ -141,16 +116,51 @@ function usePreviewGatekeeper() {
 }
 const useConsoleData = PREVIEW ? usePreviewGatekeeper : useGatekeeper;
 
+/** While something is being sent (a vote, an approval, a rule): a visible notice with the time so far. */
+function WorkingNotice() {
+  const [start] = useState(() => Date.now());
+  const now = useNow(1000);
+  const secs = Math.max(0, Math.floor((now - start) / 1000));
+  if (secs < 2) return null;
+  return (
+    <div role="status" className="flash working">
+      <span className="spinner" aria-hidden /> Sending to Arc… {secs}s{secs >= 20 ? " · Circle's wallet can take a minute or two" : ""}
+    </div>
+  );
+}
+
 export default function App() {
   const gk = useConsoleData();
-  const signer = useMemo<{ me: PrivateKeyAccount | null; error: string | null }>(() => {
+  // Who signs: this device's key, which is your account's key once you sign in with email + password.
+  const [keyVersion, setKeyVersion] = useState(0);
+  const [email, setEmail] = useState<string | null>(() => (PREVIEW ? null : accountEmail()));
+  const signer = useMemo<{ me: Signer | null; error: string | null }>(() => {
     if (PREVIEW) return { me: previewSigner, error: null };
     try {
       return { me: loadSigner(), error: null };
     } catch (e) {
       return { me: null, error: e instanceof SignerUnavailable ? e.message : String(e) };
     }
-  }, []);
+  }, [keyVersion]);
+  const account: AccountCtl = {
+    email,
+    signIn: async (e, pw) => {
+      await accountSignIn(e, pw);
+      setEmail(accountEmail());
+      setKeyVersion((v) => v + 1);
+    },
+    create: async (e, pw) => {
+      const key = signerKey();
+      if (!key) throw new Error("This device has no key to save");
+      await createAccount(e, pw, key);
+      setEmail(accountEmail());
+    },
+    signOut: () => {
+      accountSignOut();
+      setEmail(null);
+      setKeyVersion((v) => v + 1);
+    },
+  };
   const [flash, setFlash] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const notify: Notify = (kind, text) => {
@@ -185,16 +195,17 @@ export default function App() {
   useEffect(() => setDesktopSigner(signer.me, (s?.org.dharma?.address as Address | undefined) ?? null, isMember), [signer.me, s?.org.dharma?.address, isMember]);
   if (!s && gk.offline) body = <Offline reason={gk.offline} />;
   else if (!s) body = <Loading text="Connecting to the Gatekeeper…" />;
-  else if (!signer.me) body = <div className="center"><Backdrop /><div className="onboard narrow"><div className="onboard-body"><h2 className="setup-title heading-gradient">No signing key</h2><p className="lede">{signer.error}</p></div></div></div>;
-  else if (!s.setUp) body = <Setup s={s} me={signer.me} run={run} busy={busy} />;
+  else if (!signer.me) body = <div className="center"><Backdrop /><div className="onboard narrow"><div className="onboard-body"><h2 className="setup-title heading-gradient">No signing key</h2><p className="lede">{signer.error}</p><AccountBox me={null} account={account} run={run} busy={busy} /></div></div></div>;
+  else if (!s.setUp) body = <Setup s={s} me={signer.me} run={run} busy={busy} account={account} />;
   else if (!s.policy) body = <Loading text="Reading Dharma from Arc…" />;
-  else if (!s.policy.members.some((m) => m.address === signer.me!.address.toLowerCase())) body = <Join s={s} me={signer.me} run={run} />;
-  else body = <Console s={s} log={gk.log} wallet={gk.wallet} run={run} busy={busy} me={signer.me} offline={gk.offline} refresh={gk.refresh} />;
+  else if (!s.policy.members.some((m) => m.address === signer.me!.address.toLowerCase())) body = <Join s={s} me={signer.me} run={run} busy={busy} account={account} />;
+  else body = <Console s={s} log={gk.log} wallet={gk.wallet} run={run} busy={busy} me={signer.me} offline={gk.offline} refresh={gk.refresh} account={account} />;
 
   return (
     <>
       {body}
       {busy && <div className="busy-bar" />}
+      {busy && <WorkingNotice />}
       {flash && (
         <div role="status" className={`flash ${flash.kind}`} onClick={() => setFlash(null)}>
           <Icon name={flash.kind === "ok" ? "check" : "alert"} size={16} />{flash.text}
@@ -235,7 +246,7 @@ function Offline({ reason }: { reason: string }) {
 
 // ============================================================== setup: deploy this org's Dharma
 
-function Setup({ s, me, run, busy }: { s: Snapshot; me: PrivateKeyAccount; run: Run; busy: boolean }) {
+function Setup({ s, me, run, busy, account }: { s: Snapshot; me: Signer; run: Run; busy: boolean; account: AccountCtl }) {
   const [detected, setDetected] = useState<string[] | null>(null);
   const [detectErr, setDetectErr] = useState<string | null>(null);
   const [form, setForm] = useState({ orgName: "", memberName: "", walletAddress: "" });
@@ -301,11 +312,7 @@ function Setup({ s, me, run, busy }: { s: Snapshot; me: PrivateKeyAccount; run: 
                   : <>No logged-in Circle wallet found{detectErr ? ` (${detectErr})` : ""}. Run <span className="mono">circle wallet login &lt;email&gt; --testnet</span></>}
             </small>
           </div>
-          <div className="keybox">
-            <span className="field-label"><Icon name="key" size={14} /> Your signing key · made in this browser</span>
-            <div className="mono">{me.address}</div>
-            <div className="small muted">Every vote and approval you make is signed with it, here. Keep using this browser for Karuna.</div>
-          </div>
+          <AccountBox me={me} account={account} run={run} busy={busy} />
           <button className="btn btn-dark btn-lg btn-block" type="submit" disabled={deploying}>
             {deploying ? <span className="shimmer">Deploying Dharma on Arc…</span> : <>Create organization <span className="nudge"><Icon name="arrow" size={16} /></span></>}
           </button>
@@ -317,7 +324,7 @@ function Setup({ s, me, run, busy }: { s: Snapshot; me: PrivateKeyAccount; run: 
 
 // ============================================================== join: a browser that isn't a member yet
 
-function Join({ s, me, run }: { s: Snapshot; me: PrivateKeyAccount; run: Run }) {
+function Join({ s, me, run, busy, account }: { s: Snapshot; me: Signer; run: Run; busy: boolean; account: AccountCtl }) {
   const [name, setName] = useState("");
   const requested = s.enrollments.some((e) => e.address === me.address.toLowerCase());
   return (
@@ -329,9 +336,9 @@ function Join({ s, me, run }: { s: Snapshot; me: PrivateKeyAccount; run: Run }) 
           <div>
             <p className="eyebrow">Not a member yet</p>
             <h2 className="setup-title heading-gradient" style={{ marginTop: 14 }}>Ask to join {s.org.name}</h2>
-            <p className="lede">Members sign every approval and policy change with a key in their own browser. A current member proposes adding you, and Dharma adds you after the vote and a {s.policy!.timelock}s wait.</p>
+            <p className="lede">Members sign every approval and policy change themselves. A current member proposes adding you, and Dharma adds you after the vote and a {s.policy!.timelock}s wait.</p>
           </div>
-          <div className="keybox"><span className="field-label"><Icon name="key" size={14} /> This browser's signing key</span><div className="mono">{me.address}</div></div>
+          <AccountBox me={me} account={account} run={run} busy={busy} />
           {requested ? (
             <p className="ok-text"><Icon name="check" /> Request sent. A member will see it under Team.</p>
           ) : (
@@ -346,11 +353,60 @@ function Join({ s, me, run }: { s: Snapshot; me: PrivateKeyAccount; run: Run }) 
   );
 }
 
+// ============================================================== who signs: email account or this device's key
+
+interface AccountCtl {
+  email: string | null;
+  signIn: (email: string, password: string) => Promise<void>;
+  create: (email: string, password: string) => Promise<void>;
+  signOut: () => void;
+}
+
+/** Sign in with email and password, or save this device's key to a new account. */
+function AccountBox({ me, account, run, busy }: { me: Signer | null; account: AccountCtl; run: Run; busy: boolean }) {
+  const [mode, setMode] = useState<"in" | "create">("in");
+  const [form, setForm] = useState({ email: "", password: "", again: "" });
+  if (account.email) {
+    return (
+      <div className="keybox">
+        <span className="field-label"><Icon name="check" size={14} /> Signed in</span>
+        <div><b>{account.email}</b>{me && <span className="mono small muted"> {short(me.address)}</span>}</div>
+        <div className="small muted">The same member on every device you sign in on. <button type="button" className="link-btn" onClick={account.signOut}>Sign out</button></div>
+      </div>
+    );
+  }
+  const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim()) && form.password.length >= (mode === "create" ? 10 : 1) && (mode === "in" || form.password === form.again);
+  return (
+    <div className="keybox">
+      <div className="email-signin">
+        <span className="field-label"><Icon name="key" size={14} /> {mode === "in" ? "Sign in" : "Save this device's key to an account"}</span>
+        <input type="email" aria-label="Email" autoComplete="username" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="you@company.com" />
+        <input type="password" aria-label="Password" autoComplete={mode === "in" ? "current-password" : "new-password"} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder={mode === "in" ? "Password" : "Password (10+ characters)"} />
+        {mode === "create" && <input type="password" aria-label="Password again" autoComplete="new-password" value={form.again} onChange={(e) => setForm({ ...form, again: e.target.value })} placeholder="Password again" />}
+        <div className="row-form">
+          <button type="button" className="btn btn-dark" disabled={busy || !ok}
+            onClick={() => run(() => (mode === "in" ? account.signIn(form.email, form.password) : account.create(form.email, form.password)), mode === "in" ? "Signed in" : "Account created")}>
+            {mode === "in" ? "Sign in" : "Create account"}
+          </button>
+          <button type="button" className="link-btn small" onClick={() => setMode(mode === "in" ? "create" : "in")}>{mode === "in" ? "Create an account instead" : "I have an account"}</button>
+        </div>
+        <div className="small muted">{mode === "in" ? "Use the same email and password on any device." : "Your password locks your key in this browser; Karuna can't open it or reset it."}</div>
+      </div>
+      {me && (
+        <div className="device-key">
+          <span className="field-label"><Icon name="key" size={14} /> This device's key</span>
+          <div className="mono">{me.address}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ============================================================== console shell
 
 interface Ctx {
   s: Snapshot;
-  me: PrivateKeyAccount;
+  me: Signer;
   run: Run;
   busy: boolean;
   /** Sign a change. Every rule change is proposed for a vote; only the panic button (Freeze) applies at once. */
@@ -359,7 +415,7 @@ interface Ctx {
   name: (address?: string | null) => string;
 }
 
-function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snapshot; log: LogEntry[]; wallet: WalletInfo | null; run: Run; busy: boolean; me: PrivateKeyAccount; offline: string | null; refresh: () => Promise<void> }) {
+function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: { s: Snapshot; log: LogEntry[]; wallet: WalletInfo | null; run: Run; busy: boolean; me: Signer; offline: string | null; refresh: () => Promise<void>; account: AccountCtl }) {
   const [view, setPage] = useState<Page>(() => {
     try {
       return PAGE_OF[localStorage.getItem("karuna.view") as View] ?? "overview";
@@ -488,7 +544,13 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
     setAlerts((prev) => [...events.map((e) => toAlert(e, sRef.current, name)).filter((a): a is Omit<Alert, "at"> => !!a).map((a) => ({ ...a, at: now })), ...prev].slice(0, 6));
   });
   useEffect(() => {
-    const t = setInterval(() => setAlerts((prev) => prev.filter((a) => a.sticky || Date.now() - a.at < 8000)), 1000);
+    // A "vote on this" alert stays only while there's still a vote for this member to cast.
+    const nothingToVote = (a: Alert) => {
+      if (a.proposalId === undefined) return false;
+      const g = sRef.current.policy?.proposals.find((x) => x.id === a.proposalId);
+      return !!g && (g.status !== "open" || g.voters.includes(me.address.toLowerCase()));
+    };
+    const t = setInterval(() => setAlerts((prev) => prev.filter((a) => (a.sticky && !nothingToVote(a)) || Date.now() - a.at < 8000)), 1000);
     return () => clearInterval(t);
   }, []);
   const dismiss = (id: string) => setAlerts((prev) => prev.filter((a) => a.id !== id));
@@ -527,10 +589,10 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
     ...NAV.flatMap((g) => g.pages.map((v) => ({ id: `go-${v}`, label: TITLES[v], hint: g.label ?? "Go to", icon: ICON[v], keywords: v, run: () => setView(v) }))),
     ...(pending.length ? [{ id: "review", label: `Review ${pending.length} waiting approval${pending.length > 1 ? "s" : ""}`, hint: "Approvals", icon: "approvals" as IconName, run: () => setView("approvals") }] : []),
     ...(ballots.length ? [{ id: "vote", label: `Vote on ${ballots.length} open change${ballots.length > 1 ? "s" : ""}`, hint: "Votes", icon: "votes" as IconName, run: () => setView("votes") }] : []),
-    { id: "new-rule", label: "Add a rule", hint: "Rules", icon: "plus", keywords: "policy block allow approval english", run: () => setView("rules") },
+    { id: "new-rule", label: "Add a rule", hint: "Proposals", icon: "plus", keywords: "policy block allow approval english", run: () => setView("proposals") },
     { id: "new-agent", label: "Add an agent", hint: "Agents", icon: "plus", keywords: "token", run: () => setView("agents") },
     { id: "new-key", label: "Add an API key", hint: "Keys", icon: "key", keywords: "secret anthropic gemini openai", run: () => setView("keys") },
-    { id: "waits", label: "Change the waits", hint: "Votes", icon: "clock", keywords: "timelock core", run: () => setView("votes") },
+    { id: "waits", label: "Change the waits", hint: "Proposals", icon: "clock", keywords: "timelock core", run: () => setView("proposals") },
     ...(["system", "light", "dark"] as const).map((t) => ({ id: `theme-${t}`, label: `Theme: ${t === "system" ? "System" : t === "light" ? "Light" : "Dark"}`, hint: "Appearance", icon: "sun" as IconName, keywords: "dark light mode appearance", run: () => setThemePref(t) })),
     ...(IN_APP ? [{ id: "island", label: getIslandEnabled() ? "Turn the island off" : "Turn the island on", hint: "Appearance", icon: "sun" as IconName, keywords: "notch lotus", run: () => setIslandEnabled(!getIslandEnabled()) }] : []),
     { id: "sidebar", label: sideHidden ? "Pin the sidebar" : "Hide the sidebar", hint: "View", icon: sideHidden ? "pin" : "panel", keywords: "menu nav", run: toggleSide },
@@ -567,8 +629,8 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
             <div key={g.label ?? "main"} className="nav-group">
               {g.label && <div className="nav-label">{g.label}{g.hint && <span> · {g.hint}</span>}</div>}
               {g.pages.map((v) => {
-                const n = v === "approvals" ? pending.length : v === "votes" ? ballots.length : v === "team" ? s.enrollments.length
-                  : v === "shield" ? s.shield.autoRules.filter((r) => r.active).length : v === "swarm" ? s.swarm.tainted.length : 0;
+                const n = v === "activity" ? pending.length + ballots.length : v === "team" ? s.enrollments.length
+                  : v === "safety" ? s.shield.autoRules.filter((r) => r.active).length + s.swarm.tainted.length : 0;
                 return (
                   <a key={v} href={`#${v}`} aria-current={view === v ? "page" : undefined} className={view === v ? "sel" : ""}
                     onClick={(e) => { e.preventDefault(); setView(v); setMenu(false); }}>
@@ -582,7 +644,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
         </nav>
         <div className="member" title="This browser's signing key">
           <span className="av">{myName[0]?.toUpperCase()}</span>
-          <div className="who"><div>{myName}</div><div>{short(myAddr)}</div></div>
+          <div className="who" title={account.email ? `Signed in as ${account.email} · ${myAddr}` : `This device's key · ${myAddr}`}><div>{myName}</div><div>{account.email ?? short(myAddr)}</div></div>
         </div>
       </aside>
 
@@ -639,7 +701,6 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
         </div>
 
         <div className="content" key={view}>
-          {LEDE[view] && <p className="lede page-enter">{LEDE[view]}</p>}
           {frozen && (
             <div className="freeze-banner" role="alert">
               <Icon name="stop" size={20} />
@@ -650,18 +711,13 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh }: { s: Snaps
             </div>
           )}
           {view === "overview" && <Overview ctx={ctx} wallet={wallet} go={setView} />}
-          {view === "approvals" && <Approvals ctx={ctx} dharma={dharma} />}
-          {view === "votes" && <Dharma ctx={ctx} />}
+          {view === "activity" && <ActivityPage ctx={ctx} dharma={dharma} log={log} />}
           {view === "agents" && <Agents ctx={ctx} />}
-          {view === "payees" && <Payees ctx={ctx} />}
-          {view === "shield" && <Shield ctx={ctx} part="tests" />}
-          {view === "swarm" && <Swarm ctx={ctx} />}
-          {view === "rules" && <div className="stack"><Policy ctx={ctx} /><Learned ctx={ctx} /></div>}
+          {view === "safety" && <Safety ctx={ctx} />}
+          {view === "proposals" && <div className="stack"><Policy ctx={ctx} part="propose" /><Waits ctx={ctx} /><Learned ctx={ctx} /></div>}
+          {view === "rules" && <div className="stack"><Policy ctx={ctx} part="list" /><Payees ctx={ctx} /></div>}
           {view === "team" && <Team ctx={ctx} />}
-          {view === "keys" && <Keys ctx={ctx} />}
           {view === "appearance" && <Appearance />}
-          {view === "inbox" && <Shield ctx={ctx} part="messages" />}
-          {view === "activity" && <Activity ctx={ctx} log={log} />}
         </div>
       </main>
     </div>
@@ -793,29 +849,18 @@ function Rows({ ctx, items }: { ctx: Ctx; items: Proposal[] }) {
 
 // ============================================================== approvals (signed, Facts First, Exact Match)
 
-function Approvals({ ctx, dharma }: { ctx: Ctx; dharma: Address }) {
+/** Everything that needs a member, then payees, then the signed log. */
+function ActivityPage({ ctx, dharma, log }: { ctx: Ctx; dharma: Address; log: LogEntry[] }) {
   const { s } = ctx;
   const pending = s.proposals.filter((p) => p.status === "pending");
-  const resolved = s.proposals.filter((p) => p.decision.outcome === "approval" && p.status !== "pending").slice(0, 10);
+  const live = s.policy!.proposals.filter((g) => g.status === "open" || g.status === "queued");
   return (
     <div className="stack">
-      {pending.length === 0 && <div className="card"><Empty icon="check">Nothing is waiting for you.</Empty></div>}
+      {pending.length === 0 && live.length === 0 && <div className="card"><Empty icon="check">Nothing is waiting for you.</Empty></div>}
       {pending.map((p, i) => <div className="rise" style={st(i)} key={p.id}><ApprovalCard p={p} ctx={ctx} dharma={dharma} /></div>)}
-      {resolved.length > 0 && (
-        <div className="card">
-          <div className="hd"><h2>Recently resolved</h2><span className="sub">{resolved.length}</span></div>
-          <div className="resolved">
-            {resolved.map((p) => (
-              <div key={p.id} className="res">
-                <Badge v={p.status === "executed" || p.status === "allowed" ? "allow" : "deny"}>{p.status === "executed" ? "paid" : p.status}</Badge>
-                <span className="mono small">{describe(p, ctx)}</span>
-                <span className="muted small">{p.resolvedBy ? `by ${ctx.name(p.resolvedBy)}` : ""} {p.resolvedAt ? ago(p.resolvedAt) : ""}</span>
-                {p.error && <div className="res-err">{p.error}</div>}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      <Ballots ctx={ctx} />
+      <UpgradeCard ctx={ctx} />
+      <Activity ctx={ctx} log={log} />
     </div>
   );
 }
@@ -873,33 +918,16 @@ function FactRow({ label, value, tone }: { label: string; value: string; tone?: 
 
 // ============================================================== Dharma governance
 
-function Dharma({ ctx }: { ctx: Ctx }) {
+/** Open and passed Dharma changes, each with its vote. */
+function Ballots({ ctx }: { ctx: Ctx }) {
   const { s, me, busy } = ctx;
   const pol = s.policy!;
   const now = useNow();
   const myAddr = me.address.toLowerCase();
   const live = pol.proposals.filter((g) => g.status === "open" || g.status === "queued");
-  const done = pol.proposals.filter((g) => g.status === "executed" || g.status === "defeated" || g.status === "cancelled").slice(0, 15);
   const team = pol.members.length >= 2;
-  // An org on an older Dharma (before core changes and the core wait) has no core settings to show.
-  const hasCore = Number.isFinite(pol.coreTimelock);
   return (
-    <div className="stack">
-      <div className="card dharma-head rise">
-        <div className={`grid-kv ${hasCore ? "" : "kv3"}`}>
-          <div><div className="k">Contract</div><a className="mono link-u" href={s.org.dharma!.explorer} target="_blank" rel="noreferrer">{short(s.org.dharma!.address)} ↗</a></div>
-          <div><div className="k">To pass a change</div><div className="big tnum">{pol.required}/{pol.members.length} <span className="muted small mono">+ {waitText(pol.timelock)}</span></div></div>
-          {hasCore && <div><div className="k">Core changes</div><div className="big tnum">{pol.members.length}/{pol.members.length} <span className="muted small mono">+ {waitText(pol.coreTimelock)}</span></div></div>}
-          <div><div className="k">Log anchored</div><div className="big tnum">{pol.anchor.length}<span className="muted small mono"> / {s.log.length}</span></div></div>
-        </div>
-      </div>
-
-      <UpgradeCard ctx={ctx} />
-
-      <Waits ctx={ctx} />
-
-      <p className="section-title">In progress</p>
-      {live.length === 0 && <div className="card"><Empty icon="votes">No changes are waiting. A new payee, a higher allowance, a new member or an unfreeze appears here for a vote.</Empty></div>}
+    <>
       {live.map((g, i) => {
         const voted = g.voters.includes(myAddr);
         const remaining = g.eta ? Math.max(0, g.eta - Math.floor(now / 1000)) : null;
@@ -909,7 +937,7 @@ function Dharma({ ctx }: { ctx: Ctx }) {
         return (
           <div className="card ballot rise" style={st(i)} key={g.id}>
             <div className="ballot-top">
-              <Badge v={g.status === "queued" ? "allow" : "approval"}>{g.status === "queued" ? "passed" : "voting"}</Badge>
+              <Badge v={g.status === "queued" ? "allow" : "approval"}>{g.status === "queued" ? "passed" : "vote"}</Badge>
               {g.core && <span className="badge badge-danger" title={`Core change: needs every member and waits ${waitText(pol.coreTimelock)}. A freeze cancels it.`}><Icon name="lock" size={11} /> core</span>}
               <b>{g.description}</b>
               <span className="muted">#{g.id} · {ctx.name(g.proposer)} · {ago(g.createdAt)}</span>
@@ -937,22 +965,7 @@ function Dharma({ ctx }: { ctx: Ctx }) {
           </div>
         );
       })}
-
-      {done.length > 0 && (
-        <div className="card">
-          <div className="hd"><h2>History</h2><span className="sub">{done.length}</span></div>
-          <div className="resolved">
-            {done.map((g) => (
-              <div key={g.id} className="res">
-                <Badge v={g.status === "executed" ? "allow" : "deny"}>{g.status === "executed" ? "in effect" : g.status === "cancelled" ? "cancelled by freeze" : g.status}</Badge>
-                <span className="small">{g.description}</span>
-                <span className="muted small">#{g.id} · {g.yes} yes · {g.no} no</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
+    </>
   );
 }
 
@@ -1046,6 +1059,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
   const [form, setForm] = useState({ name: "", cap: "1" });
   const [reveal, setReveal] = useState<{ token: string; agent: string; agentId: string } | null>(null);
   const [editing, setEditing] = useState<Record<string, string>>({});
+  const [runsFor, setRunsFor] = useState<string | null>(null);
   const levels = hasLevels(s);
   // On Dharma v3 a level sets what an agent may spend; the meter shows that level's daily limit.
   const limited = (a: AgentView): AgentView => (levels && a.level != null ? { ...a, capUsd: pol.levelLimits![a.level]?.dailyUsd ?? 0 } : a);
@@ -1063,16 +1077,9 @@ function Agents({ ctx }: { ctx: Ctx }) {
   return (
     <div className="stack">
       {reveal && <TokenReveal {...reveal} onDone={() => setReveal(null)} />}
-      <form className="card inline-form" onSubmit={add}>
-        <label className="field grow"><span>Agent name</span><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Accounts payable agent" /></label>
-        {!levels && <label className="field"><span>Daily allowance (USD)</span><input required type="number" min="0" step="0.000001" value={form.cap} onChange={(e) => setForm({ ...form, cap: e.target.value })} /></label>}
-        <button className="btn btn-dark" type="submit" disabled={busy}><Icon name="plus" /> Propose agent</button>
-      </form>
-      <SandboxRuns ctx={ctx} />
-      <RemoteRuns ctx={ctx} />
-      {pol.agents.length === 0 ? (
-        <div className="card"><Empty icon="agents">No agents yet. Propose one above; it can ask for money once Dharma adds it.</Empty></div>
-      ) : (
+      {runsFor && <RunsPanel ctx={ctx} agentId={runsFor} onClose={() => setRunsFor(null)} />}
+      {s.sandbox.sessions.length > 0 && <SandboxRuns ctx={ctx} />}
+      {pol.agents.length > 0 && (
         <div className="grid2 agent-grid">
           {pol.agents.map((a, i) => {
             const ed = editing[a.id];
@@ -1087,6 +1094,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
                 </div>
                 {a.active && <Meter a={limited(a)} frozen={!!s.frozen} />}
                 {a.active && levels && <AgentLevel a={a} ctx={ctx} />}
+                {a.active && a.built && <BuiltControls a={a} ctx={ctx} openRuns={() => setRunsFor(a.id)} />}
                 {a.active && (
                   <div className="meta">
                     {levels ? null : ed === undefined ? (
@@ -1110,6 +1118,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
                 )}
                 <div className="agent-actions">
                   <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => run(async () => { const r = await api<{ token: string }>(`/agents/${a.id}/rotate-token`, {}); setReveal({ token: r.token, agent: a.name, agentId: a.id }); })}>{a.hasToken ? "Rotate token" : "Issue token"}</button>
+                  {(s.runs ?? []).some((r) => r.agentId === a.id) && <button className="btn btn-ghost btn-sm" onClick={() => setRunsFor(a.id)}>Runs</button>}
                   {a.active && <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => confirm(`Propose removing ${a.name} from Dharma? It goes to a team vote.`) && ctx.change({ op: "RemoveAgent", id: a.id })}>Propose removal</button>}
                 </div>
               </div>
@@ -1117,6 +1126,19 @@ function Agents({ ctx }: { ctx: Ctx }) {
           })}
         </div>
       )}
+      <NewAgent ctx={ctx} own={
+        <form className="row-form own-agent" onSubmit={add}>
+          <span className="muted small">Or connect your own code:</span>
+          <input required aria-label="Agent name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Agent name" />
+          {!levels && <input required aria-label="Daily allowance (USD)" className="select-sm mono" type="number" min="0" step="0.000001" value={form.cap} onChange={(e) => setForm({ ...form, cap: e.target.value })} title="Daily allowance (USD)" />}
+          <button className="btn btn-ghost btn-sm" type="submit" disabled={busy}>Propose and get a token</button>
+        </form>
+      } />
+      <ChatSetup ctx={ctx} />
+      <Computers ctx={ctx} />
+      <Connectors ctx={ctx} />
+      <Keys ctx={ctx} />
+      {s.sandbox.remote && <RemoteRuns ctx={ctx} />}
     </div>
   );
 }
@@ -1126,38 +1148,22 @@ function Agents({ ctx }: { ctx: Ctx }) {
 function Payees({ ctx }: { ctx: Ctx }) {
   const { s, busy } = ctx;
   const pol = s.policy!;
-  const [form, setForm] = useState({ account: "", name: "", category: "" });
-  const add = (e: FormEvent) => {
-    e.preventDefault();
-    if (!isAddr(form.account)) return ctx.run(async () => { throw new Error("Payout address must be a 0x… address"); });
-    ctx.change({ op: "SetPayee", account: form.account as Address, category: form.category.trim().toLowerCase() }, form.name).then((ok) => ok && setForm({ account: "", name: "", category: "" }));
-  };
   return (
-    <div className="stack">
-      <form className="card inline-form" onSubmit={add}>
-        <label className="field"><span>Name (private)</span><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Supplier or service" /></label>
-        <label className="field grow"><span>Payout address</span><input required className="mono" value={form.account} onChange={(e) => setForm({ ...form, account: e.target.value.trim() })} placeholder="0x…" /></label>
-        <label className="field"><span>Category</span><input required value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="e.g. data, utilities" /></label>
-        <button className="btn btn-dark" type="submit" disabled={busy}><Icon name="plus" /> Propose payee</button>
-      </form>
-      <div className="card">
-        <div className="hd"><h2>Known payees</h2><span className="sub">{pol.payees.length}</span></div>
-        {pol.payees.length === 0 ? (
-          <Empty icon="payees">No payees yet, so every payment is denied.</Empty>
-        ) : (
-          <div className="table">
-            {pol.payees.map((r) => (
-              <div className="tr payee-tr" key={r.account}>
-                <span className="av">{(r.name ?? "?")[0]?.toUpperCase()}</span>
-                <span className="b">{r.name ?? "Unnamed"}</span>
-                <span className="mono small">{r.account}</span>
-                <span className="tag">{r.category}</span>
-                <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => ctx.change({ op: "RemovePayee", account: r.account as Address })}>Propose removal</button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+    <div className="card">
+      <div className="hd"><h2>Payees</h2><span className="sub">{pol.payees.length ? pol.payees.length : "none yet, so every payment is denied"}</span></div>
+      {pol.payees.length > 0 && (
+        <div className="table">
+          {pol.payees.map((r) => (
+            <div className="tr payee-tr" key={r.account}>
+              <span className="av">{(r.name ?? "?")[0]?.toUpperCase()}</span>
+              <span className="b">{r.name ?? "Unnamed"}</span>
+              <span className="mono small">{r.account}</span>
+              <span className="tag">{r.category}</span>
+              <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => ctx.change({ op: "RemovePayee", account: r.account as Address })}>Propose removal</button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1221,12 +1227,11 @@ function describeRule(c: RuleChange, names: { agent: (id: string) => string; pay
   return `${verb} ${describeScope(c.scope ?? "", c.target ?? "", names)} for ${c.agent ? names.agent(c.agent) : "every agent"}${c.maxUsd ? ` up to $${c.maxUsd.toFixed(2)}` : ""}.`;
 }
 
-function Policy({ ctx }: { ctx: Ctx }) {
+function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
   const { s, busy } = ctx;
   const pol = s.policy!;
   const [meta, setMeta] = useState<Rule[]>([]);
-  const [domain, setDomain] = useState("");
-  const [threshold, setThreshold] = useState(String(pol.thresholdUsd));
+  const [payee, setPayee] = useState<{ on: boolean; name: string; account: string }>({ on: false, name: "", account: "" });
   const [rule, setRule] = useState<RuleForm>(EMPTY_RULE);
   const [english, setEnglish] = useState("");
   const [drafting, setDrafting] = useState(false);
@@ -1259,15 +1264,22 @@ function Policy({ ctx }: { ctx: Ctx }) {
   }, []);
   const desc = (id: string) => meta.find((m) => m.id === id)?.description;
 
+  const payeeOk = payee.name.trim() !== "" && isAddr(payee.account) && rule.category.trim() !== "";
   const addRule = (e: FormEvent) => {
     e.preventDefault();
+    if (payee.on) {
+      if (!payeeOk) return;
+      ctx.change({ op: "SetPayee", account: payee.account as Address, category: rule.category.trim().toLowerCase() }, payee.name.trim())
+        .then((ok) => ok && (setPayee({ on: true, name: "", account: "" }), setRule({ ...rule, category: "" })));
+      return;
+    }
     if ("error" in built) return;
     ctx.change(built.change).then((ok) => ok && setRule({ ...EMPTY_RULE, kind: rule.kind }));
   };
 
   return (
     <div className="stack">
-      <div className="card">
+      {part === "list" && <div className="card">
         <div className="hd window-hd"><h2>Rules on Dharma</h2><span className="sub">{pol.rules.filter((r) => r.active).length} active</span></div>
         <div className="policy">
           {pol.rules.map((r, i) => (
@@ -1295,8 +1307,9 @@ function Policy({ ctx }: { ctx: Ctx }) {
             </div>
           ))}
         </div>
-      </div>
+      </div>}
 
+      {part === "propose" && <>
       <div className="card rule-english">
         <div className="hd"><h2>Describe a rule in plain English</h2></div>
         <div className="rule-english-body">
@@ -1335,15 +1348,20 @@ function Policy({ ctx }: { ctx: Ctx }) {
       </div>
 
       <form className="card inline-form rule-form" onSubmit={addRule}>
-        <label className="field"><span>Outcome</span>
+        {!payee.on && <label className="field"><span>Outcome</span>
           <select value={rule.outcome} onChange={(e) => setRule({ ...rule, outcome: e.target.value as RuleForm["outcome"] })}>
             <option value="Deny">Block</option>
             <option value="Approval">Require approval</option>
             <option value="Allow">Allow</option>
           </select>
-        </label>
+        </label>}
         <label className="field"><span>Action</span>
-          <select value={rule.kind} onChange={(e) => setRule({ ...EMPTY_RULE, outcome: rule.outcome, agent: rule.agent, kind: e.target.value as RuleKind })}>
+          <select value={payee.on ? "payee" : rule.kind} onChange={(e) => {
+            const v = e.target.value;
+            setPayee({ ...payee, on: v === "payee" });
+            setRule({ ...EMPTY_RULE, outcome: rule.outcome, agent: rule.agent, kind: v === "payee" ? rule.kind : (v as RuleKind) });
+          }}>
+            <option value="payee">New payee</option>
             <option value="payment">Payments</option>
             <option value="http">Web requests</option>
             <option value="shell">Shell commands</option>
@@ -1351,13 +1369,17 @@ function Policy({ ctx }: { ctx: Ctx }) {
             <option value="message">Messages to other agents</option>
           </select>
         </label>
-        <label className="field"><span>Agent</span>
+        {payee.on ? <>
+          <label className="field"><span>Name (private)</span><input value={payee.name} onChange={(e) => setPayee({ ...payee, name: e.target.value })} placeholder="Supplier or service" /></label>
+          <label className="field grow"><span>Payout address</span><input className="mono" value={payee.account} onChange={(e) => setPayee({ ...payee, account: e.target.value.trim() })} placeholder="0x…" /></label>
+          <label className="field"><span>Category</span><input value={rule.category} onChange={(e) => setRule({ ...rule, category: e.target.value })} placeholder="e.g. data, utilities" /></label>
+        </> : <label className="field"><span>Agent</span>
           <select value={rule.agent} onChange={(e) => setRule({ ...rule, agent: e.target.value })}>
             <option value="">Every agent</option>
             {pol.agents.filter((a) => a.active).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
           </select>
-        </label>
-        {rule.kind === "payment" && <>
+        </label>}
+        {!payee.on && rule.kind === "payment" && <>
           <label className="field"><span>Payee</span>
             <select value={rule.target} onChange={(e) => setRule({ ...rule, target: e.target.value })}>
               <option value="">Any payee</option>
@@ -1367,7 +1389,7 @@ function Policy({ ctx }: { ctx: Ctx }) {
           <label className="field"><span>Category</span><input value={rule.category} onChange={(e) => setRule({ ...rule, category: e.target.value })} placeholder="any" /></label>
           {rule.outcome === "Allow" && <label className="field"><span>Up to (USD)</span><input inputMode="decimal" value={rule.maxUsd} onChange={(e) => setRule({ ...rule, maxUsd: e.target.value })} placeholder="no cap" /></label>}
         </>}
-        {rule.kind === "http" && <>
+        {!payee.on && rule.kind === "http" && <>
           <label className="field"><span>Method</span>
             <select value={rule.method} onChange={(e) => setRule({ ...rule, method: e.target.value })}>
               <option value="">Any</option>
@@ -1376,10 +1398,10 @@ function Policy({ ctx }: { ctx: Ctx }) {
           </label>
           <label className="field grow"><span>Site</span><input value={rule.target} onChange={(e) => setRule({ ...rule, target: e.target.value })} placeholder="api.github.com or api.openai.com/v1/" /></label>
         </>}
-        {rule.kind === "shell" && (
+        {!payee.on && rule.kind === "shell" && (
           <label className="field grow"><span>Command</span><input value={rule.target} onChange={(e) => setRule({ ...rule, target: e.target.value })} placeholder="git push   ·   or a pattern like *curl *" /></label>
         )}
-        {rule.kind === "file" && <>
+        {!payee.on && rule.kind === "file" && <>
           <label className="field"><span>Access</span>
             <select value={rule.fileOp} onChange={(e) => setRule({ ...rule, fileOp: e.target.value })}>
               <option value="">Read or write</option>
@@ -1389,7 +1411,7 @@ function Policy({ ctx }: { ctx: Ctx }) {
           </label>
           <label className="field grow"><span>Path</span><input value={rule.target} onChange={(e) => setRule({ ...rule, target: e.target.value })} placeholder="finance   ·   or a pattern like *.csv" /></label>
         </>}
-        {rule.kind === "message" && (
+        {!payee.on && rule.kind === "message" && (
           <label className="field grow"><span>To</span>
             <select value={rule.target} onChange={(e) => setRule({ ...rule, target: e.target.value })}>
               <option value="">Any agent</option>
@@ -1397,37 +1419,14 @@ function Policy({ ctx }: { ctx: Ctx }) {
             </select>
           </label>
         )}
-        <button className="btn btn-dark" disabled={busy || "error" in built}><Icon name="plus" /> Propose rule</button>
-        <div className="rule-preview">{"error" in built ? built.error : <>Will be voted on as: <strong>{describeRule(built.change, names)}</strong></>}</div>
+        <button className="btn btn-dark" disabled={busy || (payee.on ? !payeeOk : "error" in built)}><Icon name="plus" /> {payee.on ? "Propose payee" : "Propose rule"}</button>
+        <div className="rule-preview">{payee.on
+          ? (payeeOk ? <>Will be voted on as: <strong>add payee {payee.name.trim()} ({short(payee.account)}), category {rule.category.trim().toLowerCase()}</strong></> : "Enter a name, a 0x… payout address and a category")
+          : "error" in built ? built.error : <>Will be voted on as: <strong>{describeRule(built.change, names)}</strong></>}</div>
       </form>
 
       {hasLevels(s) && <LevelsCard ctx={ctx} />}
-
-      <div className="grid2">
-        <div className="card">
-          <div className="hd"><h2>Allowlisted domains</h2><span className="sub">{pol.domains.length}</span></div>
-          <div className="pad stack-sm">
-            <div className="pills">
-              {pol.domains.map((d) => (<span className="pill" key={d}>{d} <button className="x" aria-label={`Propose removing ${d}`} title="Propose removing this domain" disabled={busy} onClick={() => ctx.change({ op: "RemoveDomain", domain: d })}><Icon name="x" size={12} /></button></span>))}
-              {pol.domains.length === 0 && <span className="muted">None, so all HTTP is denied.</span>}
-            </div>
-            <form className="row-form" onSubmit={(e) => { e.preventDefault(); ctx.change({ op: "AddDomain", domain: domain.trim().toLowerCase() }).then((ok) => ok && setDomain("")); }}>
-              <input aria-label="Domain" className="mono" value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="example.com" required />
-              <button className="btn btn-ghost" disabled={busy}>Propose</button>
-            </form>
-          </div>
-        </div>
-        <div className="card">
-          <div className="hd"><h2>Large payments need two approvals</h2><span className="sub">from {usd(pol.thresholdUsd)}</span></div>
-          <div className="pad stack-sm">
-            <p className="muted">Payments at or above this need two members' signatures{pol.members.length < 2 ? " (once there are two members)" : ""}. Changing it goes to a team vote.</p>
-            <form className="row-form" onSubmit={(e) => { e.preventDefault(); ctx.change({ op: "SetThreshold", usd: Number(threshold) }); }}>
-              <span className="prefix"><span>$</span><input aria-label="Threshold in USD" type="number" min="0" step="0.01" value={threshold} onChange={(e) => setThreshold(e.target.value)} /></span>
-              <button className="btn btn-ghost" disabled={busy}>Propose</button>
-            </form>
-          </div>
-        </div>
-      </div>
+      </>}
     </div>
   );
 }
@@ -1556,6 +1555,8 @@ interface Alert {
   cta?: string;
   source: ChainEvent["source"];
   at: number;
+  /** For a "New Dharma proposal" alert: it clears once nothing is left for this member to vote on. */
+  proposalId?: number;
 }
 
 function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string): Omit<Alert, "at"> | null {
@@ -1591,7 +1592,7 @@ function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string
           what = "a policy change";
         }
       }
-      return { ...base, tone: "info", sticky: true, go: "dharma", cta: "Vote", title: `New Dharma proposal #${a.id}`, body: `${name(String(a.proposer))}: ${what}` };
+      return { ...base, tone: "info", sticky: true, go: "dharma", cta: "Vote", title: `New Dharma proposal #${a.id}`, body: `${name(String(a.proposer))}: ${what}`, proposalId: Number(a.id) };
     }
     case "VoteCast":
       return { ...base, tone: "info", sticky: false, title: `Vote on #${a.id}`, body: `${name(String(a.voter))} voted ${a.support ? "yes" : "no"} (${a.yes} yes · ${a.no} no)` };
@@ -1629,170 +1630,179 @@ function LiveBadge({ mode }: { mode: LiveMode }) {
 
 // ============================================================== Auto-Shield
 
-function Shield({ ctx, part }: { ctx: Ctx; part: "tests" | "messages" }) {
-  const { s, busy, run } = ctx;
-  const pol = s.policy!;
-  const active = pol.agents.filter((a) => a.active);
-  const categories = [...new Set(pol.payees.map((p) => p.category))];
-  const [test, setTest] = useState({ agentId: "", template: "", category: "" });
-  const [msg, setMsg] = useState({ agentId: "", from: "", subject: "", body: "" });
-  const agentName = (id: string | null) => (id ? pol.agents.find((a) => a.id === id)?.name ?? id : "every agent");
-  const tests = s.shield.tests;
-  const stats = (id: string) => {
-    const t = tests.filter((x) => x.agentId === id);
-    return { sent: t.length, passed: t.filter((x) => x.status === "passed").length, failed: t.filter((x) => x.status === "failed").length };
-  };
-
-  const runTest = (e: FormEvent) => {
-    e.preventDefault();
-    run(() => api("/shield/test", { agentId: test.agentId || active[0]?.id, template: test.template || undefined, category: test.category || undefined }),
-      "Test sent. It looks exactly like a real message to the agent.");
-  };
-  const send = (e: FormEvent) => {
-    e.preventDefault();
-    run(() => api("/inbox", { ...msg, agentId: msg.agentId || active[0]?.id }), "Message delivered to the agent's inbox").then((ok) => ok && setMsg({ ...msg, subject: "", body: "" }));
-  };
-
-  if (part === "messages") {
-    return (
-      <div className="stack">
-        <InfoBox id="inbox" icon="inbox"><p>Hand an agent work the way a supplier or teammate would.</p></InfoBox>
-          <form className="card" onSubmit={send}>
-            <div className="hd"><h2>Send a message to an agent</h2></div>
-            <div className="pad stack-sm">
-              <div className="row-form">
-                <select aria-label="Agent" value={msg.agentId} onChange={(e) => setMsg({ ...msg, agentId: e.target.value })}>
-                  {active.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-                </select>
-                <input aria-label="From" required value={msg.from} onChange={(e) => setMsg({ ...msg, from: e.target.value })} placeholder="From (e.g. a supplier)" />
-              </div>
-              <input aria-label="Subject" className="plain-input" required value={msg.subject} onChange={(e) => setMsg({ ...msg, subject: e.target.value })} placeholder="Subject" />
-              <textarea aria-label="Message" required rows={4} value={msg.body} onChange={(e) => setMsg({ ...msg, body: e.target.value })} placeholder="Invoice text, payment details…" />
-              <div><button className="btn btn-dark" disabled={busy || !active.length}><Icon name="inbox" /> Deliver</button></div>
-            </div>
-          </form>
-      <div className="card">
-        <div className="hd"><h2>Inboxes</h2></div>
-        {s.inbox.length === 0 ? <Empty icon="inbox">No messages yet.</Empty> : (
-          <div className="resolved">
-            {s.inbox.slice(0, 20).map((m) => (
-              <div className="res" key={m.id}>
-                {m.test ? <Badge v={m.test.status === "failed" ? "deny" : m.test.status === "passed" ? "allow" : "approval"}>test</Badge> : <span className="badge badge-quiet">real</span>}
-                <span className="small"><b>{m.subject}</b> <span className="muted">· {m.from} → {agentName(m.agentId)}</span></span>
-                <span className="muted small">{m.reportedAt ? <span className="tag">flagged by agent</span> : null} {ago(m.receivedAt)}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-      </div>
-    );
-  }
-
+/** Watchdog, everything blocked or frozen, drills, traps and inboxes on one page. */
+function Safety({ ctx }: { ctx: Ctx }) {
   return (
     <div className="stack">
-      <InfoBox id="shield" icon="shield">
-          <p className="center-line">Karuna sends each agent {s.shield.testsPerDay ? `about ${s.shield.testsPerDay}` : "a few"} fake scams a day. One that falls for it stays blocked until you restore it below.</p>
-      </InfoBox>
+      <WatchdogCard ctx={ctx} />
+      <Incidents ctx={ctx} />
+      <Drills ctx={ctx} />
+      <Traps ctx={ctx} />
+      <Inbox ctx={ctx} />
+    </div>
+  );
+}
 
-      {active.length > 0 && (
-        <div className="grid2 agent-grid">
-          {active.map((a, i) => {
-            const st2 = stats(a.id);
-            const rules = s.shield.autoRules.filter((r) => r.active && r.agent === a.id);
+/** Auto-blocks from failed drills, swarm freezes, and agents that used a trap credential. */
+function Incidents({ ctx }: { ctx: Ctx }) {
+  const { s, busy } = ctx;
+  const pol = s.policy!;
+  const blocks = s.shield.autoRules.filter((r) => r.active);
+  const sw = s.swarm;
+  const agentName = (id: string | null) => (id ? pol.agents.find((a) => a.id === id)?.name ?? id : "every agent");
+  const n = blocks.length + sw.trips.length + sw.tainted.length;
+  return (
+    <div className="card">
+      <div className="hd"><h2>Blocks and freezes</h2><span className="sub">{n || ""}</span></div>
+      {n === 0 && <Empty icon="shield">Nothing blocked. An agent that fails a drill or touches a trap shows up here.</Empty>}
+      {blocks.length > 0 && (
+        <div className="table">
+          {blocks.map((r) => {
+            const removing = pol.proposals.some((g) => g.change?.op === "RemoveRule" && g.change.id === r.id && (g.status === "open" || g.status === "queued"));
+            const approvalId = r.id.replace(/^sh-/, "ap-");
+            const hasApproval = pol.rules.some((x) => x.id === approvalId && x.active);
             return (
-              <div className={`tile rise ${rules.length ? "attention" : ""}`} style={st(i)} key={a.id}>
-                <div className="k">{a.name} <Icon name="agents" size={14} /></div>
-                <div className="v small-v">{st2.passed} passed · <span className={st2.failed ? "bad-text" : ""}>{st2.failed} failed</span></div>
-                <div className="note">{st2.sent} tests · {rules.length} auto-block{rules.length === 1 ? "" : "s"}</div>
+              <div className="tr shield-tr" key={r.id}>
+                <span className="b">{agentName(r.agent)} can't pay for <b>{r.category}</b></span>
+                <span className="mono small muted">failed a drill</span>
+                <span className="shield-actions">
+                  {removing ? (
+                    <Badge v="approval">restore proposed</Badge>
+                  ) : (
+                    <>
+                      <button className="btn btn-ghost btn-sm" disabled={busy || hasApproval}
+                        title="Proposes two changes for a vote: send this agent's payments in this category to a human, and lift the block"
+                        onClick={async () => {
+                          const ok = await ctx.change({ op: "AddRule", id: approvalId, outcome: "Approval", agent: r.agent ?? undefined, scope: `payment:${r.category}` });
+                          if (ok) await ctx.change({ op: "RemoveRule", id: r.id });
+                        }}>
+                        Restore with approval required
+                      </button>
+                      <button className="btn btn-dark btn-sm" disabled={busy} onClick={() => ctx.change({ op: "RemoveRule", id: r.id })}>Propose restore</button>
+                    </>
+                  )}
+                </span>
               </div>
             );
           })}
         </div>
       )}
+      {(sw.trips.length > 0 || sw.tainted.length > 0) && (
+        <div className="resolved">
+          {sw.trips.map((t) => (
+            <div className="res" key={t.id}>
+              <span className="badge badge-danger"><Icon name="stop" size={12} />froze all</span>
+              <span className="small">{t.reason} <span className="muted">· {t.agents.map((a) => agentName(a)).join(", ")}</span></span>
+              <span className="muted small">{isTx(t.txRef) ? <TxLink tx={t.txRef} s={s} /> : "local"} · {ago(t.at)}</span>
+            </div>
+          ))}
+          {sw.tainted.map((t) => (
+            <div className="res" key={t.agentId}>
+              <span className="badge badge-danger">used a trap</span>
+              <span className="small"><b>{t.agentName}</b> used <span className="mono">{t.secret}</span></span>
+              <span className="muted small">{ago(t.at)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
-      <div className="card">
-        <div className="hd"><h2>Auto-blocks on Dharma</h2><span className="sub">{s.shield.autoRules.filter((r) => r.active).length} active</span></div>
-        {s.shield.autoRules.filter((r) => r.active).length === 0 ? (
-          <Empty icon="shield">No agent is blocked. When one falls for a test, its block appears here.</Empty>
-        ) : (
-          <div className="table">
-            {s.shield.autoRules.filter((r) => r.active).map((r) => {
-              const removing = pol.proposals.some((g) => g.change?.op === "RemoveRule" && g.change.id === r.id && (g.status === "open" || g.status === "queued"));
-              const approvalId = r.id.replace(/^sh-/, "ap-");
-              const hasApproval = pol.rules.some((x) => x.id === approvalId && x.active);
-              return (
-                <div className="tr shield-tr" key={r.id}>
-                  <span className="b">{agentName(r.agent)} can't pay for <b>{r.category}</b></span>
-                  <span className="mono small muted">{r.id}</span>
-                  <span className="shield-actions">
-                    {removing ? (
-                      <Badge v="approval">restore proposed</Badge>
-                    ) : (
-                      <>
-                        <button className="btn btn-ghost btn-sm" disabled={busy || hasApproval}
-                          title="Proposes two changes for a vote: send this agent's payments in this category to a human, and lift the block"
-                          onClick={async () => {
-                            const ok = await ctx.change({ op: "AddRule", id: approvalId, outcome: "Approval", agent: r.agent ?? undefined, scope: `payment:${r.category}` });
-                            if (ok) await ctx.change({ op: "RemoveRule", id: r.id });
-                          }}>
-                          Restore with approval required
-                        </button>
-                        <button className="btn btn-dark btn-sm" disabled={busy} onClick={() => ctx.change({ op: "RemoveRule", id: r.id })}>Propose restore</button>
-                      </>
-                    )}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
+/** Fake scams sent to agents, automatically and on demand. */
+function Drills({ ctx }: { ctx: Ctx }) {
+  const { s, busy, run } = ctx;
+  const pol = s.policy!;
+  const active = pol.agents.filter((a) => a.active);
+  const categories = [...new Set(pol.payees.map((p) => p.category))];
+  const [test, setTest] = useState({ agentId: "", template: "", category: "" });
+  const agentName = (id: string | null) => (id ? pol.agents.find((a) => a.id === id)?.name ?? id : "every agent");
+  const tests = s.shield.tests;
+  const runTest = (e: FormEvent) => {
+    e.preventDefault();
+    run(() => api("/shield/test", { agentId: test.agentId || active[0]?.id, template: test.template || undefined, category: test.category || undefined }),
+      "Test sent. It looks exactly like a real message to the agent.");
+  };
+  return (
+    <div className="card">
+      <div className="hd"><h2>Drills</h2><span className="sub">{s.shield.testsPerDay ? `about ${s.shield.testsPerDay} fake scams per agent a day` : "fake scams sent to agents"}</span></div>
+      <form className="inline-form" onSubmit={runTest}>
+        <label className="field"><span>Agent</span>
+          <select value={test.agentId} onChange={(e) => setTest({ ...test, agentId: e.target.value })}>
+            {active.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
+        </label>
+        <label className="field"><span>Scam</span>
+          <select value={test.template} onChange={(e) => setTest({ ...test, template: e.target.value })}>
+            <option value="">Random</option>
+            {Object.entries(s.shield.templates).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          </select>
+        </label>
+        <label className="field"><span>Pretends to be</span>
+          <input list="shield-cats" value={test.category} onChange={(e) => setTest({ ...test, category: e.target.value })} placeholder={categories[0] ?? "supplies"} />
+          <datalist id="shield-cats">{categories.map((c) => <option key={c} value={c} />)}</datalist>
+        </label>
+        <button className="btn btn-dark" disabled={busy || !active.length}><Icon name="shield" /> Send test</button>
+      </form>
+      {tests.length > 0 && (
+        <div className="resolved">
+          {tests.slice(0, 10).map((t) => (
+            <div className="res" key={t.id}>
+              {t.status === "failed" ? <span className="badge badge-danger"><Icon name="x" size={12} />failed</span> : <Badge v={t.status === "passed" ? "allow" : "approval"}>{t.status}</Badge>}
+              <span className="small">{agentName(t.agentId)} · {s.shield.templates[t.template] ?? t.template} · {t.category}</span>
+              <span className="muted small">{t.resolution ? `${t.resolution} · ` : ""}{ago(t.sentAt)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
-      <form className="card" onSubmit={runTest}>
-          <div className="hd"><h2>Run a drill now</h2></div>
-          <div className="inline-form">
-            <label className="field"><span>Agent</span>
-              <select value={test.agentId} onChange={(e) => setTest({ ...test, agentId: e.target.value })}>
-                {active.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-              </select>
-            </label>
-            <label className="field"><span>Scam</span>
-              <select value={test.template} onChange={(e) => setTest({ ...test, template: e.target.value })}>
-                <option value="">Random</option>
-                {Object.entries(s.shield.templates).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-              </select>
-            </label>
-            <label className="field"><span>Pretends to be</span>
-              <input list="shield-cats" value={test.category} onChange={(e) => setTest({ ...test, category: e.target.value })} placeholder={categories[0] ?? "supplies"} />
-              <datalist id="shield-cats">{categories.map((c) => <option key={c} value={c} />)}</datalist>
-            </label>
-            <button className="btn btn-dark" disabled={busy || !active.length}><Icon name="shield" /> Send test</button>
-          </div>
-        </form>
-
-      <div className="card">
-        <div className="hd"><h2>Tests</h2></div>
-        {tests.length === 0 ? <Empty icon="shield">No tests yet.</Empty> : (
-          <div className="resolved">
-            {tests.slice(0, 20).map((t) => (
-              <div className="res" key={t.id}>
-                {t.status === "failed" ? <span className="badge badge-danger"><Icon name="x" size={12} />failed</span> : <Badge v={t.status === "passed" ? "allow" : "approval"}>{t.status}</Badge>}
-                <span className="small">{agentName(t.agentId)} · {s.shield.templates[t.template] ?? t.template} · {t.category}</span>
-                <span className="muted small">{t.resolution ? `${t.resolution} · ` : ""}{ago(t.sentAt)}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
+/** Hand an agent work the way a supplier or teammate would, and see what reached each inbox. */
+function Inbox({ ctx }: { ctx: Ctx }) {
+  const { s, busy, run } = ctx;
+  const pol = s.policy!;
+  const active = pol.agents.filter((a) => a.active);
+  const [msg, setMsg] = useState({ agentId: "", from: "", subject: "", body: "" });
+  const agentName = (id: string | null) => (id ? pol.agents.find((a) => a.id === id)?.name ?? id : "every agent");
+  const send = (e: FormEvent) => {
+    e.preventDefault();
+    run(() => api("/inbox", { ...msg, agentId: msg.agentId || active[0]?.id }), "Message delivered to the agent's inbox").then((ok) => ok && setMsg({ ...msg, subject: "", body: "" }));
+  };
+  return (
+    <div className="card">
+      <div className="hd"><h2>Inboxes</h2><span className="sub">{s.inbox.length || ""}</span></div>
+      <form className="pad stack-sm" onSubmit={send}>
+        <div className="row-form">
+          <select aria-label="Agent" value={msg.agentId} onChange={(e) => setMsg({ ...msg, agentId: e.target.value })}>
+            {active.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
+          <input aria-label="From" required value={msg.from} onChange={(e) => setMsg({ ...msg, from: e.target.value })} placeholder="From (e.g. a supplier)" />
+          <input aria-label="Subject" required value={msg.subject} onChange={(e) => setMsg({ ...msg, subject: e.target.value })} placeholder="Subject" />
+        </div>
+        <textarea aria-label="Message" required rows={3} value={msg.body} onChange={(e) => setMsg({ ...msg, body: e.target.value })} placeholder="Invoice text, payment details…" />
+        <div><button className="btn btn-dark" disabled={busy || !active.length}><Icon name="inbox" /> Deliver</button></div>
+      </form>
+      {s.inbox.length > 0 && (
+        <div className="resolved">
+          {s.inbox.slice(0, 20).map((m) => (
+            <div className="res" key={m.id}>
+              {m.test ? <Badge v={m.test.status === "failed" ? "deny" : m.test.status === "passed" ? "allow" : "approval"}>test</Badge> : <span className="badge badge-quiet">real</span>}
+              <span className="small"><b>{m.subject}</b> <span className="muted">· {m.from} → {agentName(m.agentId)}</span></span>
+              <span className="muted small">{m.reportedAt ? <span className="tag">flagged by agent</span> : null} {ago(m.receivedAt)}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
 // ============================================================== Swarm Stopper + Trap Passwords
 
-function Swarm({ ctx }: { ctx: Ctx }) {
+/** Bait credentials: any agent that uses one freezes every agent. */
+function Traps({ ctx }: { ctx: Ctx }) {
   const { s, busy, run } = ctx;
   const pol = s.policy!;
   const sw = s.swarm;
@@ -1803,48 +1813,8 @@ function Swarm({ ctx }: { ctx: Ctx }) {
   const agentName = (id: string) => pol.agents.find((a) => a.id === id)?.name ?? id;
 
   return (
-    <div className="stack">
-      <InfoBox id="swarm" icon="swarm">
-          <p>Agents never get real passwords, so any password an agent uses is bait. If an agent shares one, or {sw.agentsToTrip} agents go after the same new target within {sw.windowSeconds}s, every agent freezes. Unfreeze from the top bar (needs a vote).</p>
-      </InfoBox>
-
-      <WatchdogCard ctx={ctx} />
-
-      <div className="grid2">
-        <div className="card">
-          <div className="hd"><h2>Trips</h2><span className="sub">{sw.trips.length}</span></div>
-          {sw.trips.length === 0 ? <Empty icon="swarm">No swarm detected.</Empty> : (
-            <div className="resolved">
-              {sw.trips.map((t) => (
-                <div className="res" key={t.id}>
-                  <span className="badge badge-danger"><Icon name="stop" size={12} />froze all</span>
-                  <span className="small">{t.reason} <span className="muted">· {t.agents.map(agentName).join(", ")}</span></span>
-                  <span className="muted small">
-                    {isTx(t.txRef) ? <TxLink tx={t.txRef} s={s} /> : "local"} · {ago(t.at)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-        <div className="card">
-          <div className="hd"><h2>Agents that touched a trap</h2><span className="sub">{sw.tainted.length}</span></div>
-          {sw.tainted.length === 0 ? <Empty icon="key">None. Any agent that uses a trap credential shows up here.</Empty> : (
-            <div className="resolved">
-              {sw.tainted.map((t) => (
-                <div className="res" key={t.agentId}>
-                  <span className="badge badge-danger">marked</span>
-                  <span className="small"><b>{t.agentName}</b> used <span className="mono">{t.secret}</span></span>
-                  <span className="muted small">{ago(t.at)}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-
       <div className="card">
-        <div className="hd"><h2>Trap credentials</h2></div>
+        <div className="hd"><h2>Trap credentials</h2><span className="sub">any agent that uses one, or {sw.agentsToTrip} agents hitting one new target within {sw.windowSeconds}s, freezes every agent</span></div>
         <form className="pad row-form" onSubmit={(e) => { e.preventDefault(); run(() => api("/traps", { agentId: target || undefined }), "Trap credentials minted. Plant them where the agent can find them."); }}>
           <select aria-label="Which agent the traps are for" value={target} onChange={(e) => setTarget(e.target.value)}>
             <option value="">For every agent</option>
@@ -1878,9 +1848,7 @@ function Swarm({ ctx }: { ctx: Ctx }) {
             })}
           </div>
         )}
-        <div className="log-foot"><span>drop the .env into the agent's workspace, or leak it by email</span><span>real keys stay with the Gatekeeper</span></div>
       </div>
-    </div>
   );
 }
 
@@ -2000,9 +1968,9 @@ function Keys({ ctx }: { ctx: Ctx }) {
   };
 
   return (
-    <div className="stack">
-      <form className="card" onSubmit={add}>
-        <div className="hd"><h2>Add a key</h2></div>
+    <div className="card">
+      <div className="hd"><h2>Keys</h2><span className="sub">{sb.keys.length ? sb.keys.length : "agents only ever see a placeholder"}</span></div>
+      <form onSubmit={add}>
         <div className="inline-form">
           <label className="field"><span>Use for</span>
             <select value={form.use} onChange={(e) => setForm({ ...form, use: e.target.value as "agents" | "drafter" })}>
@@ -2032,10 +2000,7 @@ function Keys({ ctx }: { ctx: Ctx }) {
           </div>
         )}
       </form>
-
-      <div className="card">
-        <div className="hd"><h2>Keys</h2><span className="sub">{sb.keys.length}</span></div>
-        {sb.keys.length === 0 ? <Empty icon="key">No keys yet. Boxed agents can't call a private API until you add its key here.</Empty> : (
+        {sb.keys.length > 0 && (
           <div className="table">
             {sb.keys.map((k) => (
               <div className="tr key-tr" key={k.name}>
@@ -2058,7 +2023,6 @@ function Keys({ ctx }: { ctx: Ctx }) {
             ))}
           </div>
         )}
-      </div>
     </div>
   );
 }
@@ -2102,6 +2066,403 @@ function Appearance() {
   );
 }
 
+
+// ============================================================== Claude chat setup
+
+/** The switches to turn off in the chat app, so every tool it uses goes through Karuna. */
+const CHAT_OFF = [
+  { id: "search", label: "Web search", note: "Karuna's web_search replaces it" },
+  { id: "code", label: "Code execution and file creation", note: "runs on the chat app's servers, outside Karuna" },
+  { id: "direct", label: "Connectors added in Claude directly", note: "add them under Connectors instead" },
+] as const;
+
+/** Connect Claude chat: Karuna's address, then the built-in tools to turn off. */
+function ChatSetup({ ctx }: { ctx: Ctx }) {
+  const { s } = ctx;
+  const url = s.chatUrl ?? null;
+  const connected = (s.devices ?? []).some((d) => d.tool === "chat" && d.status === "approved");
+  const [copied, setCopied] = useState(false);
+  const [done, setDone] = useState<Record<string, boolean>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("karuna.chatSetup") ?? "{}") as Record<string, boolean>;
+    } catch {
+      return {};
+    }
+  });
+  const tick = (id: string, on: boolean) => {
+    const next = { ...done, [id]: on };
+    setDone(next);
+    try {
+      localStorage.setItem("karuna.chatSetup", JSON.stringify(next));
+    } catch {
+      /* per-browser convenience only */
+    }
+  };
+  const off = CHAT_OFF.filter((x) => done[x.id]).length;
+  return (
+    <div className="card chat-setup">
+      <div className="hd"><h2>Claude chat</h2><span className="sub">{connected ? `connected · ${off}/${CHAT_OFF.length} built-in tools off` : "not connected"}</span></div>
+      <div className="pad stack-sm">
+        <div className="chat-step">
+          <span className="step-n">1</span>
+          <div className="grow">
+            <b>Add Karuna as a connector</b>
+            <div className="small muted">In Claude: Settings → Connectors → Add custom connector. Paste this address, then approve the code under Computers &amp; chats.</div>
+            {url ? (
+              <div className="row-form">
+                <span className="mono small chat-url">{url}</span>
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => { navigator.clipboard?.writeText(url); setCopied(true); }}><Icon name={copied ? "check" : "copy"} size={13} /> {copied ? "Copied" : "Copy"}</button>
+              </div>
+            ) : (
+              <div className="small muted">No public address yet. Point a tunnel at port 8792, set <span className="mono">KARUNA_CHAT_URL</span> to its address, and restart Karuna.</div>
+            )}
+          </div>
+        </div>
+        <div className="chat-step">
+          <span className="step-n">2</span>
+          <div className="grow">
+            <b>Turn these off in Claude</b>
+            <div className="small muted">Karuna can't see the chat app's own tools. With them off, every tool Claude uses goes through your rules.</div>
+            {CHAT_OFF.map((x) => (
+              <label className="check-row" key={x.id}>
+                <input type="checkbox" checked={!!done[x.id]} onChange={(e) => tick(x.id, e.target.checked)} />
+                <span>{x.label} <span className="muted small">· {x.note}</span></span>
+              </label>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================== computers (Claude Code / Cursor plugin)
+
+/** Computers running Claude Code or Cursor with the Karuna plugin: approve, see, disconnect. */
+function Computers({ ctx }: { ctx: Ctx }) {
+  const { s, run, busy, me } = ctx;
+  const devices = s.devices ?? [];
+  const pending = devices.filter((d) => d.status === "pending");
+  const connected = devices.filter((d) => d.status === "approved");
+  const toolName = (t: string) => (t === "cursor" ? "Cursor" : t === "chat" ? "Chat app" : "Claude Code");
+  const approve = (d: (typeof devices)[number]) =>
+    run(async () => {
+      const dharma = s.org.dharma!.address as Address;
+      const { agentId } = await api<{ agentId: string }>(`/devices/${d.id}/approve`, { by: me.address });
+      // Its agent, and the vote to let it run outside a sandbox (it runs on that person's computer).
+      await submitChange(me, dharma, { kind: Kind.Propose, change: { op: "SetAgent", id: agentId, capUsd: 0 }, label: d.name });
+      await submitChange(me, dharma, { kind: Kind.Propose, change: { op: "AddRule", id: `unsandboxed-${agentId}`.slice(0, 31), outcome: "Allow", scope: "unsandboxed", target: agentId } });
+    }, `Approved. ${d.name} works once the vote passes (${s.policy!.timelock}s), starting at Level 0`);
+  if (!devices.length) {
+    return (
+      <div className="card">
+        <div className="hd"><h2>Computers &amp; chats</h2><span className="sub">Claude Code · Cursor · chat apps</span></div>
+        <Empty icon="agents">Nothing connected yet. In Claude Code, run <span className="mono">/plugin install karuna</span>; in a chat app, add Karuna's address as a connector. Each shows a code to approve here.</Empty>
+      </div>
+    );
+  }
+  return (
+    <div className="card">
+      <div className="hd"><h2>Computers &amp; chats</h2><span className="sub">{connected.length} connected{pending.length ? ` · ${pending.length} waiting` : ""}</span></div>
+      <div className="resolved">
+        {pending.map((d) => (
+          <div className="res" key={d.id}>
+            <Badge v="approval">wants to connect</Badge>
+            <span className="small"><b>{d.name}</b> · {toolName(d.tool)} · code <span className="mono">{d.code}</span> · {ago(d.requestedAt)}</span>
+            <span className="ballot-actions">
+              <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => run(() => api(`/devices/${d.id}/deny`, {}), "Denied")}>Deny</button>
+              <button className="btn btn-approve btn-sm" disabled={busy} title="Check the code matches the one on that computer" onClick={() => approve(d)}><Icon name="pen" size={14} /> Approve</button>
+            </span>
+          </div>
+        ))}
+        {connected.map((d) => {
+          const seen = d.lastSeenAt ? Date.now() - Date.parse(d.lastSeenAt) : null;
+          return (
+            <div className="res" key={d.id}>
+              <Badge v={seen !== null && seen < 10 * 60_000 ? "allow" : "approval"}>{seen !== null && seen < 10 * 60_000 ? "active" : "connected"}</Badge>
+              <span className="small"><b>{d.agentName ?? d.name}</b> · {toolName(d.tool)} · {d.lastSeenAt ? `last call ${ago(d.lastSeenAt)}` : "no calls yet"}</span>
+              <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => confirm(`Disconnect ${d.name}? Its tool calls stop working at once.`) && run(() => api(`/devices/${d.id}/revoke`, {}), "Disconnected")}>Disconnect</button>
+            </div>
+          );
+        })}
+      </div>
+      <div className="log-foot"><span>every tool call is checked against your rules before it runs</span><span>connected computers can be disconnected at any time</span></div>
+    </div>
+  );
+}
+
+// ============================================================== new agent (Karuna builds and runs it)
+
+const SCHEDULE_TEXT = (s: Schedule) =>
+  s.kind === "every" ? (s.minutes! % 60 === 0 ? `Every ${s.minutes! / 60} h` : `Every ${s.minutes} min`) : s.kind === "daily" ? `Daily at ${s.at}` : s.kind === "inbox" ? "When a message arrives in its inbox" : "Only when started";
+
+function ScheduleFields({ value, onChange }: { value: Schedule; onChange: (s: Schedule) => void }) {
+  return (
+    <div className="row-form">
+      <select className="select-sm" aria-label="When it runs" value={value.kind} onChange={(e) => {
+        const kind = e.target.value as Schedule["kind"];
+        onChange(kind === "every" ? { kind, minutes: value.minutes ?? 60 } : kind === "daily" ? { kind, at: value.at ?? "09:00" } : { kind });
+      }}>
+        <option value="manual">Only when started</option>
+        <option value="every">Every…</option>
+        <option value="daily">Daily at…</option>
+        <option value="inbox">When a message arrives</option>
+      </select>
+      {value.kind === "every" && <label className="inline-field"><input className="select-sm mono" type="number" min={15} step={15} value={value.minutes} onChange={(e) => onChange({ ...value, minutes: Number(e.target.value) })} /> minutes</label>}
+      {value.kind === "daily" && <input className="select-sm mono" type="time" aria-label="Time" value={value.at} onChange={(e) => onChange({ ...value, at: e.target.value })} />}
+    </div>
+  );
+}
+
+/** Describe a job; Karuna drafts the agent; members review and propose it; Karuna runs it. */
+function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
+  const { s, run, busy, me } = ctx;
+  const [job, setJob] = useState("");
+  const [drafting, setDrafting] = useState(false);
+  const [err, setErr] = useState("");
+  const [d, setD] = useState<AgentDraftView | null>(null);
+  const [keep, setKeep] = useState<Record<number, boolean>>({});
+  const draft = async () => {
+    setDrafting(true);
+    setErr("");
+    try {
+      const r = await api<AgentDraftView>("/agents/draft", { text: job });
+      setD(r);
+      setKeep(Object.fromEntries(r.rules.map((_, i) => [i, true])));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDrafting(false);
+    }
+  };
+  const propose = () =>
+    run(async () => {
+      if (!d) return;
+      const dharma = s.org.dharma!.address as Address;
+      const { id } = await api<{ id: string }>("/agents/build", { name: d.name, instructions: d.instructions, schedule: d.schedule });
+      await submitChange(me, dharma, { kind: Kind.Propose, change: { op: "SetAgent", id, capUsd: 0 }, label: d.name });
+      // Its limits apply to it alone.
+      for (const [i, r] of d.rules.entries()) if (keep[i]) await submitChange(me, dharma, { kind: Kind.Propose, change: { ...r.change, agent: id } });
+      setD(null);
+      setJob("");
+    }, `Proposed. Karuna runs it once the vote passes (${s.policy!.timelock}s), starting at Level 0`);
+  return (
+    <div className="card new-agent">
+      <div className="hd"><h2>New agent</h2><span className="sub">Karuna builds and runs it</span></div>
+      <div className="pad stack-sm">
+        {!d ? (
+          <>
+            <textarea aria-label="Describe the job" rows={3} value={job} onChange={(e) => setJob(e.target.value)} placeholder="e.g. Every morning, check grain prices; if flour is under $35, order from Valley Flour, up to $50 a week." />
+            {err && <p className="err-text">{err}</p>}
+            <div className="row-form"><button className="btn btn-dark" disabled={drafting || job.trim().length < 10} onClick={draft}>{drafting ? <span className="shimmer">Drafting…</span> : "Draft the agent"}</button></div>
+            {own}
+          </>
+        ) : (
+          <>
+            <label className="field"><span>Name</span><input value={d.name} onChange={(e) => setD({ ...d, name: e.target.value })} /></label>
+            <label className="field"><span>Instructions</span><textarea rows={5} value={d.instructions} onChange={(e) => setD({ ...d, instructions: e.target.value })} /></label>
+            <div className="field"><span>When it runs</span><ScheduleFields value={d.schedule} onChange={(schedule) => setD({ ...d, schedule })} /></div>
+            {d.rules.length > 0 && (
+              <div className="field">
+                <span>Its limits (voted with it)</span>
+                {d.rules.map((r, i) => (
+                  <label className="check-row" key={r.change.id}><input type="checkbox" checked={!!keep[i]} onChange={(e) => setKeep({ ...keep, [i]: e.target.checked })} /> {r.sentence.replace(/ for every agent/, "")}</label>
+                ))}
+              </div>
+            )}
+            {(d.note || d.rulesNote) && <p className="muted small">{[d.note, d.rulesNote].filter(Boolean).join(" ")}</p>}
+            <p className="muted small">It starts at Level 0: small payments only, everything else waits for a member until it earns more.</p>
+            <div className="row-form">
+              <button className="btn btn-ghost" onClick={() => setD(null)}>Back</button>
+              <button className="btn btn-dark" disabled={busy || !d.name.trim() || !d.instructions.trim()} onClick={propose}><Icon name="pen" size={14} /> Propose agent</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** On a built agent's card: schedule, Run now, Pause, Edit instructions. */
+function BuiltControls({ a, ctx, openRuns }: { a: AgentView; ctx: Ctx; openRuns: () => void }) {
+  const { run, busy } = ctx;
+  const b = a.built!;
+  const [editing, setEditing] = useState<string | null>(null);
+  return (
+    <div className="built">
+      <div className="level-row">
+        <span className="tag" title="When Karuna starts it"><Icon name="clock" size={11} /> {b.scheduleText}{b.paused ? " · paused" : ""}</span>
+        <span className="muted small">{b.lastRunAt ? `last run ${ago(b.lastRunAt)}` : "hasn't run yet"}</span>
+      </div>
+      {editing !== null ? (
+        <div className="stack-sm">
+          <textarea rows={5} aria-label="Instructions" value={editing} onChange={(e) => setEditing(e.target.value)} />
+          <div className="row-form">
+            <button className="btn btn-ghost btn-sm" onClick={() => setEditing(null)}>Cancel</button>
+            <button className="btn btn-dark btn-sm" disabled={busy || !editing.trim() || editing === b.instructions}
+              onClick={() => confirm(`Change ${a.name}'s instructions?\n\nNow:\n${b.instructions}\n\nNew:\n${editing}`) && run(() => api(`/agents/${a.id}/built`, { instructions: editing }, "PATCH"), "Instructions changed").then((ok) => ok && setEditing(null))}>Save</button>
+          </div>
+        </div>
+      ) : (
+        <div className="agent-actions">
+          <button className="btn btn-dark btn-sm" disabled={busy || b.paused} onClick={() => run(() => api(`/agents/${a.id}/run`, {}).then(openRuns), "Started")}>Run now</button>
+          <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => run(() => api(`/agents/${a.id}/built`, { paused: !b.paused }, "PATCH"), b.paused ? "Resumed" : "Paused")}>{b.paused ? "Resume" : "Pause"}</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => setEditing(b.instructions)}>Edit instructions</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================== the Runs view
+
+/** One agent's runs; open one for its live timeline. */
+function RunsPanel({ ctx, agentId, onClose }: { ctx: Ctx; agentId: string; onClose: () => void }) {
+  const { s } = ctx;
+  const runs = (s.runs ?? []).filter((r) => r.agentId === agentId);
+  const [open, setOpen] = useState<string | null>(runs[0]?.id ?? null);
+  useEffect(() => {
+    if (!open && runs[0]) setOpen(runs[0].id);
+  }, [runs[0]?.id]);
+  const name = s.policy!.agents.find((a) => a.id === agentId)?.name ?? agentId;
+  return (
+    <div className="card runs-panel rise">
+      <div className="hd"><h2>Runs · {name}</h2><button className="btn btn-ghost btn-sm" onClick={onClose}><Icon name="x" size={12} /> Close</button></div>
+      {runs.length === 0 ? (
+        <Empty icon="activity">No runs yet.</Empty>
+      ) : (
+        <div className="runs-split">
+          <div className="runs-list">
+            {runs.map((r) => (
+              <button key={r.id} className={`run-item ${open === r.id ? "on" : ""}`} onClick={() => setOpen(r.id)}>
+                <span className={`run-dot ${r.status}`} />
+                <span><b>{r.trigger}</b><small>{ago(r.startedAt)} · {r.actions} action{r.actions === 1 ? "" : "s"}{r.waiting ? ` · ${r.waiting} waiting` : ""}</small></span>
+              </button>
+            ))}
+          </div>
+          {open && <RunTimeline ctx={ctx} id={open} />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RunTimeline({ ctx, id }: { ctx: Ctx; id: string }) {
+  const { s, me, run, busy } = ctx;
+  const [r, setR] = useState<RunDetail | null>(null);
+  const summary = (s.runs ?? []).find((x) => x.id === id);
+  // Live while it runs: refetch on every change the console hears about (and every 3 s as a fallback).
+  useEffect(() => {
+    let alive = true;
+    const load = () => (PREVIEW ? setR(previewRun(id)) : void api<RunDetail>(`/runs/${id}`).then((x) => alive && setR(x)).catch(() => undefined));
+    load();
+    const t = setInterval(load, 3000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [id, summary?.steps, summary?.status]);
+  if (!r) return <div className="run-timeline"><Loading text="Loading the run…" /></div>;
+  const steps: RunStep[] = r.steps;
+  const live = r.status === "running" || r.status === "starting";
+  const session = s.sandbox.sessions.find((x) => x.agentId === r.agentId);
+  const decide = (proposalId: string, approve: boolean) => {
+    const p = s.proposals.find((x) => x.id === proposalId);
+    if (!p) return;
+    run(() => decidePayment(me, s.org.dharma!.address as Address, p.id, p.payloadHash ?? "0".repeat(64), approve), approve ? "Approved" : "Denied");
+  };
+  return (
+    <div className="run-timeline">
+      <div className="run-head">
+        <span className={`badge ${live ? "badge-allow" : r.status === "done" ? "badge-quiet" : "badge-danger"}`}>{live ? "running" : r.status}</span>
+        <span className="small">{r.trigger} · started {ago(r.startedAt)}{r.host ? ` · ${r.host}` : ""}</span>
+        <span className="small muted">{r.models.length ? `Model: ${r.models.join(", ")}` : ""}</span>
+        <span className="run-head-actions">
+          {session?.viewer && !session.remote && live && <a className="btn btn-ghost btn-sm" href={session.viewer} target="_blank" rel="noreferrer">Watch screen <Icon name="external" size={12} /></a>}
+          {live && <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => confirm("Stop this run now?") && run(() => api(`/runs/${r.id}/stop`, {}), "Stopping")}>Stop</button>}
+        </span>
+      </div>
+      {!r.reasoningVisible && <p className="notice small">This agent's reasoning isn't visible; only its actions are.</p>}
+      {steps.length === 0 && <p className="muted small pad">{live ? <span className="shimmer">Starting…</span> : "Nothing recorded."}</p>}
+      <ol className="steps">
+        {steps.map((st, i) => (
+          <li key={i} className={`step ${st.kind}`}>
+            <span className="step-time mono">{new Date(st.at).toLocaleTimeString()}</span>
+            {st.kind === "model" && (
+              <div className="step-body">
+                <div className="step-title">{st.exchange.model || "Model"} <span className="muted">· {st.exchange.provider}</span></div>
+                {st.exchange.asked && <details><summary className="muted small">Asked</summary><pre className="snippet">{st.exchange.asked}</pre></details>}
+                {st.exchange.thinking && <details><summary className="muted small">Reasoning</summary><pre className="snippet">{st.exchange.thinking}</pre></details>}
+                {st.exchange.said && <p className="step-said">{st.exchange.said}</p>}
+                {st.exchange.toolCalls.map((t, k) => <div key={k} className="tool-call mono small">→ {t.name} {t.input.length > 2 ? t.input : ""}</div>)}
+              </div>
+            )}
+            {st.kind === "raw-model" && <div className="step-body"><div className="step-title">Model call · {st.provider}</div><p className="muted small">Not decoded ({st.status}).</p></div>}
+            {st.kind === "action" && (() => {
+              const now = st.now === "allowed" || st.now === "executed" ? "approved" : st.now === "denied" ? "denied" : st.outcome;
+              return (
+                <div className="step-body">
+                  <div className="step-title">
+                    <Badge v={now === "denied" ? "deny" : now === "waiting" ? "approval" : "allow"}>{now === "waiting" ? "waiting" : now === "approved" ? "approved" : now}</Badge>
+                    <span className="mono small">{st.summary}</span>
+                  </div>
+                  {st.reason && now !== "allowed" && <p className="muted small">{st.reason}</p>}
+                  {now === "waiting" && st.proposalId && (
+                    <div className="row-form">
+                      <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => decide(st.proposalId!, false)}>Deny</button>
+                      <button className="btn btn-approve btn-sm" disabled={busy} onClick={() => decide(st.proposalId!, true)}><Icon name="pen" size={14} /> Approve</button>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+            {st.kind === "note" && <div className="step-body"><div className="step-title muted small">The agent's own notes</div><pre className="snippet note">{st.text}</pre></div>}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+// ============================================================== connectors (chat apps' tools, through Karuna)
+
+/** The team's connectors: other MCP servers whose tools chat apps reach only through Karuna. */
+function Connectors({ ctx }: { ctx: Ctx }) {
+  const { s, busy, run } = ctx;
+  const list = s.connectors ?? [];
+  const [form, setForm] = useState({ name: "", url: "" });
+  const name = form.name.trim().toLowerCase();
+  const ok = /^[a-z0-9-]{2,24}$/.test(name) && /^https:\/\/\S+$/.test(form.url.trim());
+  const rule = (n: string) => s.policy!.rules.find((r) => r.active && r.scope === `connector:${n}`);
+  return (
+    <div className="card">
+      <div className="hd"><h2>Connectors</h2><span className="sub">chat apps reach these tools only through Karuna</span></div>
+      <form className="inline-form" onSubmit={(e) => { e.preventDefault(); ctx.change({ op: "AddRule", id: `conn-${name}`.slice(0, 31), outcome: "Allow", scope: `connector:${name}`, target: form.url.trim() }).then((done) => done && setForm({ name: "", url: "" })); }}>
+        <label className="field"><span>Name</span><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. github" /></label>
+        <label className="field grow"><span>Address (MCP, https)</span><input required className="mono" value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} placeholder="https://api.example.com/mcp" /></label>
+        <button className="btn btn-dark" type="submit" disabled={busy || !ok}><Icon name="plus" /> Propose connector</button>
+      </form>
+      {list.map((c) => (
+        <div className="resolved connector" key={c.name}>
+          <div className="res">
+            {c.error ? <Badge v="deny">unreachable</Badge> : <span className="intro-mark"><Icon name="plug" size={15} /></span>}
+            <span className="small"><b>{c.name}</b> <span className="mono muted">{c.url}</span>{c.error && <span className="muted"> · {c.error}</span>}{!c.hasKey && <span className="muted"> · no key (add one named {c.name} if it needs sign-in)</span>}</span>
+            {rule(c.name) ? <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => confirm(`Remove the ${c.name} connector? Chat apps lose its tools.`) && ctx.change({ op: "RemoveRule", id: rule(c.name)!.id })}>Remove</button> : <span />}
+          </div>
+          {c.tools.map((t) => (
+            <div className="res tool-row" key={t.key}>
+              {t.changed ? <Badge v="deny">changed</Badge> : <Badge v="allow">approved</Badge>}
+              <span className="small"><b className="mono">{t.name}</b> <span className="muted untrusted-text">{(t.changed?.description ?? t.description).slice(0, 220)}</span></span>
+              {t.changed
+                ? <button className="btn btn-ghost btn-sm" disabled={busy} title="Its description, inputs or hints changed since your team approved this connector" onClick={() => confirm(`Accept the new definition of ${t.name}?\n\nBefore: ${t.description}\n\nNow: ${t.changed!.description}`) && run(() => api(`/connectors/tools/${encodeURIComponent(t.key)}/accept`, {}), "Change accepted")}>Review change</button>
+                : <span />}
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 // ============================================================== trust levels (Dharma v3)
 
@@ -2155,7 +2516,8 @@ function LevelsCard({ ctx }: { ctx: Ctx }) {
   const limits = pol.levelLimits!;
   const grants = pol.levelGrants ?? [];
   const streak = pol.levelUpStreak ?? [0, 10, 25, 50];
-  const [edit, setEdit] = useState<{ level: number; per: string; daily: string } | null>(null);
+  const [edit, setEdit] = useState<{ level: number; per: string; daily: string; none: boolean } | null>(null);
+  const top = limits.length - 1;
   return (
     <div className="card">
       <div className="hd"><h2>Trust levels</h2><span className="sub">{pol.agents.length} agent{pol.agents.length === 1 ? "" : "s"}</span></div>
@@ -2167,15 +2529,25 @@ function LevelsCard({ ctx }: { ctx: Ctx }) {
             <div className="level-line" key={n}>
               <span className="level-name"><b>{levelText(n)}</b><small>{n === 0 ? "Every new agent" : `${streak[n]} clean actions, then a vote`}</small></span>
               {editing ? (
-                <form className="level-edit" onSubmit={(e) => { e.preventDefault(); ctx.change({ op: "SetLevelLimits", level: n, perPaymentUsd: Number(edit.per), dailyUsd: Number(edit.daily) }).then((ok) => ok && setEdit(null)); }}>
-                  <span className="prefix"><span>$</span><input aria-label="Per payment" type="number" min="0" step="0.01" value={edit.per} onChange={(e) => setEdit({ ...edit, per: e.target.value })} /></span>
-                  <span className="prefix"><span>$</span><input aria-label="Per day" type="number" min="0" step="0.01" value={edit.daily} onChange={(e) => setEdit({ ...edit, daily: e.target.value })} /></span>
-                  <button className="btn btn-ghost btn-sm" disabled={busy || Number(edit.per) > Number(edit.daily)}>Propose</button>
+                <form className="level-edit" onSubmit={(e) => {
+                  e.preventDefault();
+                  const [per, daily] = edit.none ? [NO_LIMIT_USD, NO_LIMIT_USD] : [Number(edit.per), Number(edit.daily)];
+                  ctx.change({ op: "SetLevelLimits", level: n, perPaymentUsd: per, dailyUsd: daily }).then((ok) => ok && setEdit(null));
+                }}>
+                  {!edit.none && <>
+                    <span className="prefix"><span>$</span><input aria-label="Per payment" type="number" min="0" step="0.01" value={edit.per} onChange={(e) => setEdit({ ...edit, per: e.target.value })} /></span>
+                    <span className="prefix"><span>$</span><input aria-label="Per day" type="number" min="0" step="0.01" value={edit.daily} onChange={(e) => setEdit({ ...edit, daily: e.target.value })} /></span>
+                  </>}
+                  {n === top && <label className="check"><input type="checkbox" checked={edit.none} onChange={(e) => setEdit({ ...edit, none: e.target.checked })} /> <span>No limit</span></label>}
+                  <button className="btn btn-ghost btn-sm" disabled={busy || (!edit.none && Number(edit.per) > Number(edit.daily))}>Propose</button>
                   <button type="button" className="btn btn-ghost btn-sm" onClick={() => setEdit(null)}>Cancel</button>
                 </form>
               ) : (
-                <button className="tag link tnum" title="Propose new payment limits for this level" onClick={() => setEdit({ level: n, per: String(l.perPaymentUsd), daily: String(l.dailyUsd) })}>
-                  {usd(l.perPaymentUsd)} per payment · {usd(l.dailyUsd)} per day <Icon name="pen" size={11} />
+                <button className="tag link tnum" title="Propose new payment limits for this level" onClick={() => {
+                  const none = isNoLimit(l.perPaymentUsd) && isNoLimit(l.dailyUsd);
+                  setEdit({ level: n, per: none ? "" : String(l.perPaymentUsd), daily: none ? "" : String(l.dailyUsd), none });
+                }}>
+                  {isNoLimit(l.perPaymentUsd) && isNoLimit(l.dailyUsd) ? "No payment limit" : `${usd(l.perPaymentUsd)} per payment · ${usd(l.dailyUsd)} per day`} <Icon name="pen" size={11} />
                 </button>
               )}
               <span className="level-adds small">{adds.length ? `Also: ${adds.map((w) => (/^[A-Z]{2}/.test(w) ? w : w.charAt(0).toLowerCase() + w.slice(1))).join(", ")}` : n === 0 ? "Payments within the limits only" : ""}</span>

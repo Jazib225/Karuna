@@ -7,6 +7,8 @@ import { Store } from "./store.ts";
 import { CircleCliWallet } from "./wallet.ts";
 import { Gatekeeper } from "./gatekeeper.ts";
 import { agentApi, consoleApi } from "./server.ts";
+import { publicApi } from "./chat.ts";
+import { Accounts } from "./accounts.ts";
 import { CircleChainWriter, publicClient } from "./chain.ts";
 import { SandboxCA } from "./ca.ts";
 import { SecretStore } from "./secrets.ts";
@@ -14,6 +16,7 @@ import { EgressProxy } from "./proxy.ts";
 import { remoteListener } from "./remote.ts";
 import { PIPE_PATH, pipeServer } from "./pipe.ts";
 import { hostname } from "node:os";
+import { spawn } from "node:child_process";
 
 const here = dirname(fileURLToPath(import.meta.url));
 loadEnv({ path: resolve(here, "../../.env"), quiet: true });
@@ -33,6 +36,7 @@ const gk = new Gatekeeper({
   client,
   writerFor: (address: Address) => new CircleChainWriter(address, client),
   timelockSeconds: Number(process.env.KARUNA_TIMELOCK_SECONDS ?? 60),
+  chatUrl: process.env.KARUNA_CHAT_URL || undefined,
   coreTimelockSeconds: Number(process.env.KARUNA_CORE_TIMELOCK_SECONDS ?? 86_400),
   anchorEvery: Number(process.env.KARUNA_ANCHOR_EVERY ?? 20),
   shieldTestsPerDay: Number(process.env.KARUNA_SHIELD_TESTS_PER_DAY ?? 2),
@@ -43,6 +47,30 @@ const gk = new Gatekeeper({
   // Agents run in Karuna sandboxes; an agent token used anywhere else is refused unless voted.
   requireSandbox: (process.env.KARUNA_REQUIRE_SANDBOX ?? "1") !== "0",
   requireIsolation: process.env.KARUNA_REQUIRE_ISOLATION === "gvisor" ? "gvisor" : "docker",
+  // Agents Karuna builds and runs: each run is a normal `karuna run` of the hosted runner, with a
+  // token issued for that run only. Docker must be running on this machine.
+  launcher: ({ agentId, token, runId, onOutput, onExit }) => {
+    const root = resolve(here, "../..");
+    const win = process.platform === "win32";
+    const args = ["tsx", resolve(root, "runner/src/cli.ts"), "run", "--agent", agentId, "--gatekeeper", `http://127.0.0.1:${agentPort}`, resolve(root, "agents"), "--", "npx", "tsx", "hosted/run.ts"];
+    const p = spawn(win ? "npx.cmd" : "npx", args, {
+      env: { ...process.env, KARUNA_AGENT_TOKEN: token, KARUNA_RUN_ID: runId },
+      shell: win, windowsHide: true, stdio: ["ignore", "ignore", "pipe"],
+    });
+    // The box's own output reaches the run through `karuna run`; here, only Karuna's own lines.
+    let buf = "";
+    p.stderr!.on("data", (b: Buffer) => {
+      const parts = (buf + b.toString("utf8")).split(/\r?\n/);
+      buf = parts.pop() ?? "";
+      for (const l of parts) if (/^karuna · /.test(l)) onOutput(`Karuna: ${l.slice("karuna · ".length)}`);
+    });
+    p.on("exit", (code) => onExit(code ?? 1));
+    p.on("error", (e) => {
+      onOutput(`Karuna: couldn't start the run (${e.message})`);
+      onExit(1);
+    });
+    return () => p.kill();
+  },
 });
 gk.holdMs = Number(process.env.KARUNA_HOLD_SECONDS ?? 120) * 1000;
 const ca = new SandboxCA(dataDir);
@@ -51,7 +79,7 @@ const consoleToken = store.loadOrCreateConsoleToken();
 
 const agentServer = agentApi(gk, { proxy: egress, caPem: ca.certPem, secrets });
 agentServer.listen(agentPort, agentHost, () => console.log(`gatekeeper · agent API    http://${agentHost}:${agentPort}`));
-consoleApi(gk, wallet, consoleToken, secrets, ca.certPem).listen(consolePort, "127.0.0.1", () =>
+consoleApi(gk, wallet, consoleToken, secrets, ca.certPem, new Accounts(store)).listen(consolePort, "127.0.0.1", () =>
   console.log(`gatekeeper · console API  http://127.0.0.1:${consolePort}  (data: ${dataDir})`),
 );
 console.log(`gatekeeper · sandbox      egress proxy per run on 127.0.0.1 · sandbox ${gk.requireSandbox ? "required" : "optional"} · ${secrets.list().length} key(s)`);
@@ -63,6 +91,14 @@ if (remotePort) {
   gk.remote = { port: remotePort, host: remoteHost, names };
   remoteListener({ gk, ca, names, proxy: egress, agentApi: agentServer }).listen(remotePort, remoteHost, () =>
     console.log(`gatekeeper · remote port  https://${remoteHost}:${remotePort} for karuna run on other machines (names: ${names.join(", ")})`),
+  );
+}
+// Chat apps (claude.ai, Claude Desktop, ChatGPT): Karuna's MCP endpoint and its sign-in, on their
+// own port. Bound to 127.0.0.1 and reached through a tunnel (cloudflared → this port).
+const publicPort = Number(process.env.KARUNA_PUBLIC_PORT ?? 8792);
+if (publicPort) {
+  publicApi(gk, store).listen(publicPort, "127.0.0.1", () =>
+    console.log(`gatekeeper · chat apps    http://127.0.0.1:${publicPort}/mcp (MCP + sign-in; expose it with a tunnel)`),
   );
 }
 // Local event pipe for the desktop app (island). Approvals over it still need a member signature.

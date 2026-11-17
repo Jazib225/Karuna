@@ -1,0 +1,17 @@
+{
+  "name": "karuna",
+  "displayName": "Karuna",
+  "version": "0.1.0",
+  "description": "Every tool call Claude makes is checked by your team's Karuna rules first: allowed, blocked, or held for a member's approval.",
+  "author": { "name": "Karuna" },
+  "license": "MIT",
+  "keywords": ["security", "permissions", "agents", "approvals"],
+  "userConfig": {
+    "gatekeeper_url": {
+      "type": "string",
+      "title": "Karuna address",
+      "description": "Your team's Karuna Gatekeeper (agent API). Leave the default when Karuna runs on this computer.",
+      "default": "http://127.0.0.1:8787"
+    }
+  }
+}

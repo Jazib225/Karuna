@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/karuna-hook.mjs\"",
+            "timeout": 600,
+            "onFailure": "block"
+          }
+        ]
+      }
+    ]
+  }
+}

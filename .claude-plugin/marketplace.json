@@ -1,0 +1,11 @@
+{
+  "name": "karuna",
+  "owner": { "name": "Karuna" },
+  "plugins": [
+    {
+      "name": "karuna",
+      "source": "./plugin",
+      "description": "Every tool call Claude makes is checked by your team's Karuna rules first: allowed, blocked, or held for a member's approval."
+    }
+  ]
+}
