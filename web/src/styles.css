@@ -325,6 +325,7 @@ a:hover .nudge, button:hover .nudge { translate: 3px 0; }
 
 /* ---------------------------------------------------------------- decision stream (site TerminalDemo rows) */
 .gk { font-family: var(--font-mono); font-size: 13px; }
+.gk .log-more { padding: 14px 20px; text-align: center; border-top: 1px solid var(--line); color: var(--n500); font-size: 12px; }
 .gk .item {
   display: grid; grid-template-columns: 28px 64px minmax(0, 1fr) auto minmax(0, 170px) 76px; gap: 14px; align-items: center;
   padding: 11px 20px; border-top: 1px solid var(--n100); transition: background-color .2s var(--ease);

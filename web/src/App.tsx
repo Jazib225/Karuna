@@ -1436,11 +1436,48 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
 
 // ============================================================== signed log
 
+const LOG_PAGE = 15;
+
 function Activity({ ctx, log }: { ctx: Ctx; log: LogEntry[] }) {
   const { s } = ctx;
   const [filter, setFilter] = useState<"all" | "decisions" | "events" | "on Arc">("all");
   const onArc = (e: LogEntry) => !!e.event && isTx((e.event as Record<string, unknown>).txRef);
-  const shown = useMemo(() => log.filter((e) => filter === "all" || (filter === "on Arc" ? onArc(e) : filter === "decisions" ? !!e.decision : !!e.event)), [log, filter]);
+  // The newest LOG_PAGE entries first; scrolling to the end adds LOG_PAGE more, fetching older
+  // entries from the Gatekeeper (`log` only holds the newest few hundred) until there are none left.
+  const [count, setCount] = useState(LOG_PAGE);
+  const [older, setOlder] = useState<LogEntry[]>([]);
+  const [noOlder, setNoOlder] = useState(PREVIEW);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  useEffect(() => setCount(LOG_PAGE), [filter]);
+  const merged = useMemo(() => {
+    const bySeq = new Map<number, LogEntry>();
+    for (const e of [...older, ...log]) bySeq.set(e.seq, e);
+    return [...bySeq.values()].sort((a, b) => b.seq - a.seq);
+  }, [log, older]);
+  const matching = useMemo(() => merged.filter((e) => filter === "all" || (filter === "on Arc" ? onArc(e) : filter === "decisions" ? !!e.decision : !!e.event)), [merged, filter]);
+  const oldestLoaded = merged.length ? merged[merged.length - 1].seq : 0;
+  const olderOnServer = !noOlder && oldestLoaded > 0;
+  const shown = matching.slice(0, count);
+  const hasMore = matching.length > count || olderOnServer;
+  // Not enough loaded to fill the next page (a filter can skip many entries): fetch the next older batch.
+  useEffect(() => {
+    if (matching.length >= count || !olderOnServer || loadingOlder) return;
+    setLoadingOlder(true);
+    api<LogEntry[]>(`/log?limit=100&before=${oldestLoaded}`)
+      .then((page) => (page.length ? setOlder((prev) => [...prev, ...page]) : setNoOlder(true)))
+      .catch(() => setNoOlder(true))
+      .finally(() => setLoadingOlder(false));
+  }, [matching.length, count, olderOnServer, oldestLoaded, loadingOlder]);
+  const sentinel = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = sentinel.current;
+    if (!el || !hasMore) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((x) => x.isIntersecting)) setCount((c) => (c < matching.length + LOG_PAGE ? c + LOG_PAGE : c));
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [hasMore, matching.length]);
   const who = (id: unknown) => {
     const v = String(id ?? "");
     return v.startsWith("0x") ? ctx.name(v) : s.policy!.agents.find((a) => a.id === v)?.name ?? v;
@@ -1486,6 +1523,9 @@ function Activity({ ctx, log }: { ctx: Ctx; log: LogEntry[] }) {
               </div>
             );
           })}
+          <div ref={sentinel} className="log-more muted small" aria-live="polite">
+            {hasMore ? (loadingOlder ? "Loading more…" : "Scroll for more") :`That's everything${filter === "all" ? "" : ` under “${filter}”`} · ${shown.length} shown`}
+          </div>
         </div>
       )}
       <div className="log-foot">

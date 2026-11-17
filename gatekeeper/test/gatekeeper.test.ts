@@ -335,6 +335,20 @@ describe("panic button", () => {
   }, 30_000);
 });
 
+describe("the decision log pages back through every entry", () => {
+  it("newest first, then the entries older than a given seq, until none are left", async () => {
+    await activateAgent(1);
+    const total = gk.log.length;
+    expect(total).toBeGreaterThan(3);
+    const first = gk.logTail(2);
+    expect(first.map((e) => e.seq)).toEqual([total - 1, total - 2]);
+    const seen = [...first];
+    for (let page = gk.logTail(2, first.at(-1)!.seq); page.length; page = gk.logTail(2, seen.at(-1)!.seq)) seen.push(...page);
+    expect(seen.map((e) => e.seq)).toEqual([...Array(total).keys()].reverse()); // all of them, once, newest first
+    expect(gk.logTail(5, 0)).toEqual([]);
+  }, 30_000);
+});
+
 describe("nothing is erasable", () => {
   it("the log head is anchored on Dharma and can't be rewound", async () => {
     await activateAgent(1);

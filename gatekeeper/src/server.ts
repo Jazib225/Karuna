@@ -193,7 +193,8 @@ export function consoleApi(
       if (method === "GET" && path === "/policy") return send(res, 200, defaultRules.map((r) => ({ id: r.id, description: r.description, outcome: r.outcome })));
       if (method === "GET" && path === "/log") {
         const limit = Math.min(1000, Number(url.searchParams.get("limit") ?? 200) || 200);
-        return send(res, 200, gk.logTail(limit));
+        const before = url.searchParams.has("before") ? Number(url.searchParams.get("before")) : undefined;
+        return send(res, 200, gk.logTail(limit, before !== undefined && Number.isInteger(before) && before >= 0 ? before : undefined));
       }
       if (method === "GET" && path === "/wallet") {
         const addr = gk.org.wallet?.address;
