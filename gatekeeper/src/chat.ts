@@ -19,7 +19,12 @@ const CODE_TTL_MS = 10 * 60_000;
 const AUTH_TTL_MS = 30 * 60_000;
 
 interface OAuthClient { client_id: string; client_name: string; redirect_uris: string[]; created_at: number }
-interface PendingAuth { id: string; deviceId: string; secret: string; clientId: string; redirectUri: string; challenge: string; state?: string; createdAt: number; done?: { redirect: string } }
+interface PendingAuth {
+  id: string; deviceId: string; secret: string; clientId: string; redirectUri: string; challenge: string; state?: string; createdAt: number;
+  /** Approved: the connection's token, held until its agent's votes have passed. */
+  approved?: { token: string; agentId: string };
+  done?: { redirect: string };
+}
 interface AuthCode { code: string; token: string; clientId: string; redirectUri: string; challenge: string; createdAt: number }
 
 const b64url = (b: Buffer) => b.toString("base64url");
@@ -221,6 +226,7 @@ export function publicApi(gk: Gatekeeper, store: Store): HttpServer {
                 const j = await r.json();
                 if (j.redirect) { location.href = j.redirect; return; }
                 if (j.status === "denied" || j.status === "expired") { document.getElementById("st").textContent = "This connection was " + j.status + "."; return; }
+                if (j.status === "voting") document.getElementById("st").textContent = "Approved. Waiting for your team's vote to finish (about a minute)…";
               } catch (e) {}
               setTimeout(tick, 2000);
             }
@@ -231,22 +237,26 @@ export function publicApi(gk: Gatekeeper, store: Store): HttpServer {
         const p = pending.get(url.searchParams.get("req") ?? "");
         if (!p) return send(res, 404, { status: "expired" });
         if (p.done) return send(res, 200, { status: "approved", redirect: p.done.redirect });
-        const r = gk.pollDevice({ deviceId: p.deviceId, secret: p.secret }) as { status: string; token?: string };
         const back = new URL(p.redirectUri);
         if (p.state) back.searchParams.set("state", p.state);
-        if (r.status === "approved" && r.token) {
-          const code = b64url(randomBytes(24));
-          codes.set(code, { code, token: r.token, clientId: p.clientId, redirectUri: p.redirectUri, challenge: p.challenge, createdAt: Date.now() });
-          back.searchParams.set("code", code);
-          p.done = { redirect: back.toString() };
-          return send(res, 200, { status: "approved", redirect: p.done.redirect });
+        if (!p.approved) {
+          const r = gk.pollDevice({ deviceId: p.deviceId, secret: p.secret }) as { status: string; token?: string; agentId?: string };
+          if (r.status === "approved" && r.token && r.agentId) p.approved = { token: r.token, agentId: r.agentId };
+          else if (r.status === "denied" || r.status === "expired") {
+            back.searchParams.set("error", "access_denied");
+            pending.delete(p.id);
+            return send(res, 200, { status: r.status, redirect: back.toString() });
+          } else return send(res, 200, { status: "pending" });
         }
-        if (r.status === "denied" || r.status === "expired") {
-          back.searchParams.set("error", "access_denied");
-          pending.delete(p.id);
-          return send(res, 200, { status: r.status, redirect: back.toString() });
-        }
-        return send(res, 200, { status: "pending" });
+        // Approving starts the votes for the connection's agent. Hand the chat app its token only
+        // once they've passed: if it calls /mcp before, Karuna has to refuse it, and the chat app
+        // gives up on the connection.
+        if (!gk.agentReady(p.approved.agentId)) return send(res, 200, { status: "voting" });
+        const code = b64url(randomBytes(24));
+        codes.set(code, { code, token: p.approved.token, clientId: p.clientId, redirectUri: p.redirectUri, challenge: p.challenge, createdAt: Date.now() });
+        back.searchParams.set("code", code);
+        p.done = { redirect: back.toString() };
+        return send(res, 200, { status: "approved", redirect: p.done.redirect });
       }
 
       // ---- token (authorization code + PKCE)

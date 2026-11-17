@@ -146,6 +146,9 @@ async function connectChat(): Promise<{ token: string; agentId: string }> {
     { op: "SetAgent", id: agentId, capUsd: 0 },
     { op: "AddRule", id: `unsandboxed-${agentId}`.slice(0, 31), outcome: "Allow", scope: "unsandboxed", target: agentId },
   ] as Change[]) await gk.submitAction(await sign(Kind.Propose, c));
+  // Approved, but its agent isn't active yet: the chat app must not get a token it can't use
+  // (it would call /mcp, be refused, and give up on the connection).
+  expect(await (await fetch(`${base}/authorize/status?req=${req}`)).json()).toEqual({ status: "voting" });
   await passTimelock();
 
   const st = await (await fetch(`${base}/authorize/status?req=${req}`)).json() as { status: string; redirect: string };

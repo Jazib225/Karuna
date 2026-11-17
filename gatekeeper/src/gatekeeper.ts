@@ -1121,6 +1121,12 @@ export class Gatekeeper extends EventEmitter {
     return this.capabilityRules("unsandboxed").some((r) => r.target === agentId);
   }
 
+  /** A connected computer or chat's agent can be used: active on Dharma and, where sandboxes are
+   *  required, voted to run outside one. Until then its calls are refused. */
+  agentReady(agentId: string) {
+    return !!this.policy?.agents.some((a) => a.id === agentId) && (!this.requireSandbox || this.isUnsandboxed(agentId));
+  }
+
   /** Voted onchain: this agent may mount `hostPath` writable. Read-only mounts need no rule. */
   mayMountWritable(agentId: string, hostPath: string) {
     const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
