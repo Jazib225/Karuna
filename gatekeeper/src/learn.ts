@@ -186,3 +186,10 @@ export function previewLoosening(
 
 /** Only loosenings get a preview (tightenings apply at once and can only allow less). */
 export const LOOSENING_OPS = new Set(["AddRule", "RemoveRule", "SetPayee", "SetAgent", "AddDomain", "SetThreshold", "Unfreeze", "SetLevel", "SetLevelLimits"]);
+
+/** Whether a change can let anything new through. A rule that only blocks never can, so it gets no
+ *  "Preview before loosening" (an approval rule can: it may turn a default block into a card). */
+export function isLoosening(change: Change): boolean {
+  if (!LOOSENING_OPS.has(change.op)) return false;
+  return !(change.op === "AddRule" && change.outcome === "Deny");
+}

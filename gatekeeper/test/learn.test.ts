@@ -11,7 +11,7 @@ import { Kind, actionTypedData, encodeChange, paymentDecisionTypedData, type Cha
 import { Store } from "../src/store.ts";
 import { Gatekeeper, type SignedAction } from "../src/gatekeeper.ts";
 import { ViemChainWriter } from "../src/chain.ts";
-import { applyChange, band, learnedDenyId } from "../src/learn.ts";
+import { applyChange, band, isLoosening, learnedDenyId } from "../src/learn.ts";
 import type { WalletBackend, X402Quote } from "../src/wallet.ts";
 
 const PORT = 21545 + Math.floor(Math.random() * 1000);
@@ -167,5 +167,11 @@ describe("Preview Before Loosening", () => {
     expect(applyChange(before, { op: "SetAgent", id: "a", capUsd: 5 }).agents).toEqual([{ id: "a", capUsd: 5 }]);
     expect(band(0.5)).toBe(1);
     expect(band(499)).toBe(500);
+    // A block can only allow less; an approval or allow rule can let something new through.
+    expect(isLoosening({ op: "AddRule", id: "r1", outcome: "Deny", scope: "shell", target: "git push" })).toBe(false);
+    expect(isLoosening({ op: "AddRule", id: "r2", outcome: "Approval", scope: "http", target: "example.com" })).toBe(true);
+    expect(isLoosening({ op: "AddRule", id: "r3", outcome: "Allow", scope: "http", target: "example.com" })).toBe(true);
+    expect(isLoosening({ op: "SetPayee", account: zeroAddress, category: "supplies" })).toBe(true);
+    expect(isLoosening({ op: "Freeze" })).toBe(false);
   });
 });

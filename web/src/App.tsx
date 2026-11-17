@@ -544,7 +544,13 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
     setAlerts((prev) => [...events.map((e) => toAlert(e, sRef.current, name)).filter((a): a is Omit<Alert, "at"> => !!a).map((a) => ({ ...a, at: now })), ...prev].slice(0, 6));
   });
   useEffect(() => {
-    const t = setInterval(() => setAlerts((prev) => prev.filter((a) => a.sticky || Date.now() - a.at < 8000)), 1000);
+    // A "vote on this" alert stays only while there's still a vote for this member to cast.
+    const nothingToVote = (a: Alert) => {
+      if (a.proposalId === undefined) return false;
+      const g = sRef.current.policy?.proposals.find((x) => x.id === a.proposalId);
+      return !!g && (g.status !== "open" || g.voters.includes(me.address.toLowerCase()));
+    };
+    const t = setInterval(() => setAlerts((prev) => prev.filter((a) => (a.sticky && !nothingToVote(a)) || Date.now() - a.at < 8000)), 1000);
     return () => clearInterval(t);
   }, []);
   const dismiss = (id: string) => setAlerts((prev) => prev.filter((a) => a.id !== id));
@@ -1549,6 +1555,8 @@ interface Alert {
   cta?: string;
   source: ChainEvent["source"];
   at: number;
+  /** For a "New Dharma proposal" alert: it clears once nothing is left for this member to vote on. */
+  proposalId?: number;
 }
 
 function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string): Omit<Alert, "at"> | null {
@@ -1584,7 +1592,7 @@ function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string
           what = "a policy change";
         }
       }
-      return { ...base, tone: "info", sticky: true, go: "dharma", cta: "Vote", title: `New Dharma proposal #${a.id}`, body: `${name(String(a.proposer))}: ${what}` };
+      return { ...base, tone: "info", sticky: true, go: "dharma", cta: "Vote", title: `New Dharma proposal #${a.id}`, body: `${name(String(a.proposer))}: ${what}`, proposalId: Number(a.id) };
     }
     case "VoteCast":
       return { ...base, tone: "info", sticky: false, title: `Vote on #${a.id}`, body: `${name(String(a.voter))} voted ${a.support ? "yes" : "no"} (${a.yes} yes · ${a.no} no)` };

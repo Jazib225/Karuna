@@ -29,7 +29,7 @@ import {
   TEMPLATES, assertShieldSafe, autoRule, isAutoRule, makeTest, tracesTo,
   type InboxMessage, type ShieldTest, type TestTemplate,
 } from "./shield.ts";
-import { band, bandLabel, learnedDenyRule, previewLoosening, suggestions, LOOSENING_OPS, type PastRequest, type Precedent, type Preview } from "./learn.ts";
+import { band, bandLabel, learnedDenyRule, previewLoosening, suggestions, isLoosening, type PastRequest, type Precedent, type Preview } from "./learn.ts";
 import { PivotTracker, findCredential, findTrap, mintTraps, targetOf, trapEnvFile, trapLeakMessage, type TrapSet } from "./swarm.ts";
 import { SecretStore } from "./secrets.ts";
 import { DRAFT_KEYS, NoDrafterError, draftRules, freshIds, type DraftResult } from "./draft.ts";
@@ -2452,7 +2452,7 @@ export class Gatekeeper extends EventEmitter {
   previewFor(govId: number): Preview | null {
     const pol = this.policy;
     const g = pol?.proposals.find((x) => x.id === govId);
-    if (!pol || !g?.change || !LOOSENING_OPS.has(g.change.op)) return null;
+    if (!pol || !g?.change || !isLoosening(g.change)) return null;
     const key = `${govId}:${pol.policyVersion}:${this.state.proposals.length}`;
     const hit = this.previewCache.get(key);
     if (hit) return hit;
