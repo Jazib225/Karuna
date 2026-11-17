@@ -708,7 +708,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
             <div className="freeze-banner" role="alert">
               <Icon name="stop" size={20} />
               <div>
-                <b>Every agent is frozen.</b> {frozen.by ? `${frozen.by} hit the panic button.` : "The panic button was pressed."} Every request is denied and no payment can execute.
+                <b>Every agent is frozen.</b> {freezeCause(frozen.by)} Every request is denied and no payment can execute.
                 {frozen.confirmed ? " Recorded on Dharma." : " Recording on Dharma…"} Unfreezing needs {pol.required} vote{pol.required > 1 ? "s" : ""} and a {pol.timelock}s wait.
               </div>
             </div>
@@ -1548,6 +1548,20 @@ function Team({ ctx }: { ctx: Ctx }) {
 
 // ============================================================== live alerts
 
+/** Where the wallet watchdog's latest transfer was seen: the QuickNode Stream, or Arc read directly when it's quiet. */
+function watchdogSource(source?: string | null): string {
+  if (source === "rpc") return "reading Arc directly (QuickNode quiet)";
+  if (source === "quicknode") return "QuickNode Stream";
+  return "QuickNode Stream · Arc as backup";
+}
+
+/** Why every agent is frozen, in a sentence: a member's panic button, or one of Karuna's own safety nets. */
+function freezeCause(by?: string | null): string {
+  if (by === "Watchdog") return "The wallet watchdog froze every agent: USDC left the wallet without a matching Karuna payment.";
+  if (by === "Tripwire" || by === "Swarm Stopper") return "Tripwire froze every agent: an agent used or shared a trap credential, or agents converged on a new target.";
+  return by ? `${by} hit the panic button.` : "The panic button was pressed.";
+}
+
 interface Alert {
   id: string;
   title: string;
@@ -1578,6 +1592,8 @@ function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string
         body: `${agentName(a.agent)} wants to pay $${Number(a.amountUsd).toFixed(2)}${who ? ` to ${who}` : ""}` };
     }
     case "AgentFrozen":
+      if (s.frozen && s.frozen.by === "Watchdog")
+        return { ...base, tone: "bad", sticky: true, whileFrozen: true, go: "swarm", cta: "Watchdog", title: "Wallet watchdog froze every agent", body: "USDC left the wallet without a matching Karuna payment. Recorded on Dharma; unfreezing needs a member vote." };
       if (s.frozen && (s.frozen.by === "Tripwire" || s.frozen.by === "Swarm Stopper"))
         return { ...base, tone: "bad", sticky: true, whileFrozen: true, go: "swarm", cta: "Tripwire", title: "Tripwire freeze recorded on Dharma", body: "Tripwire froze every agent. Unfreezing needs a member vote." };
       return { ...base, tone: "bad", sticky: true, whileFrozen: true, title: "All agents frozen", body: `${name(String(a.by))} hit the panic button. Recorded on Dharma.` };
@@ -2600,7 +2616,7 @@ function WatchdogCard({ ctx }: { ctx: Ctx }) {
   };
   return (
     <div className="card">
-      <div className="hd"><h2>Wallet watchdog</h2><span className="sub">QuickNode Stream</span></div>
+      <div className="hd"><h2>Wallet watchdog</h2><span className="sub">{watchdogSource(w.events[0]?.source)}</span></div>
       <div className="pad stack-sm">
         <p className="muted">Every USDC transfer out of {w.wallet ? <span className="mono">{short(w.wallet)}</span> : "the wallet"} must match a payment Karuna made. Anything else freezes every agent and is recorded on Dharma.</p>
       </div>
