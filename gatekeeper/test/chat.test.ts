@@ -193,6 +193,26 @@ beforeEach(async () => {
 }, 60_000);
 afterAll(() => api?.close());
 
+describe("connectors on their own", () => {
+  it("a voted connector's tools are recorded and shown right after the vote, before any chat app asks", async () => {
+    // beforeEach voted in "mail"; the running Gatekeeper reads it without a chat app connected.
+    expect(gk.snapshot().connectors.find((c) => c.name === "mail")?.tools).toEqual([]);
+    await gk.start(50);
+    let tools: { name: string; changed: unknown }[] = [];
+    try {
+      for (let i = 0; i < 50 && tools.length < mailTools.length; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        tools = gk.snapshot().connectors.find((c) => c.name === "mail")?.tools ?? [];
+      }
+    } finally {
+      gk.stop();
+    }
+    expect(tools.map((t) => t.name).sort()).toEqual(mailTools.map((t) => t.name).sort());
+    expect(tools.every((t) => t.changed === null)).toBe(true);
+    expect(gk.snapshot().devices).toEqual([]); // no chat app was involved
+  });
+});
+
 describe("signing a chat app in", () => {
   it("advertises OAuth discovery, and /mcp asks for a token", async () => {
     const meta = await (await fetch(`${base}/.well-known/oauth-authorization-server`)).json() as Record<string, unknown>;
