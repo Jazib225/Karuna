@@ -9,6 +9,7 @@ import { Palette, type Command } from "./palette.tsx";
 import { keccak256, stringToHex } from "viem";
 import { PREVIEW, previewLog, previewRun, previewSigner, previewSnapshot, previewWallet } from "./preview.ts";
 import { Badge, Icon, type IconName } from "./icons.tsx";
+import { askConfirm } from "./confirm.tsx";
 import { IN_APP, getIslandEnabled, setDesktopSigner, setIslandEnabled } from "./desktop.ts";
 import { setThemePref, useThemePref, type ThemePref } from "./theme.ts";
 import { eventName, NAMED_KEYS } from "./eventNames.ts";
@@ -601,7 +602,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
     { id: "sidebar", label: sideHidden ? "Pin the sidebar" : "Hide the sidebar", hint: "View", icon: sideHidden ? "pin" : "panel", keywords: "menu nav", run: toggleSide },
     ...(frozen
       ? [{ id: "unfreeze", label: "Unfreeze agents (goes to a vote)", hint: "Safety", icon: "stop" as IconName, run: () => (openUnfreeze ? setView("votes") : void ctx.change({ op: "Unfreeze" })) }]
-      : [{ id: "freeze", label: "Freeze all agents", hint: "Safety", icon: "stop" as IconName, keywords: "panic stop", run: () => confirm("Freeze every agent now? Unfreezing needs a vote.") && void ctx.change({ op: "Freeze" }) }]),
+      : [{ id: "freeze", label: "Freeze all agents", hint: "Safety", icon: "stop" as IconName, keywords: "panic stop", run: () => void askConfirm("Freeze every agent now? Unfreezing needs a vote.", { action: "Freeze all agents", danger: true, icon: "stop" }).then((ok) => ok && ctx.change({ op: "Freeze" })) }]),
   ];
 
 
@@ -994,8 +995,8 @@ function Waits({ ctx }: { ctx: Ctx }) {
         </select>
         <button className="btn btn-ghost btn-sm" disabled={ctx.busy || !ok}
           title={sec < min || sec > max ? `Between ${waitText(min) === "no wait" ? "0" : waitText(min)} and ${waitText(max)}` : undefined}
-          onClick={() => {
-            if (op === "SetTimelock" && sec === 0 && !confirm("No wait means a passed change applies at once, so stolen keys could loosen rules immediately. Propose it anyway?")) return;
+          onClick={async () => {
+            if (op === "SetTimelock" && sec === 0 && !(await askConfirm("No wait means a passed change applies at once, so stolen keys could loosen rules immediately. Propose it anyway?", { action: "Propose anyway", danger: true }))) return;
             ctx.change({ op, seconds: sec } as Change);
           }}>Propose</button>
       </div>
@@ -1122,7 +1123,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
                 <div className="agent-actions">
                   <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => run(async () => { const r = await api<{ token: string }>(`/agents/${a.id}/rotate-token`, {}); setReveal({ token: r.token, agent: a.name, agentId: a.id }); })}>{a.hasToken ? "Rotate token" : "Issue token"}</button>
                   {(s.runs ?? []).some((r) => r.agentId === a.id) && <button className="btn btn-ghost btn-sm" onClick={() => setRunsFor(a.id)}>Runs</button>}
-                  {a.active && <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => confirm(`Propose removing ${a.name} from Dharma? It goes to a team vote.`) && ctx.change({ op: "RemoveAgent", id: a.id })}>Propose removal</button>}
+                  {a.active && <button className="btn btn-deny btn-sm" disabled={busy} onClick={async () => (await askConfirm(`Propose removing ${a.name} from Dharma? It goes to a team vote.`, { action: "Propose removal", danger: true })) && ctx.change({ op: "RemoveAgent", id: a.id })}>Propose removal</button>}
                 </div>
               </div>
             );
@@ -1299,7 +1300,7 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
                 )}
                 {r.core && r.active && (
                   <button className="btn btn-ghost btn-sm" disabled={busy}
-                    onClick={() => confirm(`${r.id} is a core rule. Removing it needs every member's vote and a ${waitText(pol.coreTimelock)} wait, and any freeze cancels it. Propose anyway?`) && ctx.change({ op: "RemoveRule", id: r.id })}>
+                    onClick={async () => (await askConfirm(`${r.id} is a core rule. Removing it needs every member's vote and a ${waitText(pol.coreTimelock)} wait, and any freeze cancels it. Propose anyway?`, { action: "Propose anyway", danger: true, icon: "lock" })) && ctx.change({ op: "RemoveRule", id: r.id })}>
                     propose removal
                   </button>
                 )}
@@ -2078,7 +2079,7 @@ function Keys({ ctx }: { ctx: Ctx }) {
                     <input className="select-sm mono bind-input" aria-label={`Bind ${k.name} to a host`} placeholder="api.example.com" value={bind[k.name] ?? ""} onChange={(e) => setBind({ ...bind, [k.name]: e.target.value })} />
                     <button className="btn btn-ghost btn-sm" disabled={busy || !bind[k.name]} onClick={() => ctx.change({ op: "AddRule", id: ruleId(`k-${k.name}`), outcome: "Allow", scope: `key:${k.name}`, target: bind[k.name].trim().toLowerCase() })}>Propose binding</button>
                   </>}
-                  <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => confirm(`Delete key ${k.name}? Boxes using it start failing at once.`) && run(() => api(`/keys/${k.name}`, undefined, "DELETE"), "Key deleted")}>Delete</button>
+                  <button className="btn btn-deny btn-sm" disabled={busy} onClick={async () => (await askConfirm(`Delete key ${k.name}? Boxes using it start failing at once.`, { action: "Delete key", danger: true, icon: "key" })) && run(() => api(`/keys/${k.name}`, undefined, "DELETE"), "Key deleted")}>Delete</button>
                 </span>
               </div>
             ))}
@@ -2242,7 +2243,7 @@ function Computers({ ctx }: { ctx: Ctx }) {
             <div className="res" key={d.id}>
               <Badge v={seen !== null && seen < 10 * 60_000 ? "allow" : "approval"}>{seen !== null && seen < 10 * 60_000 ? "active" : "connected"}</Badge>
               <span className="small"><b>{d.agentName ?? d.name}</b> · {toolName(d.tool)} · {d.lastSeenAt ? `last call ${ago(d.lastSeenAt)}` : "no calls yet"}</span>
-              <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => confirm(`Disconnect ${d.name}? Its tool calls stop working at once.`) && run(() => api(`/devices/${d.id}/revoke`, {}), "Disconnected")}>Disconnect</button>
+              <button className="btn btn-ghost btn-sm" disabled={busy} onClick={async () => (await askConfirm(`Disconnect ${d.name}? Its tool calls stop working at once.`, { action: "Disconnect", danger: true })) && run(() => api(`/devices/${d.id}/revoke`, {}), "Disconnected")}>Disconnect</button>
             </div>
           );
         })}
@@ -2361,7 +2362,7 @@ function BuiltControls({ a, ctx, openRuns }: { a: AgentView; ctx: Ctx; openRuns:
           <div className="row-form">
             <button className="btn btn-ghost btn-sm" onClick={() => setEditing(null)}>Cancel</button>
             <button className="btn btn-dark btn-sm" disabled={busy || !editing.trim() || editing === b.instructions}
-              onClick={() => confirm(`Change ${a.name}'s instructions?\n\nNow:\n${b.instructions}\n\nNew:\n${editing}`) && run(() => api(`/agents/${a.id}/built`, { instructions: editing }, "PATCH"), "Instructions changed").then((ok) => ok && setEditing(null))}>Save</button>
+              onClick={async () => (await askConfirm(`Change ${a.name}'s instructions?\n\nNow:\n${b.instructions}\n\nNew:\n${editing}`, { action: "Change instructions", icon: "pen" })) && run(() => api(`/agents/${a.id}/built`, { instructions: editing }, "PATCH"), "Instructions changed").then((ok) => ok && setEditing(null))}>Save</button>
           </div>
         </div>
       ) : (
@@ -2440,7 +2441,7 @@ function RunTimeline({ ctx, id }: { ctx: Ctx; id: string }) {
         <span className="small muted">{r.models.length ? `Model: ${r.models.join(", ")}` : ""}</span>
         <span className="run-head-actions">
           {session?.viewer && !session.remote && live && <a className="btn btn-ghost btn-sm" href={session.viewer} target="_blank" rel="noreferrer">Watch screen <Icon name="external" size={12} /></a>}
-          {live && <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => confirm("Stop this run now?") && run(() => api(`/runs/${r.id}/stop`, {}), "Stopping")}>Stop</button>}
+          {live && <button className="btn btn-deny btn-sm" disabled={busy} onClick={async () => (await askConfirm("Stop this run now?", { action: "Stop run", danger: true, icon: "stop" })) && run(() => api(`/runs/${r.id}/stop`, {}), "Stopping")}>Stop</button>}
         </span>
       </div>
       {!r.reasoningVisible && <p className="notice small">This agent's reasoning isn't visible; only its actions are.</p>}
@@ -2508,14 +2509,14 @@ function Connectors({ ctx }: { ctx: Ctx }) {
           <div className="res">
             {c.error ? <Badge v="deny">unreachable</Badge> : <span className="intro-mark"><Icon name="plug" size={15} /></span>}
             <span className="small"><b>{c.name}</b> <span className="mono muted">{c.url}</span>{c.error && <span className="muted"> · {c.error}</span>}{!c.hasKey && <span className="muted"> · no key (add one named {c.name} if it needs sign-in)</span>}</span>
-            {rule(c.name) ? <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => confirm(`Remove the ${c.name} connector? Chat apps lose its tools.`) && ctx.change({ op: "RemoveRule", id: rule(c.name)!.id })}>Remove</button> : <span />}
+            {rule(c.name) ? <button className="btn btn-ghost btn-sm" disabled={busy} onClick={async () => (await askConfirm(`Remove the ${c.name} connector? Chat apps lose its tools.`, { action: "Remove connector", danger: true, icon: "plug" })) && ctx.change({ op: "RemoveRule", id: rule(c.name)!.id })}>Remove</button> : <span />}
           </div>
           {c.tools.map((t) => (
             <div className="res tool-row" key={t.key}>
               {t.changed ? <Badge v="deny">changed</Badge> : <Badge v="allow">approved</Badge>}
               <span className="small"><b className="mono">{t.name}</b> <span className="muted untrusted-text">{(t.changed?.description ?? t.description).slice(0, 220)}</span></span>
               {t.changed
-                ? <button className="btn btn-ghost btn-sm" disabled={busy} title="Its description, inputs or hints changed since your team approved this connector" onClick={() => confirm(`Accept the new definition of ${t.name}?\n\nBefore: ${t.description}\n\nNow: ${t.changed!.description}`) && run(() => api(`/connectors/tools/${encodeURIComponent(t.key)}/accept`, {}), "Change accepted")}>Review change</button>
+                ? <button className="btn btn-ghost btn-sm" disabled={busy} title="Its description, inputs or hints changed since your team approved this connector" onClick={async () => (await askConfirm(`Accept the new definition of ${t.name}?\n\nBefore: ${t.description}\n\nNow: ${t.changed!.description}`, { action: "Accept change", icon: "plug" })) && run(() => api(`/connectors/tools/${encodeURIComponent(t.key)}/accept`, {}), "Change accepted")}>Review change</button>
                 : <span />}
             </div>
           ))}
@@ -2539,8 +2540,8 @@ function AgentLevel({ a, ctx }: { a: AgentView; ctx: Ctx }) {
   const rec = a.record;
   const e = a.eligibility;
   const pending = s.policy!.proposals.some((g) => (g.status === "open" || g.status === "queued") && g.change.op === "SetLevel" && g.change.agent === a.id);
-  const lower = () =>
-    confirm(`Lower ${a.name} to ${levelText(level - 1)} now? This applies immediately. Raising it again needs a clean record and a vote.`) &&
+  const lower = async () =>
+    (await askConfirm(`Lower ${a.name} to ${levelText(level - 1)} now? This applies immediately. Raising it again needs a clean record and a vote.`, { action: `Lower to Level ${level - 1}`, danger: true })) &&
     ctx.change({ op: "SetLevel", agent: a.id, level: level - 1, reason: "member" });
   return (
     <div className="agent-level">
