@@ -550,7 +550,9 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
       const g = sRef.current.policy?.proposals.find((x) => x.id === a.proposalId);
       return !!g && (g.status !== "open" || g.voters.includes(me.address.toLowerCase()));
     };
-    const t = setInterval(() => setAlerts((prev) => prev.filter((a) => (a.sticky && !nothingToVote(a)) || Date.now() - a.at < 8000)), 1000);
+    // A freeze alert ("Unfreezing needs a member vote") stays only while agents are still frozen.
+    const thawed = (a: Alert) => !!a.whileFrozen && !sRef.current.frozen;
+    const t = setInterval(() => setAlerts((prev) => prev.filter((a) => (a.sticky && !nothingToVote(a) && !thawed(a)) || Date.now() - a.at < 8000)), 1000);
     return () => clearInterval(t);
   }, []);
   const dismiss = (id: string) => setAlerts((prev) => prev.filter((a) => a.id !== id));
@@ -572,6 +574,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
             id: a.id, title: a.title, body: a.body, source: "rpc", at: Date.now(), sticky: bad,
             tone: bad ? "bad" : a.kind === "shield-passed" ? "ok" : "warn",
             go: swarm ? "swarm" : "shield", cta: swarm ? "Tripwire" : "Drills",
+            whileFrozen: a.kind === "swarm-stopped",
           };
         }),
         ...prev,
@@ -1557,6 +1560,8 @@ interface Alert {
   at: number;
   /** For a "New Dharma proposal" alert: it clears once nothing is left for this member to vote on. */
   proposalId?: number;
+  /** For a freeze alert: it clears once agents are unfrozen. */
+  whileFrozen?: boolean;
 }
 
 function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string): Omit<Alert, "at"> | null {
@@ -1574,8 +1579,8 @@ function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string
     }
     case "AgentFrozen":
       if (s.frozen && (s.frozen.by === "Tripwire" || s.frozen.by === "Swarm Stopper"))
-        return { ...base, tone: "bad", sticky: true, go: "swarm", cta: "Tripwire", title: "Tripwire freeze recorded on Dharma", body: "Tripwire froze every agent. Unfreezing needs a member vote." };
-      return { ...base, tone: "bad", sticky: true, title: "All agents frozen", body: `${name(String(a.by))} hit the panic button. Recorded on Dharma.` };
+        return { ...base, tone: "bad", sticky: true, whileFrozen: true, go: "swarm", cta: "Tripwire", title: "Tripwire freeze recorded on Dharma", body: "Tripwire froze every agent. Unfreezing needs a member vote." };
+      return { ...base, tone: "bad", sticky: true, whileFrozen: true, title: "All agents frozen", body: `${name(String(a.by))} hit the panic button. Recorded on Dharma.` };
     case "AgentsUnfrozen":
       return { ...base, tone: "ok", sticky: false, title: "Agents unfrozen", body: "The vote passed and the timelock ended." };
     case "ProposalCreated": {
