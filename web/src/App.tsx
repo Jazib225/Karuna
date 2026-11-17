@@ -77,9 +77,32 @@ function Loading({ text }: { text: string }) {
 
 const usd = (n: number) => (isNoLimit(n) ? "no limit" : `$${n > 0 && n < 0.01 ? n.toFixed(4).replace(/0+$/, "") : n.toFixed(2)}`);
 const short = (s?: string | null) => (s ? `${s.slice(0, 6)}…${s.slice(-4)}` : "—");
+/**
+ * How far this computer's clock is ahead of Arc (ms), from the latest block the Gatekeeper read.
+ * Chain times (a proposal's creation, its wait's end) are compared against Arc's clock, not this
+ * computer's: a wrong system clock would otherwise show "5h ago" for a new proposal and a countdown
+ * that already says "executing…". Differences under a minute are just the block being a few seconds old.
+ */
+let chainSkewMs = 0;
+function setChainTime(chainTimeSec?: number | null) {
+  if (!chainTimeSec) return;
+  const skew = Date.now() - chainTimeSec * 1000;
+  chainSkewMs = Math.abs(skew) > 60_000 ? skew : 0;
+}
+/** Now, on Arc's clock (ms). */
+const chainNow = () => Date.now() - chainSkewMs;
+/** "5 hours", "12 minutes": how far the clock is off. */
+const fmtSkew = (min: number) => {
+  const m = Math.abs(min);
+  if (m < 90) return `${m} minute${m === 1 ? "" : "s"}`;
+  const h = Math.round(m / 60);
+  return h < 48 ? `${h} hour${h === 1 ? "" : "s"}` : `${Math.round(h / 24)} days`;
+};
+
+/** "5m ago". A number is a chain timestamp (seconds, Arc's clock); a string is the Gatekeeper's ISO time. */
 const ago = (iso: string | number) => {
   const t = typeof iso === "number" ? iso * 1000 : Date.parse(iso);
-  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  const s = Math.max(0, Math.round(((typeof iso === "number" ? chainNow() : Date.now()) - t) / 1000));
   if (s < 60) return `${s}s ago`;
   const m = Math.round(s / 60);
   if (m < 60) return `${m}m ago`;
@@ -517,6 +540,8 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
   }, [view]);
 
   const pol = s.policy!;
+  setChainTime(pol.chainTime); // before anything below renders a chain time
+  const clockOffMin = Math.round(chainSkewMs / 60_000);
   const dharma = s.org.dharma!.address as Address;
   const myAddr = me.address.toLowerCase();
   const myName = pol.members.find((m) => m.address === myAddr)?.name ?? short(myAddr);
@@ -705,6 +730,15 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
         </div>
 
         <div className="content" key={view}>
+          {Math.abs(clockOffMin) >= 5 && (
+            <div className="clock-note" role="status">
+              <Icon name="clock" size={16} />
+              <span>
+                This computer's clock is {fmtSkew(clockOffMin)} {clockOffMin > 0 ? "ahead of" : "behind"} Arc's. Vote times and countdowns are corrected; to fix it for good, turn on
+                <b> Settings → Time &amp; language → Date &amp; time → Set time automatically</b>, then <b>Sync now</b>.
+              </span>
+            </div>
+          )}
           {frozen && (
             <div className="freeze-banner" role="alert">
               <Icon name="stop" size={20} />
@@ -934,7 +968,7 @@ function Ballots({ ctx }: { ctx: Ctx }) {
     <>
       {live.map((g, i) => {
         const voted = g.voters.includes(myAddr);
-        const remaining = g.eta ? Math.max(0, g.eta - Math.floor(now / 1000)) : null;
+        const remaining = g.eta ? Math.max(0, g.eta - Math.floor((now - chainSkewMs) / 1000)) : null;
         const need = Number.isFinite(g.needed) ? g.needed : pol.required;
         // Every member can skip the wait on a normal change (not Unfreeze, never core).
         const canSkip = g.status === "queued" && !g.core && g.change.op !== "Unfreeze" && team && !voted && !!remaining;

@@ -918,3 +918,12 @@ html, body, * { scrollbar-width: none; }
   .confirm-actions { flex-direction: column-reverse; }
   .confirm-actions .btn { width: 100%; }
 }
+
+/* "This computer's clock is N hours ahead of Arc's" (App.tsx, setChainTime) */
+.clock-note {
+  display: flex; gap: 10px; align-items: flex-start; margin-bottom: 16px; padding: 12px 16px;
+  border: 1px dashed var(--line-strong); border-radius: var(--r-lg); background: var(--surface-2);
+  color: var(--n600); font-size: 13px; line-height: 1.5;
+}
+.clock-note svg { flex: none; margin-top: 2px; color: var(--n500); }
+.clock-note b { color: var(--ink); font-weight: 500; }
