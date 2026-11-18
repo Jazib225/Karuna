@@ -1006,8 +1006,6 @@ html, body, * { scrollbar-width: none; }
 .settings-line { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
 .setting { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .setting .tag { font-size: 11px; }
-.setting-edit input { width: 72px; }
-.setting-edit small { flex-basis: 100%; }
 .invite-create { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 
 /* Picker: a dropdown in the console's own style (the browser's <select> list can't be styled). */

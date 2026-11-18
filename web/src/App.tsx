@@ -900,49 +900,30 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
 
 // ============================================================== overview
 
-/**
- * One org setting, shown inline in the card it governs: its value is a link that opens a field to
- * propose a new value. Every change goes to a team vote; a pending vote shows next to the value.
- */
-function SettingControl({ ctx, name, unit }: { ctx: Ctx; name: SettingName; unit?: "minutes" | "seconds" }) {
-  const spec = SETTINGS[name];
-  const value = ctx.s.settings.values[name];
-  const [draft, setDraft] = useState<string | null>(null);
-  const pending = ctx.s.policy!.proposals.filter((g) => (g.status === "open" || g.status === "queued") && g.change?.op === "AddRule" && g.change.scope === `setting:${name}`);
-  const pendingTag = pending.map((g) => {
-    const v = Number(g.change?.op === "AddRule" ? g.change.target : NaN);
-    return <span className="tag" key={g.id} title="A change the team is voting on">vote pending: {Number.isFinite(v) ? spec.text(v) : "change"}</span>;
-  });
-  const propose = (v: number) => ctx.change(settingChange(name, v)).then((ok) => ok && setDraft(null));
+/** The proposal form's field label for each setting's value. */
+const SETTING_FIELD: Record<Exclude<SettingName, "requireGvisor">, string> = {
+  drillsPerDay: "Per agent per day (0 = off)",
+  drillWindowMinutes: "Minutes",
+  holdSeconds: "Seconds",
+  swarmAgents: "Agents (0 = off)",
+  swarmWindowSeconds: "Seconds",
+};
 
-  if (spec.max === 1) {
-    // An on/off setting: one button that proposes the opposite.
-    return (
-      <span className="setting">
-        <b>{spec.text(value)}</b>
-        {!pending.length && <button className="link-btn" disabled={ctx.busy} onClick={() => propose(value ? 0 : 1)}>{value ? "Propose turning off" : "Propose turning on"}</button>}
-        {pendingTag}
-      </span>
-    );
-  }
-  if (draft === null) {
-    return (
-      <span className="setting">
-        <button className="link-btn" title={`Propose a new ${spec.label.toLowerCase()}`} onClick={() => setDraft(String(value))}>{spec.text(value)}</button>
-        {pendingTag}
-      </span>
-    );
-  }
-  const n = Number(draft);
-  const bad = !/^\d+$/.test(draft.trim()) || n < spec.min || n > spec.max;
+/**
+ * One org setting's current value, shown in the card it governs. Changing it is a proposal like any
+ * other (the proposal form on Rules); a vote in progress shows next to the value.
+ */
+function SettingValue({ ctx, name }: { ctx: Ctx; name: SettingName }) {
+  const spec = SETTINGS[name];
+  const pending = ctx.s.policy!.proposals.filter((g) => (g.status === "open" || g.status === "queued") && g.change?.op === "AddRule" && g.change.scope === `setting:${name}`);
   return (
-    <form className="setting setting-edit" onSubmit={(e) => { e.preventDefault(); if (!bad && n !== value) void propose(n); }}>
-      <input className="select-sm mono" inputMode="numeric" autoFocus aria-label={spec.label} value={draft} onChange={(e) => setDraft(e.target.value)} />
-      {unit && <span className="muted">{unit}</span>}
-      <button className="btn btn-dark btn-sm" disabled={ctx.busy || bad || n === value}>Propose</button>
-      <button type="button" className="btn btn-ghost btn-sm" onClick={() => setDraft(null)}>Close</button>
-      {bad && <small className="bad-text">{spec.min} to {spec.max}</small>}
-    </form>
+    <span className="setting">
+      <b>{spec.text(ctx.s.settings.values[name])}</b>
+      {pending.map((g) => {
+        const v = Number(g.change?.op === "AddRule" ? g.change.target : NaN);
+        return <span className="tag" key={g.id} title="A change the team is voting on">vote pending: {Number.isFinite(v) ? spec.text(v) : "change"}</span>;
+      })}
+    </span>
   );
 }
 
@@ -1111,7 +1092,7 @@ function ActivityPage({ ctx, dharma, log }: { ctx: Ctx; dharma: Address; log: Lo
   return (
     <div className="stack">
       {pending.length === 0 && live.length === 0 && <div className="card"><Empty icon="check">Nothing is waiting for you.</Empty></div>}
-      <p className="muted small settings-line">An agent's held web request waits <SettingControl ctx={ctx} name="holdSeconds" unit="seconds" /> for a member, then it's refused.</p>
+      <p className="muted small settings-line">An agent's held web request waits <SettingValue ctx={ctx} name="holdSeconds" /> for a member, then it's refused.</p>
       {pending.map((p, i) => <div className="rise" style={st(i)} key={p.id}><ApprovalCard p={p} ctx={ctx} dharma={dharma} /></div>)}
       <EscrowHolds ctx={ctx} />
       <Ballots ctx={ctx} />
@@ -1542,12 +1523,13 @@ function describeRule(c: RuleChange, names: { agent: (id: string) => string; pay
 function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
   const { s, busy } = ctx;
   const pol = s.policy!;
-  // Settings are Dharma rules too, but they're shown and changed in the card they govern.
+  // Settings are Dharma rules too, but their values show in the card they govern, not in this list.
   const listedRules = pol.rules.filter((r) => !r.scope.startsWith("setting:"));
   const [meta, setMeta] = useState<Rule[]>([]);
-  // The form's choices that aren't rules: a payee, a trusted site, the two-signature limit, escrow.
-  const [special, setSpecial] = useState<"" | "payee" | "site" | "threshold" | "escrow">("");
-  const [extra, setExtra] = useState({ name: "", account: "", domain: "", usd: "", wait: "24", unit: "hours" as WaitUnit });
+  // The form's choices that aren't rules: a payee, a trusted site, the two-signature limit, escrow, a setting.
+  const [special, setSpecial] = useState<"" | "payee" | "site" | "threshold" | "escrow" | `set:${SettingName}`>("");
+  const [extra, setExtra] = useState({ name: "", account: "", domain: "", usd: "", wait: "24", unit: "hours" as WaitUnit, setting: "" });
+  const settingName = special.startsWith("set:") ? (special.slice(4) as SettingName) : null;
   const [rule, setRule] = useState<RuleForm>(EMPTY_RULE);
   const [english, setEnglish] = useState("");
   const [drafting, setDrafting] = useState(false);
@@ -1600,8 +1582,15 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
           change: { op: "AddRule", id: ruleId("escrow"), outcome: "Approval", scope: "escrow", target: String(waitSec), maxUsd: amount },
           text: `payments of ${usd(amount)} or more wait ${waitText(waitSec)} in escrow, and any member can cancel them`,
         };
-      default:
-        return null;
+      default: {
+        if (!settingName) return null;
+        const spec = SETTINGS[settingName];
+        const now = s.settings.values[settingName];
+        const v = Number(extra.setting);
+        if (!/^\d+$/.test(extra.setting.trim()) || v < spec.min || v > spec.max) return { error: `Enter a whole number from ${spec.min} to ${spec.max}` };
+        if (v === now) return { error: `That's the current value (${spec.text(now)})` };
+        return { change: settingChange(settingName, v), text: `Set ${spec.label.toLowerCase()} to ${spec.text(v)} (now ${spec.text(now)})` };
+      }
     }
   })();
   const addRule = (e: FormEvent) => {
@@ -1617,6 +1606,7 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
           setExtra((x) => ({ ...x, name: "", account: "" }));
           setRule((r) => ({ ...r, category: "" }));
         } else if (sent === "site") setExtra((x) => ({ ...x, domain: "" }));
+        else if (sent.startsWith("set:")) setExtra((x) => ({ ...x, setting: "" }));
         else setExtra((x) => ({ ...x, usd: "" }));
       });
       return;
@@ -1707,8 +1697,9 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
         <label className="field"><span>Action</span>
           <select value={special || rule.kind} onChange={(e) => {
             const v = e.target.value;
-            const isSpecial = v === "payee" || v === "site" || v === "threshold" || v === "escrow";
-            setSpecial(isSpecial ? v : "");
+            const isSpecial = v === "payee" || v === "site" || v === "threshold" || v === "escrow" || v.startsWith("set:");
+            setSpecial(isSpecial ? (v as typeof special) : "");
+            if (v.startsWith("set:")) setExtra((x) => ({ ...x, setting: "" }));
             setRule({ ...EMPTY_RULE, outcome: rule.outcome, agent: rule.agent, kind: isSpecial ? rule.kind : (v as RuleKind) });
           }}>
             <option value="payee">New payee</option>
@@ -1720,8 +1711,29 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
             <option value="shell">Shell commands</option>
             <option value="file">Files</option>
             <option value="message">Messages to other agents</option>
+            <optgroup label="Settings">
+              <option value="set:drillsPerDay">Drills per day</option>
+              <option value="set:drillWindowMinutes">Drill pass window</option>
+              <option value="set:holdSeconds">Approval hold</option>
+              <option value="set:swarmAgents">Swarm Stopper</option>
+              <option value="set:swarmWindowSeconds">Swarm Stopper window</option>
+              {(s.settings.gvisorAvailable || s.settings.values.requireGvisor === 1) && <option value="set:requireGvisor">Require gVisor</option>}
+            </optgroup>
           </select>
         </label>
+        {settingName && (settingName === "requireGvisor" ? (
+          <label className="field"><span>Require gVisor</span>
+            <select value={extra.setting} onChange={(e) => setExtra({ ...extra, setting: e.target.value })}>
+              <option value="">Choose…</option>
+              <option value="1">On: refuse boxes on plain Docker</option>
+              <option value="0">Off</option>
+            </select>
+          </label>
+        ) : (
+          <label className="field"><span>{SETTING_FIELD[settingName]}</span>
+            <input className="mono" inputMode="numeric" value={extra.setting} onChange={(e) => setExtra({ ...extra, setting: e.target.value })} placeholder={String(s.settings.values[settingName])} />
+          </label>
+        ))}
         {special === "payee" && <>
           <label className="field"><span>Name (private)</span><input value={extra.name} onChange={(e) => setExtra({ ...extra, name: e.target.value })} placeholder="Supplier or service" /></label>
           <label className="field grow"><span>Payout address</span><input className="mono" value={extra.account} onChange={(e) => setExtra({ ...extra, account: e.target.value.trim() })} placeholder="0x…" /></label>
@@ -2210,7 +2222,7 @@ function Drills({ ctx }: { ctx: Ctx }) {
   };
   return (
     <div className="card">
-      <div className="hd"><h2>Drills</h2><span className="sub settings-line">fake scams per agent: <SettingControl ctx={ctx} name="drillsPerDay" /> · ignored for <SettingControl ctx={ctx} name="drillWindowMinutes" unit="minutes" /> counts as passed</span></div>
+      <div className="hd"><h2>Drills</h2><span className="sub settings-line">fake scams per agent: <SettingValue ctx={ctx} name="drillsPerDay" /> · ignored for <SettingValue ctx={ctx} name="drillWindowMinutes" /> counts as passed</span></div>
       <form className="inline-form" onSubmit={runTest}>
         <label className="field"><span>Agent</span>
           <select value={test.agentId} onChange={(e) => setTest({ ...test, agentId: e.target.value })}>
@@ -2299,7 +2311,7 @@ function Traps({ ctx }: { ctx: Ctx }) {
 
   return (
       <div className="card">
-        <div className="hd"><h2>Trap credentials</h2><span className="sub settings-line">any agent that uses one freezes every agent · Swarm Stopper: <SettingControl ctx={ctx} name="swarmAgents" />{sw.agentsToTrip > 0 && <> hitting one new target within <SettingControl ctx={ctx} name="swarmWindowSeconds" unit="seconds" /></>}</span></div>
+        <div className="hd"><h2>Trap credentials</h2><span className="sub settings-line">any agent that uses one freezes every agent · Swarm Stopper: <SettingValue ctx={ctx} name="swarmAgents" />{sw.agentsToTrip > 0 && <> hitting one new target within <SettingValue ctx={ctx} name="swarmWindowSeconds" /></>}</span></div>
         <form className="pad row-form" onSubmit={(e) => { e.preventDefault(); run(() => api("/traps", { agentId: target || undefined }), "Trap credentials minted. Plant them where the agent can find them."); }}>
           <select aria-label="Which agent the traps are for" value={target} onChange={(e) => setTarget(e.target.value)}>
             <option value="">For every agent</option>
@@ -3175,7 +3187,7 @@ function SandboxRuns({ ctx }: { ctx: Ctx }) {
   const sb = s.sandbox;
   return (
     <div className="card">
-      <div className="hd"><h2>Running in a sandbox</h2><span className="sub settings-line">{sb.sessions.length} live{(s.settings.gvisorAvailable || s.settings.values.requireGvisor === 1) && <> · Require gVisor: <SettingControl ctx={ctx} name="requireGvisor" /></>}</span></div>
+      <div className="hd"><h2>Running in a sandbox</h2><span className="sub settings-line">{sb.sessions.length} live{(s.settings.gvisorAvailable || s.settings.values.requireGvisor === 1) && <> · Require gVisor: <SettingValue ctx={ctx} name="requireGvisor" /></>}</span></div>
       {sb.sessions.length === 0 ? <Empty icon="agents">No boxes running. Start one with <span className="mono">pnpm karuna run --agent &lt;id&gt; ./folder -- &lt;command&gt;</span>.</Empty> : (
         <div className="table">
           {sb.sessions.map((x) => (
