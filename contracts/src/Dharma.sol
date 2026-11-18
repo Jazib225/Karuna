@@ -10,6 +10,9 @@ pragma solidity ^0.8.24;
 ///         - Core changes (removing a core rule, the core wait itself, upgrading this code): need every
 ///           member, always wait `coreTimelock`, can't be skipped, and any member's Freeze cancels them.
 ///         Only two things are instant: a member's Freeze, and the Gatekeeper's own tighten-only writes.
+///         v4 team roles: what each member may do (propose, freeze, lower a level, manage roles…) is a
+///         role. A member with "team" changes roles at once (`manage`); roles never change who votes,
+///         and every member can always vote, so no role change can pass or block a proposal.
 ///         A changed wait applies to proposals that pass after it, never to ones already waiting.
 ///         Members sign EIP-712 actions with their own keys. The Gatekeeper only relays them and
 ///         pays gas — it cannot forge a member's vote.
@@ -23,11 +26,12 @@ contract Dharma {
         AddRule, RemoveRule, SetPayee, RemovePayee, SetAgent, RemoveAgent,
         AddDomain, RemoveDomain, SetThreshold, Freeze, Unfreeze, AddMember, RemoveMember,
         SetTimelock, SetCoreTimelock, Upgrade,
-        SetLevel, SetLevelLimits // v3: trust levels
+        SetLevel, SetLevelLimits, // v3: trust levels
+        SetRole, SetRolePerms, SetStructure // v4: team roles (instant, via manage)
     }
     enum Outcome { Allow, Deny, Approval }
     enum Status { None, Open, Queued, Executed, Defeated, Cancelled }
-    enum Kind { Tighten, Propose, Vote }
+    enum Kind { Tighten, Propose, Vote, Manage }
 
     struct Rule {
         bytes32 id;
@@ -104,6 +108,10 @@ contract Dharma {
     /// An agent tripped a Tripwire (a trap password, or joining a swarm). Recorded per agent, so its
     /// record shows it even when the agent is already at Level 0.
     event TripwireFired(bytes32 indexed agent, string reason);
+    // v4: team roles
+    event RoleSet(address indexed member, uint8 role, address indexed by);
+    event RolePermsSet(uint8 role, uint16 perms, address indexed by);
+    event StructureSet(uint8 structure, address indexed by);
 
     // ------------------------------------------------------------------ errors
 
@@ -118,6 +126,8 @@ contract Dharma {
     error Invalid(string why);
     error NotReady();
     error AlreadyInitialized();
+    error NoPermission();
+    error BadRole();
 
     // ------------------------------------------------------------------ constants
 
@@ -128,6 +138,24 @@ contract Dharma {
     uint64 public constant MIN_CORE_TIMELOCK = 60; // core wait: never 0
     uint64 public constant MAX_CORE_TIMELOCK = 30 days;
     uint8 public constant MAX_LEVEL = 3;
+    // v4 team roles. Permission bits (same order as the console's list).
+    uint16 internal constant P_APPROVE = 1; // approve or deny held actions (checked by the Gatekeeper)
+    uint16 internal constant P_CANCEL_ESCROW = 2; // cancel a payment in escrow (checked by Escrow)
+    uint16 internal constant P_PROPOSE = 4; // propose changes (voting is every member's, always)
+    uint16 internal constant P_AGENTS = 8; // manage agents, and lower an agent's level at once
+    uint16 internal constant P_TEAM = 16; // change roles and the team structure
+    uint16 internal constant P_WALLET = 32; // manage the wallet (checked by the Gatekeeper)
+    uint16 internal constant P_FREEZE = 64; // freeze every agent at once
+    uint16 internal constant P_ALL = 127;
+    uint16 internal constant MEMBER_DEFAULT = 15; // approve, cancel escrow, propose, agents
+    uint8 internal constant ROLE_DEFAULT = 0; // Flat: everything; Tree: Member
+    uint8 internal constant ROLE_ADMIN = 1; // everything, always
+    uint8 internal constant ROLE_MEMBER = 2; // its permissions can change
+    uint8 internal constant STRUCTURE_FLAT = 0;
+    uint8 internal constant STRUCTURE_TREE = 1;
+    uint8 internal constant MAX_ROLE = 15; // 2 = Member, 3..15 custom
+    uint16 internal constant DELETE_ROLE = 0x8000; // SetRolePerms with this deletes a custom role
+    uint16 internal constant ROLE_EXISTS = 0x4000;
     /// ERC-1967 implementation slot: keccak256("eip1967.proxy.implementation") - 1
     bytes32 internal constant IMPLEMENTATION_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
 
@@ -171,6 +199,12 @@ contract Dharma {
     mapping(bytes32 => uint8) public agentLevel;
     mapping(uint8 => LevelLimits) internal _levelLimits;
     mapping(uint8 => bool) internal _levelLimitsSet;
+
+    // v4 (appended): team roles. Flat (0) until a member with "team" picks Tree, so upgraded and
+    // new orgs work exactly as before roles existed: every member can do everything.
+    uint8 public structure;
+    mapping(address => uint8) public roleOf; // 0 = the structure's default role
+    mapping(uint8 => uint16) internal _rolePerms; // with ROLE_EXISTS set once a role is defined
 
     // ------------------------------------------------------------------ setup
 
@@ -239,6 +273,7 @@ contract Dharma {
         } else {
             _auth(Kind.Tighten, op, data, 0, false, signer, deadline, sig);
             if (op != Op.Freeze && op != Op.SetLevel) revert MembersMustPropose();
+            if (permissionsOf(signer) & (op == Op.Freeze ? P_FREEZE : P_AGENTS) == 0) revert NoPermission();
             actor = signer;
         }
         if (!isTightening(op, data)) revert NotTightening();
@@ -251,6 +286,8 @@ contract Dharma {
     ///         counts as their "yes" vote.
     function propose(Op op, bytes calldata data, address signer, uint256 deadline, bytes calldata sig) external returns (uint256 id) {
         _auth(Kind.Propose, op, data, 0, false, signer, deadline, sig);
+        if (_isRoleOp(op)) revert BadRole();
+        if (permissionsOf(signer) & P_PROPOSE == 0) revert NoPermission();
         _validate(op, data);
         bool core = isCoreChange(op, data);
         id = _proposals.length;
@@ -333,6 +370,77 @@ contract Dharma {
             emit WaitSkipped(id);
             emit ProposalQueued(id, p.eta);
         }
+    }
+
+    // ------------------------------------------------------------------ team roles (v4)
+
+    /// @notice A member with "team" changes roles or the team structure, at once. Roles limit what
+    ///         a member may do; they never change who votes, so this can't pass or block a proposal.
+    function manage(Op op, bytes calldata data, address signer, uint256 deadline, bytes calldata sig) external {
+        _auth(Kind.Manage, op, data, 0, false, signer, deadline, sig);
+        if (!_isRoleOp(op)) revert BadRole();
+        if (permissionsOf(signer) & P_TEAM == 0) revert NoPermission();
+        policyVersion++;
+        if (op == Op.SetRole) {
+            (address m, uint8 r) = abi.decode(data, (address, uint8));
+            if (_memberIdx[m] == 0) revert NotMember();
+            if (r > ROLE_MEMBER && _rolePerms[r] == 0) revert BadRole();
+            roleOf[m] = r;
+            emit RoleSet(m, r, signer);
+        } else if (op == Op.SetRolePerms) {
+            // Deleting a custom role: whoever still has it falls back to the default role.
+            (uint8 r, uint16 perms) = abi.decode(data, (uint8, uint16));
+            bool del = perms == DELETE_ROLE;
+            if (r < ROLE_MEMBER || r > MAX_ROLE || (del ? r == ROLE_MEMBER : perms > P_ALL)) revert BadRole();
+            _rolePerms[r] = del ? 0 : perms | ROLE_EXISTS;
+            emit RolePermsSet(r, perms, signer);
+        } else {
+            uint8 st = abi.decode(data, (uint8));
+            if (st > STRUCTURE_TREE) revert BadRole();
+            structure = st;
+            // Whoever sets up a Tree becomes its Admin (unless they already have a role).
+            if (st == STRUCTURE_TREE && roleOf[signer] == ROLE_DEFAULT) {
+                roleOf[signer] = ROLE_ADMIN;
+                emit RoleSet(signer, ROLE_ADMIN, signer);
+            }
+            emit StructureSet(st, signer);
+        }
+    }
+
+    /// @notice What a member may do (0 for anyone else). There's always someone with "team": in a
+    ///         Tree with nobody left who has it, the first member does.
+    function permissionsOf(address a) public view returns (uint16) {
+        if (_memberIdx[a] == 0) return 0;
+        uint16 p = _base(a);
+        if (p & P_TEAM == 0 && _members[0] == a) {
+            for (uint256 i; i < _members.length; i++) if (_base(_members[i]) & P_TEAM != 0) return p;
+            return P_ALL;
+        }
+        return p;
+    }
+
+    /// @notice Every role's permissions, 16 bits per role id (2 = Member, 3..15 custom); a role
+    ///         exists when its ROLE_EXISTS bit (0x4000) is set.
+    function rolePerms() external view returns (uint256 packed) {
+        for (uint8 r = ROLE_MEMBER; r <= MAX_ROLE; r++) packed |= uint256(_permsOfRole(r)) << (16 * uint256(r));
+    }
+
+    /// @dev A role's permissions with ROLE_EXISTS, or 0 when there's no such role.
+    function _permsOfRole(uint8 r) private view returns (uint16) {
+        if (r == ROLE_ADMIN) return P_ALL | ROLE_EXISTS;
+        uint16 p = _rolePerms[r];
+        return r == ROLE_MEMBER && p == 0 ? MEMBER_DEFAULT | ROLE_EXISTS : p;
+    }
+
+    /// @dev A member's permissions from their role, or the structure's default when they have none.
+    function _base(address m) private view returns (uint16) {
+        uint16 p = _permsOfRole(roleOf[m]);
+        if (p & ROLE_EXISTS != 0) return p & P_ALL;
+        return structure == STRUCTURE_FLAT ? P_ALL : _permsOfRole(ROLE_MEMBER) & P_ALL;
+    }
+
+    function _isRoleOp(Op op) private pure returns (bool) {
+        return op >= Op.SetRole; // the role ops are the last ones
     }
 
     // ------------------------------------------------------------------ gatekeeper-only
@@ -571,6 +679,7 @@ contract Dharma {
         } else if (op == Op.RemoveMember) {
             address m = abi.decode(data, (address));
             _removeAddr(_members, _memberIdx, m);
+            delete roleOf[m];
             emit MemberRemoved(m);
         } else if (op == Op.SetLevel) {
             (bytes32 id, uint8 level, string memory reason) = abi.decode(data, (bytes32, uint8, string));
@@ -658,7 +767,7 @@ contract Dharma {
 
     /// @notice The code version behind this org's address.
     function version() external pure virtual returns (uint256) {
-        return 3;
+        return 4;
     }
 
     /// @notice A level's payment limits: the members' values if they set them, else the defaults.

@@ -1,6 +1,8 @@
 // Console ↔ Gatekeeper. Everything the console shows comes from the Gatekeeper; nothing is
 // simulated or built in. Live updates arrive over server-sent events.
 import { useCallback, useEffect, useRef, useState } from "react";
+import { consoleSessionTypedData, type Permission, type RoleDef, type SettingValues, type Structure } from "@prekaruna/dharma";
+import type { Address } from "viem";
 
 export type Outcome = "allow" | "deny" | "approval";
 export type Status = "pending" | "executing" | "executed" | "allowed" | "denied" | "failed";
@@ -21,6 +23,8 @@ export interface Proposal {
   status: Status;
   approvals: { memberId: string; at: string }[];
   approvalsNeeded: number;
+  /** What happens if no member answers (pending only). */
+  ifUnanswered?: string | null;
   resolvedBy?: string;
   resolvedAt?: string;
   txRef?: string;
@@ -225,6 +229,14 @@ export interface Snapshot {
     agentsToTrip: number;
     windowSeconds: number;
   };
+  /** Org settings, voted on Dharma; `defaults` is what applies before any vote. */
+  settings: { values: SettingValues; defaults: SettingValues; gvisorAvailable: boolean };
+  /** Team roles (on Dharma v4; `onchain` false before): the structure, every role, each person's role
+   *  and what they can do, and the Viewers (people who see the console but don't vote). */
+  roles: {
+    structure: Structure; onchain: boolean; defs: RoleDef[]; of: Record<string, string | null>;
+    can: Record<string, Permission[]>; viewers: { address: string; name: string | null }[];
+  };
   inbox: (InboxMessage & { test: { id: string; status: ShieldTest["status"]; template: string } | null })[];
   proposals: Proposal[];
   log: { length: number; head: string; verified: boolean; brokenAt: number | null; publicKeyPem: string };
@@ -263,15 +275,64 @@ export interface Rule { id: string; description: string; outcome: Outcome }
 
 export class ApiError extends Error {}
 
-export async function api<T = unknown>(path: string, body?: unknown, method?: string): Promise<T> {
-  const res = await fetch(`/api${path}`, {
-    method: method ?? (body === undefined ? "GET" : "POST"),
-    headers: body === undefined ? undefined : { "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
+// ---------------------------------------------------------------- console session
+// The Gatekeeper checks each change against the asker's role, so the console signs once with the
+// member's key to start a session, and sends it with every change. A restart ends sessions: the
+// first change after one signs a new session and tries again.
+
+type SessionSigner = { address: Address; signTypedData: (args: ReturnType<typeof consoleSessionTypedData>) => Promise<`0x${string}`> };
+let sessionSigner: SessionSigner | null = null;
+let session: { address: string; token: string } | null = null;
+
+/** Who signs this console's session (the signed-in member's key). */
+export function setSessionSigner(s: SessionSigner | null) {
+  sessionSigner = s;
+  if (session && session.address !== s?.address.toLowerCase()) session = null;
+}
+
+async function sessionToken(): Promise<string | null> {
+  if (!sessionSigner) return null;
+  if (session) return session.token;
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const signature = await sessionSigner.signTypedData(consoleSessionTypedData(sessionSigner.address, BigInt(issuedAt)));
+  const res = await fetch("/api/session", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ address: sessionSigner.address, issuedAt, signature }),
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError((data as { error?: string }).error ?? `Gatekeeper returned ${res.status}`);
+  if (!res.ok) return null; // not in the org yet (setting up, joining): the request goes without one
+  const { token } = (await res.json()) as { token: string };
+  session = { address: sessionSigner.address.toLowerCase(), token };
+  return token;
+}
+
+export async function api<T = unknown>(path: string, body?: unknown, method?: string): Promise<T> {
+  const verb = method ?? (body === undefined ? "GET" : "POST");
+  const send = async () => {
+    const token = verb === "GET" ? session?.token ?? null : await sessionToken();
+    return fetch(`/api${path}`, {
+      method: verb,
+      headers: { ...(body === undefined ? {} : { "content-type": "application/json" }), ...(token ? { "x-karuna-session": token } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  };
+  let res = await send();
+  let data = (await res.json().catch(() => ({}))) as { error?: string; session?: boolean };
+  if (res.status === 401 && data.session && sessionSigner) {
+    session = null;
+    res = await send();
+    data = (await res.json().catch(() => ({}))) as { error?: string; session?: boolean };
+  }
+  if (!res.ok) throw new ApiError(data.error ?? `Gatekeeper returned ${res.status}`);
   return data as T;
+}
+
+/** What this person's role allows (from the snapshot). Anyone with no role can do nothing. */
+export function roleOf(s: Snapshot, address: string) {
+  const id = s.roles?.of[address.toLowerCase()] ?? null;
+  const def = s.roles?.defs.find((d) => d.id === id) ?? null;
+  const can = s.roles?.can?.[address.toLowerCase()];
+  return { id, def, can: (p: Permission) => (can ? can.includes(p) : !!def?.permissions.includes(p)) };
 }
 
 /** Live Gatekeeper state: refetches whenever the Gatekeeper reports a change. */

@@ -12,7 +12,8 @@ import {
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import {
-  Kind, actionTypedData, encodeChange, paymentDecisionTypedData, type Change,
+  Kind, actionTypedData, consoleSessionTypedData, describeChange, encodeChange, paymentDecisionTypedData, settingChange, type Change,
+  DELETE_ROLE, permissionBits,
 } from "@prekaruna/dharma";
 import { Store } from "../src/store.ts";
 import { SecretStore } from "../src/secrets.ts";
@@ -65,6 +66,10 @@ class FakeWallet implements WalletBackend {
   async listWallets() {
     return [];
   }
+  async depositGateway(_f: string, amountUsd: number) {
+    this.paid.push({ kind: "gateway", amount: amountUsd, to: "gateway" });
+    return { txRef: "0xdeposit", raw: {} };
+  }
 }
 
 // ---------------------------------------------------------------- per-test org
@@ -109,6 +114,7 @@ async function chainDeadline() {
 const tighten = async (who: PrivateKeyAccount, c: Change) => gk.submitAction(await sign(who, Kind.Tighten, c));
 const propose = async (who: PrivateKeyAccount, c: Change, label?: string) => gk.submitAction({ ...(await sign(who, Kind.Propose, c)), label });
 const vote = async (who: PrivateKeyAccount, id: number, c: Change, support = true) => gk.submitAction(await sign(who, Kind.Vote, c, id, support));
+const manage = async (who: PrivateKeyAccount, c: Change, label?: string) => gk.submitAction({ ...(await sign(who, Kind.Manage, c)), label });
 async function waitTimelock() {
   await test().increaseTime({ seconds: 65 });
   await test().mine({ blocks: 1 });
@@ -261,11 +267,157 @@ describe("Rule changes: every member edit is voted on; only panic is instant", (
     await waitTimelock();
     expect((await gk.propose(id, { type: "action", tool: "shell", command: "ls" })).status).toBe("allowed");
   }, 30_000);
+
+  it("an agent shows as awaiting a vote only while that vote is pending; once removed it leaves the list", async () => {
+    const card = (id: string) => gk.snapshot().policy!.agents.find((a) => a.id === id);
+    const { id } = gk.prepareAgent("Short-lived agent");
+    await propose(alice, { op: "SetAgent", id, capUsd: 1 });
+    expect(card(id)).toMatchObject({ active: false });
+    await waitTimelock();
+    expect(card(id)).toMatchObject({ active: true });
+    await propose(alice, { op: "RemoveAgent", id });
+    await waitTimelock();
+    expect(card(id)).toBeUndefined();
+  }, 30_000);
+});
+
+describe("Gateway funds", () => {
+  it("a member moves USDC from the wallet into Gateway; bad amounts and more than the wallet holds are refused", async () => {
+    gk.walletUsd = 10;
+    await expect(gk.depositGateway(0)).rejects.toThrow(/above \$0/);
+    await expect(gk.depositGateway("abc")).rejects.toThrow(/above \$0/);
+    await expect(gk.depositGateway(11)).rejects.toThrow(/wallet holds \$10\.00/);
+    expect(wallet.paid).toEqual([]);
+    expect(await gk.depositGateway(2.5)).toEqual({ amountUsd: 2.5, txRef: "0xdeposit" });
+    expect(wallet.paid).toEqual([{ kind: "gateway", amount: 2.5, to: "gateway" }]);
+    expect(gk.logTail(5).some((e) => e.event?.type === "gateway-deposit")).toBe(true);
+  });
+});
+
+describe("settings: voted on Dharma like any rule", () => {
+  it("each setting starts at this Gatekeeper's default; a passed vote changes it, and the newest vote wins", async () => {
+    expect(gk.settings()).toMatchObject({ holdSeconds: 120, swarmAgents: 2, requireGvisor: 0 });
+    expect(describeChange(settingChange("drillsPerDay", 4))).toBe("Set drills per agent per day to 4 a day");
+    expect(describeChange(settingChange("holdSeconds", 300))).toBe("Set approval hold to 5 min");
+    expect(() => settingChange("drillsPerDay", 99)).toThrow(/0 to 20/);
+
+    await propose(alice, settingChange("holdSeconds", 300));
+    expect(gk.holdMs).toBe(120_000); // not until the vote passes
+    await waitTimelock();
+    expect(gk.holdMs).toBe(300_000);
+    expect(gk.snapshot().settings).toMatchObject({ values: { holdSeconds: 300 }, defaults: { holdSeconds: 120 } });
+
+    await propose(alice, settingChange("drillsPerDay", 4));
+    await propose(alice, settingChange("drillsPerDay", 1));
+    await waitTimelock();
+    expect(gk.snapshot().shield.testsPerDay).toBe(1);
+  }, 60_000);
+
+  it("Require gVisor, once voted on, refuses boxes that run on plain Docker", async () => {
+    const { id } = await activateAgent(1);
+    expect(gk.startSession(id, { isolation: "docker" }).agentId).toBe(id);
+    await propose(alice, settingChange("requireGvisor", 1));
+    await waitTimelock();
+    expect(() => gk.startSession(id, { isolation: "docker" })).toThrow(/requires gVisor/);
+    expect(gk.startSession(id, { isolation: "gvisor" }).agentId).toBe(id);
+  }, 60_000);
+});
+
+describe("team roles: on Dharma, changed at once, never a vote", () => {
+  const addBob = async () => {
+    await propose(alice, { op: "AddMember", member: bob.address }, "Bob");
+    await waitTimelock();
+  };
+  const tree = async () => {
+    await addBob();
+    await manage(alice, { op: "SetStructure", structure: "tree" });
+  };
+
+  it("a new org is flat: every member can do everything, with no setup", async () => {
+    await addBob();
+    expect(gk.structure()).toBe("flat");
+    expect(gk.can(bob.address, "freeze")).toBe(true);
+    expect(gk.can(bob.address, "team")).toBe(true);
+    expect(gk.snapshot().roles.can[bob.address.toLowerCase()]).toContain("wallet");
+  }, 60_000);
+
+  it("a tree makes its creator Admin and everyone else a Member, who can't freeze or manage the team", async () => {
+    await tree();
+    expect(gk.structure()).toBe("tree");
+    expect(gk.roleOf(alice.address)).toBe("admin");
+    expect(gk.roleOf(bob.address)).toBe("member");
+    await expect(tighten(bob, { op: "Freeze" })).rejects.toThrow(/Freeze all agents/);
+    await expect(manage(bob, { op: "SetRole", member: alice.address, role: 2 })).rejects.toThrow(/Manage the team/);
+    await expect(propose(alice, { op: "SetStructure", structure: "flat" })).rejects.toThrow(/aren't proposals/);
+    // Admin hands it over: Bob becomes Admin and can freeze.
+    await manage(alice, { op: "SetRole", member: bob.address, role: 1 });
+    expect(gk.roleOf(bob.address)).toBe("admin");
+    await tighten(bob, { op: "Freeze" });
+    expect(gk.logTail(50).some((e) => e.event?.type === "dharma" && e.event.action === "manage")).toBe(true);
+  }, 90_000);
+
+  it("a Viewer comes from an access request: sees the console, can't act, and isn't a voter", async () => {
+    const carol = privateKeyToAccount(generatePrivateKey());
+    gk.requestAccess(carol.address, "Carol");
+    gk.addViewer(alice.address, carol.address);
+    expect(gk.roleOf(carol.address)).toBe("viewer");
+    expect(gk.can(carol.address, "approve")).toBe(false);
+    expect(gk.snapshot().roles.viewers).toEqual([{ address: carol.address.toLowerCase(), name: "Carol" }]);
+    expect(gk.snapshot().policy!.members).toHaveLength(1); // not on Dharma
+    await expect(manage(alice, { op: "SetRole", member: carol.address, role: 2 })).rejects.toThrow(/Propose adding them/);
+    gk.removeViewer(alice.address, carol.address);
+    expect(gk.roleOf(carol.address)).toBeNull();
+  }, 60_000);
+
+  it("custom roles: what each can do is on Dharma, the name stays here; voting is never limited", async () => {
+    await tree();
+    await manage(alice, { op: "SetRolePerms", role: 3, permissions: permissionBits(["approve", "cancelEscrow"]) }, "Approver");
+    expect(gk.roleDefs().find((d) => d.id === "role-3")).toMatchObject({ name: "Approver", permissions: ["approve", "cancelEscrow"] });
+    await manage(alice, { op: "SetRole", member: bob.address, role: 3 });
+    expect(gk.roleOf(bob.address)).toBe("role-3");
+    expect(gk.can(bob.address, "approve")).toBe(true);
+    expect(gk.can(bob.address, "propose")).toBe(false);
+    await expect(propose(bob, { op: "AddRule", id: "x", outcome: "Deny", scope: "shell" })).rejects.toThrow(/Propose changes/);
+    // Bob can't propose, but still votes on Alice's proposal.
+    const c: Change = { op: "AddDomain", domain: "example.com" };
+    const { proposalId } = await propose(alice, c);
+    await vote(bob, proposalId!, c);
+    // Deleting the role puts Bob back on Member.
+    await manage(alice, { op: "SetRolePerms", role: 3, permissions: DELETE_ROLE });
+    expect(gk.roleOf(bob.address)).toBe("member");
+    expect(gk.roleDefs().some((d) => d.id === "role-3")).toBe(false);
+  }, 120_000);
+
+  it("a console session is started by the member's own signature", async () => {
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const signature = await alice.signTypedData(consoleSessionTypedData(alice.address, BigInt(issuedAt)));
+    const { token, role } = await gk.startConsoleSession({ address: alice.address, issuedAt, signature });
+    expect(role).toBe("admin");
+    expect(gk.sessionMember(token)).toBe(alice.address.toLowerCase());
+    // Someone else's signature, or a key that isn't in the org, gets nothing.
+    await expect(gk.startConsoleSession({ address: bob.address, issuedAt, signature })).rejects.toThrow(/isn't signed by that key/);
+    const stranger = privateKeyToAccount(generatePrivateKey());
+    const sig2 = await stranger.signTypedData(consoleSessionTypedData(stranger.address, BigInt(issuedAt)));
+    await expect(gk.startConsoleSession({ address: stranger.address, issuedAt, signature: sig2 })).rejects.toThrow(/not part of this organization/);
+    expect(() => gk.requirePermission(null, "team")).toThrow(/session ended/);
+  });
 });
 
 describe("invite links", () => {
   it("without a public address there are no invite links", () => {
     expect(() => gk.createInvite()).toThrow(/public address/);
+  });
+
+  it("the member picks how long a link lasts and how many times it can be used", async () => {
+    await gk.idle();
+    const owner = makeGatekeeper(dir, { chatUrl: "http://127.0.0.1:1" });
+    await owner.housekeeping();
+    const inv = owner.createInvite({ days: 1, uses: 1 });
+    expect(inv.maxUses).toBe(1);
+    expect(Date.parse(inv.expiresAt) - Date.parse(inv.createdAt)).toBe(86_400_000);
+    expect(owner.createInvite().maxUses).toBe(10); // the defaults: 7 days, 10 uses
+    expect(() => owner.createInvite({ days: 0 })).toThrow(/1 to 30 days/);
+    expect(() => owner.createInvite({ uses: 51 })).toThrow(/1 to 50 times/);
   });
 
   it("someone with a link sends a signed join request from their own Karuna; members still vote them in", async () => {

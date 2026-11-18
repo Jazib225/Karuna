@@ -134,7 +134,8 @@ export class EgressProxy {
       const v = this.gk.egress(token, { method, url: u.toString(), headers, body });
       if (v.verdict === "deny") return send(res, 403, { error: "Blocked by Karuna", ...(v.proposalId ? { id: v.proposalId } : {}) });
       if (v.verdict === "pending") {
-        const outcome = await this.gk.waitForDecision(v.proposalId, this.opts.holdMs ?? 120_000);
+        // The Approval hold setting, unless this proxy was given a fixed hold (test harnesses).
+        const outcome = await this.gk.waitForDecision(v.proposalId, this.opts.holdMs ?? this.gk.holdMs);
         if (outcome === "pending") return send(res, 403, { error: "Waiting for a person to approve this in Karuna", status: "pending", id: v.proposalId });
         if (outcome !== "allowed" || !this.gk.takeGrant(v.proposalId)) return send(res, 403, { error: "Blocked by Karuna", id: v.proposalId });
       }

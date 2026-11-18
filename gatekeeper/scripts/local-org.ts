@@ -87,7 +87,7 @@ const gk = new Gatekeeper({
 await gk.setup({ orgName: "Local Org", memberName: "You", memberAddress: member, walletAddress: org.address });
 
 const ca = new SandboxCA(dataDir);
-const egress = new EgressProxy(gk, ca, { agentApiPort: agentPort, holdMs: 120_000 });
+const egress = new EgressProxy(gk, ca, { agentApiPort: agentPort });
 agentApi(gk, { proxy: egress, caPem: ca.certPem, secrets }).listen(agentPort, "127.0.0.1");
 consoleApi(gk, wallet, store.loadOrCreateConsoleToken(), secrets, ca.certPem, new Accounts(store)).listen(consolePort, "127.0.0.1");
 await gk.start();

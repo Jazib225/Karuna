@@ -154,6 +154,28 @@ export const previewSnapshot: Snapshot = {
     agentsToTrip: 3,
     windowSeconds: 30,
   },
+  settings: {
+    values: { drillsPerDay: 2, drillWindowMinutes: 30, holdSeconds: 120, swarmAgents: 3, swarmWindowSeconds: 30, requireGvisor: 0 },
+    defaults: { drillsPerDay: 2, drillWindowMinutes: 30, holdSeconds: 120, swarmAgents: 2, swarmWindowSeconds: 60, requireGvisor: 0 },
+    gvisorAvailable: true,
+  },
+  roles: {
+    structure: "tree",
+    onchain: true,
+    defs: [
+      { id: "admin", name: "Admin", permissions: ["approve", "cancelEscrow", "propose", "agents", "team", "wallet", "freeze"], builtin: true },
+      { id: "member", name: "Member", permissions: ["approve", "cancelEscrow", "propose", "agents"], builtin: true },
+      { id: "role-3", name: "Approver", permissions: ["approve", "cancelEscrow"] },
+      { id: "viewer", name: "Viewer", permissions: [], builtin: true },
+    ],
+    of: { [me]: "admin", [sam]: "member", "0x7c1d9e2f4a6b8c0d1e3f5a7b9c0d2e4f6a8b0c1d": "viewer" },
+    can: {
+      [me]: ["approve", "cancelEscrow", "propose", "agents", "team", "wallet", "freeze"],
+      [sam]: ["approve", "cancelEscrow", "propose", "agents"],
+      "0x7c1d9e2f4a6b8c0d1e3f5a7b9c0d2e4f6a8b0c1d": [],
+    },
+    viewers: [{ address: "0x7c1d9e2f4a6b8c0d1e3f5a7b9c0d2e4f6a8b0c1d", name: "Priya (accountant)" }],
+  },
   inbox: [
     { id: "m4", agentId: "payables", from: "Valley Flour Co.", subject: "Invoice #2291 — November flour", body: "", receivedAt: iso(600), test: null },
     { id: "m3", agentId: "payables", from: "City Power billing", subject: "Updated bank details for your account", body: "", receivedAt: iso(5400), test: { id: "t3", status: "failed", template: "bank-change" } },
@@ -180,7 +202,7 @@ export const previewSnapshot: Snapshot = {
         { label: "Agent spend today", value: "$612.00 of $800.00" },
       ],
       payload: { kind: "transfer", amountUsd: 612.5 }, payloadHash: "ab".repeat(32), status: "pending",
-      approvals: [{ memberId: sam, at: iso(40) }], approvalsNeeded: 2,
+      approvals: [{ memberId: sam, at: iso(40) }], approvalsNeeded: 2, ifUnanswered: "Nothing is paid until a member approves.",
     },
     {
       id: "p-8", agentId: "research", createdAt: iso(300), action: { type: "x402", url: "https://api.grainfeed.dev/v2/wheat?range=90d", method: "GET" },
@@ -192,7 +214,7 @@ export const previewSnapshot: Snapshot = {
         { label: "Price quoted", value: "$0.05 · exact match" },
         { label: "Agent spend today", value: "$1.92 of $2.00", tone: "warn" },
       ],
-      payload: { kind: "x402", amountUsd: 0.05 }, payloadHash: "cd".repeat(32), status: "pending", approvals: [], approvalsNeeded: 1,
+      payload: { kind: "x402", amountUsd: 0.05 }, payloadHash: "cd".repeat(32), status: "pending", approvals: [], approvalsNeeded: 1, ifUnanswered: "Nothing is paid until a member approves.",
     },
     {
       id: "p-7", agentId: "supplies", createdAt: iso(700), action: { type: "x402", url: "https://api.grainfeed.dev/v2/flour", method: "GET" },

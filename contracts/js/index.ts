@@ -15,6 +15,7 @@ export const Op = {
   AddRule: 0, RemoveRule: 1, SetPayee: 2, RemovePayee: 3, SetAgent: 4, RemoveAgent: 5,
   AddDomain: 6, RemoveDomain: 7, SetThreshold: 8, Freeze: 9, Unfreeze: 10, AddMember: 11, RemoveMember: 12,
   SetTimelock: 13, SetCoreTimelock: 14, Upgrade: 15, SetLevel: 16, SetLevelLimits: 17,
+  SetRole: 18, SetRolePerms: 19, SetStructure: 20,
 } as const;
 export type OpName = keyof typeof Op;
 export const OP_NAMES = Object.keys(Op) as OpName[];
@@ -23,7 +24,9 @@ export const opName = (n: number): OpName => OP_NAMES[n];
 export const Outcome = { Allow: 0, Deny: 1, Approval: 2 } as const;
 export const OUTCOME_NAMES = ["allow", "deny", "approval"] as const;
 export const STATUS_NAMES = ["none", "open", "queued", "executed", "defeated", "cancelled"] as const;
-export const Kind = { Tighten: 0, Propose: 1, Vote: 2 } as const;
+export const Kind = { Tighten: 0, Propose: 1, Vote: 2, Manage: 3 } as const;
+/** Team-role changes: signed with Kind.Manage and applied at once by a member with "team". */
+export const isRoleOp = (op: OpName | number) => (typeof op === "number" ? op : Op[op]) >= Op.SetRole;
 
 // ---------------------------------------------------------------- trust levels (v3)
 
@@ -77,7 +80,11 @@ export type Change =
   | { op: "SetCoreTimelock"; seconds: number }
   | { op: "Upgrade"; implementation: Address }
   | { op: "SetLevel"; agent: string; level: number; reason: string }
-  | { op: "SetLevelLimits"; level: number; perPaymentUsd: number; dailyUsd: number };
+  | { op: "SetLevelLimits"; level: number; perPaymentUsd: number; dailyUsd: number }
+  | { op: "SetRole"; member: Address; role: number }
+  /** `permissions` as bits; DELETE_ROLE deletes a custom role. */
+  | { op: "SetRolePerms"; role: number; permissions: number }
+  | { op: "SetStructure"; structure: Structure };
 
 const RULE = [
   { type: "bytes32" }, { type: "uint8" }, { type: "bytes32" }, { type: "string" }, { type: "string" }, { type: "uint256" },
@@ -124,6 +131,12 @@ export function encodeChange(c: Change): { op: number; data: Hex } {
       return { op, data: encodeAbiParameters(LEVEL, [toBytes32(c.agent), c.level, c.reason]) };
     case "SetLevelLimits":
       return { op, data: encodeAbiParameters(LIMITS, [c.level, toMicro(c.perPaymentUsd), toMicro(c.dailyUsd)]) };
+    case "SetRole":
+      return { op, data: encodeAbiParameters([{ type: "address" }, { type: "uint8" }], [c.member, c.role]) };
+    case "SetRolePerms":
+      return { op, data: encodeAbiParameters([{ type: "uint8" }, { type: "uint16" }], [c.role, c.permissions]) };
+    case "SetStructure":
+      return { op, data: encodeAbiParameters([{ type: "uint8" }], [c.structure === "tree" ? 1 : 0]) };
   }
 }
 
@@ -178,6 +191,16 @@ export function decodeChange(op: number, data: Hex): Change {
       const [level, per, daily] = decodeAbiParameters(LIMITS, data);
       return { op: name, level, perPaymentUsd: fromMicro(per), dailyUsd: fromMicro(daily) };
     }
+    case "SetRole": {
+      const [member, role] = decodeAbiParameters([{ type: "address" }, { type: "uint8" }], data);
+      return { op: name, member, role };
+    }
+    case "SetRolePerms": {
+      const [role, permissions] = decodeAbiParameters([{ type: "uint8" }, { type: "uint16" }], data);
+      return { op: name, role, permissions };
+    }
+    case "SetStructure":
+      return { op: name, structure: decodeAbiParameters([{ type: "uint8" }], data)[0] === 1 ? "tree" : "flat" };
     default:
       throw new Error(`unknown op ${op}`);
   }
@@ -187,6 +210,7 @@ export interface Labels {
   member?: (a: string) => string | undefined;
   agent?: (id: string) => string | undefined;
   payee?: (a: string) => string | undefined;
+  role?: (id: number) => string | undefined;
 }
 
 const usd = (n: number) => (isNoLimit(n) ? "no limit" : `$${n > 0 && n < 0.01 ? String(n) : n.toFixed(2)}`);
@@ -221,6 +245,11 @@ export function describeScope(scope: string, target: string, n: { agent?: (id: s
       return "running outside the sandbox";
     case "escrow":
       return `escrow: payments wait ${waitText(Number(target))} before release, and any member can cancel them`;
+    case "setting": {
+      const s = sub && isSettingName(sub) ? SETTINGS[sub] : null;
+      const v = s ? parseSetting(sub as SettingName, target) : null;
+      return s && v !== null ? `${s.label}: ${s.text(v)}` : `setting ${sub ?? ""}`;
+    }
     default:
       return `${scope}${target ? ` → ${target}` : ""}`;
   }
@@ -231,11 +260,17 @@ export function describeChange(c: Change, l: Labels = {}): string {
   const m = (a: string) => l.member?.(a.toLowerCase()) ?? short(a);
   const ag = (id: string) => l.agent?.(id) ?? id;
   const p = (a: string) => l.payee?.(a.toLowerCase()) ?? short(a);
+  const r = (id: number) => l.role?.(id) ?? roleName(id);
   switch (c.op) {
     case "AddRule": {
       if (!c.scope) return `Re-enable default rule ${c.id}`;
       if (c.scope === "escrow") {
         return `Hold payments of ${usd(c.maxUsd ?? 0)} or more in escrow for ${waitText(Number(c.target))}${c.agent ? ` for ${ag(c.agent)}` : ""}; any member can cancel before release (${c.id})`;
+      }
+      if (c.scope.startsWith("setting:")) {
+        const name = c.scope.slice("setting:".length);
+        const v = isSettingName(name) ? parseSetting(name, c.target ?? "") : null;
+        return isSettingName(name) && v !== null ? `Set ${SETTINGS[name].label.toLowerCase()} to ${SETTINGS[name].text(v)}` : `Change setting ${name}`;
       }
       const who = c.agent ? ag(c.agent) : "every agent";
       return `${c.outcome === "Allow" ? "Allow" : c.outcome === "Deny" ? "Block" : "Require approval for"} ${describeScope(c.scope, c.target ?? "", { agent: ag, payee: p })} for ${who}${c.outcome === "Allow" && c.maxUsd ? ` up to ${usd(c.maxUsd)}` : ""} (${c.id})`;
@@ -259,7 +294,124 @@ export function describeChange(c: Change, l: Labels = {}): string {
     case "SetLevelLimits": return isNoLimit(c.perPaymentUsd) && isNoLimit(c.dailyUsd)
       ? `Remove ${levelLabel(c.level)} payment limits (no limit)`
       : `Set ${levelLabel(c.level)} payment limits to ${usd(c.perPaymentUsd)} per payment, ${usd(c.dailyUsd)} per day`;
+    case "SetRole": return c.role === ROLE_DEFAULT ? `Reset ${m(c.member)}'s role` : `Make ${m(c.member)} ${r(c.role)}`;
+    case "SetRolePerms": return c.permissions === DELETE_ROLE
+      ? `Delete the ${r(c.role)} role`
+      : `Set what ${r(c.role)} can do: ${permissionList(c.permissions).map((x) => PERMISSIONS[x].toLowerCase()).join(", ") || "nothing"}`;
+    case "SetStructure": return c.structure === "tree" ? "Use a tree: an Admin sets each member's role" : "Use a flat team: every member can do everything";
   }
+}
+
+// ---------------------------------------------------------------- team roles (Dharma v4)
+// On Dharma: a member with "team" changes them at once (Kind.Manage). They limit what a member may do;
+// every member can always vote, and who's a member still changes only by vote. Role names, and
+// Viewers (people who can look but aren't members), are kept by the Gatekeeper.
+
+export const PERMISSIONS = {
+  approve: "Approve or deny held actions",
+  cancelEscrow: "Cancel payments in escrow",
+  propose: "Propose changes",
+  agents: "Manage agents",
+  team: "Manage the team",
+  wallet: "Manage the wallet",
+  freeze: "Freeze all agents",
+} as const;
+export type Permission = keyof typeof PERMISSIONS;
+export const isPermission = (p: unknown): p is Permission => typeof p === "string" && Object.prototype.hasOwnProperty.call(PERMISSIONS, p);
+
+export interface RoleDef {
+  id: string;
+  name: string;
+  permissions: Permission[];
+  /** Admin, Member and Viewer: can't be deleted or renamed (only Member's permissions can change). */
+  builtin?: boolean;
+}
+
+export const ALL_PERMISSIONS = Object.keys(PERMISSIONS) as Permission[];
+export const ADMIN_ROLE: RoleDef = { id: "admin", name: "Admin", permissions: ALL_PERMISSIONS, builtin: true };
+export const MEMBER_ROLE: RoleDef = { id: "member", name: "Member", permissions: ["approve", "cancelEscrow", "propose", "agents"], builtin: true };
+export const VIEWER_ROLE: RoleDef = { id: "viewer", name: "Viewer", permissions: [], builtin: true };
+
+/** Dharma's bit for each permission. */
+export const PERMISSION_BITS: Record<Permission, number> = {
+  approve: 1, cancelEscrow: 2, propose: 4, agents: 8, team: 16, wallet: 32, freeze: 64,
+};
+export const ALL_PERMISSION_BITS = 127;
+export const permissionBits = (ps: readonly Permission[]) => ps.reduce((b, x) => b | PERMISSION_BITS[x], 0);
+export const permissionList = (bits: number) => ALL_PERMISSIONS.filter((x) => (bits & PERMISSION_BITS[x]) !== 0);
+
+export type Structure = "flat" | "tree";
+export const STRUCTURES: Record<Structure, { label: string; text: string }> = {
+  flat: { label: "Flat", text: "Every member can do everything. For a small team of builders." },
+  tree: { label: "Tree", text: "An Admin sets each member's role. Members can't freeze or manage the team or wallet." },
+};
+/** Dharma's role ids: 0 = the structure's default, 1 = Admin, 2 = Member, 3..15 custom. */
+export const ROLE_DEFAULT = 0;
+export const ROLE_ADMIN = 1;
+export const ROLE_MEMBER = 2;
+export const MAX_ROLE = 15;
+export const DELETE_ROLE = 0x8000;
+const ROLE_EXISTS = 0x4000;
+/** The console's id for a Dharma role id. */
+export const roleKey = (n: number) => (n === ROLE_ADMIN ? "admin" : n === ROLE_MEMBER ? "member" : `role-${n}`);
+/** Dharma's role id for a console id (null for Viewer or an unknown id). */
+export const roleNumber = (key: string): number | null => {
+  if (key === "admin") return ROLE_ADMIN;
+  if (key === "member") return ROLE_MEMBER;
+  const m = /^role-(\d+)$/.exec(key);
+  const n = m ? Number(m[1]) : NaN;
+  return n > ROLE_MEMBER && n <= MAX_ROLE ? n : null;
+};
+const roleName = (n: number) => (n === ROLE_ADMIN ? "Admin" : n === ROLE_MEMBER ? "Member" : n === ROLE_DEFAULT ? "the default role" : `role ${n}`);
+/** Dharma's `rolePerms()` (16 bits per role id) as the roles that exist, by id. */
+export function decodeRolePerms(packed: bigint): Map<number, number> {
+  const out = new Map<number, number>([[ROLE_ADMIN, ALL_PERMISSION_BITS]]);
+  for (let r = ROLE_MEMBER; r <= MAX_ROLE; r++) {
+    const v = Number((packed >> BigInt(16 * r)) & 0xffffn);
+    if (v & ROLE_EXISTS) out.set(r, v & ALL_PERMISSION_BITS);
+  }
+  return out;
+}
+
+/** What a console signs once to start a session, so the Gatekeeper knows who each request is from. */
+export const consoleSessionTypedData = (member: Address, issuedAt: bigint) => ({
+  domain: { name: "Karuna console", version: "1" },
+  types: { Session: [{ name: "member", type: "address" }, { name: "issuedAt", type: "uint256" }] },
+  primaryType: "Session" as const,
+  message: { member, issuedAt },
+});
+
+// ------------------------------------------------------------------ org settings
+// Kept on Dharma as rules (scope "setting:<name>", the value as the rule's target) and voted like
+// any rule. The newest active rule for a setting wins; with none, the Gatekeeper's default applies.
+
+interface SettingSpec { label: string; min: number; max: number; text: (v: number) => string }
+export const SETTINGS = {
+  drillsPerDay: { label: "Drills per agent per day", min: 0, max: 20, text: (v: number) => (v === 0 ? "off" : `${v} a day`) },
+  drillWindowMinutes: { label: "Drill pass window", min: 5, max: 1440, text: (v: number) => waitText(v * 60) },
+  holdSeconds: { label: "Approval hold", min: 30, max: 3600, text: (v: number) => waitText(v) },
+  swarmAgents: { label: "Swarm Stopper", min: 0, max: 20, text: (v: number) => (v === 0 ? "off" : `${v} agents`) },
+  swarmWindowSeconds: { label: "Swarm Stopper window", min: 10, max: 3600, text: (v: number) => waitText(v) },
+  requireGvisor: { label: "Require gVisor", min: 0, max: 1, text: (v: number) => (v ? "on" : "off") },
+} satisfies Record<string, SettingSpec>;
+export type SettingName = keyof typeof SETTINGS;
+export type SettingValues = Record<SettingName, number>;
+
+export const isSettingName = (n: string): n is SettingName => Object.prototype.hasOwnProperty.call(SETTINGS, n);
+
+/** A setting rule's target as a whole number within the setting's range, or null. */
+export function parseSetting(name: SettingName, target: string): number | null {
+  if (!/^\d+$/.test(target.trim())) return null;
+  const v = Number(target);
+  const s = SETTINGS[name];
+  return v >= s.min && v <= s.max ? v : null;
+}
+
+/** The change that sets one setting: a new rule (Dharma won't re-add an active rule id). */
+export function settingChange(name: SettingName, value: number): Change {
+  if (parseSetting(name, String(value)) === null) throw new Error(`${SETTINGS[name].label} must be a whole number from ${SETTINGS[name].min} to ${SETTINGS[name].max}`);
+  const id = `set-${name.slice(0, 18)}-${Math.random().toString(36).slice(2, 8)}`;
+  return { op: "AddRule", id, outcome: "Approval", scope: `setting:${name}`, target: String(value) };
 }
 
 /** 90 -> "90s", 3600 -> "1h", 86400 -> "24h", 0 -> "no wait". */

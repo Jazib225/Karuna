@@ -30,8 +30,23 @@ export interface WalletBackend {
   transfer(from: string, to: string, amountUsd: number, idempotencyKey: string): Promise<{ txRef: string; raw: unknown }>;
   balances(address: string): Promise<{ usdc: string; gateway: string | null }>;
   listWallets(): Promise<string[]>;
-  /** Move USDC from the wallet into its Circle Gateway balance (what nanopayments spend). */
-  depositToGateway?(address: string, amountUsd: number): Promise<{ txRef: string | null }>;
+  /** Move USDC from the wallet into its Circle Gateway balance, which x402 purchases draw on. */
+  depositGateway?(from: string, amountUsd: number): Promise<{ txRef: string; raw: unknown }>;
+  /** Whether the Circle CLI is here and logged in to testnet (and as whom). */
+  loginStatus?(): Promise<WalletLoginStatus>;
+  /** Email a one-time code for a testnet login. A first login also creates the account's wallets. */
+  loginStart?(email: string): Promise<{ requestId: string }>;
+  /** Finish the login with the code from the email. */
+  loginFinish?(requestId: string, code: string): Promise<{ email: string | null }>;
+  /** Ask Circle's testnet faucet for USDC (one of this account's wallets). */
+  fundTestnet?(address: string): Promise<void>;
+}
+
+export interface WalletLoginStatus {
+  cli: boolean;
+  loggedIn: boolean;
+  email: string | null;
+  expiresIn: string | null;
 }
 
 export class WalletError extends Error {
@@ -173,7 +188,7 @@ export class CircleCliWallet implements WalletBackend {
    * (GATEWAY_ALLOWANCE_USD), and each deposit is a single `deposit` call while that lasts. Gateway
    * only ever pulls from the wallet that calls `deposit`, so the approval can't be used by anyone else.
    */
-  async depositToGateway(address: string, amountUsd: number) {
+  async depositGateway(address: string, amountUsd: number): Promise<{ txRef: string; raw: unknown }> {
     const [decimals, allowance] = await Promise.all([
       this.rpc.readContract({ address: USDC_TOKEN, abi: erc20Abi, functionName: "decimals" }),
       this.rpc.readContract({ address: USDC_TOKEN, abi: erc20Abi, functionName: "allowance", args: [address as Address, this.gateway] }),
@@ -193,7 +208,7 @@ export class CircleCliWallet implements WalletBackend {
     }
     // The deposit itself. Not retried another way if it fails: it may still have gone through.
     const ref = await this.execute(address, this.gateway, "depositFor(address,address,uint256)", [USDC_TOKEN, owner, value.toString()]);
-    return { txRef: ref };
+    return { txRef: ref ?? "submitted", raw: { method: "depositFor", owner } };
   }
 
   private backingKeys = new Map<string, string>();
@@ -227,12 +242,41 @@ export class CircleCliWallet implements WalletBackend {
       200_000,
     );
     const ref = d.txHash ?? d.transactionHash ?? d.hash ?? d.depositTxHash ?? (d.transaction as { hash?: string; id?: string } | undefined)?.hash ?? d.id;
-    return { txRef: ref ? String(ref) : null };
+    return { txRef: ref ? String(ref) : "submitted", raw: d };
   }
 
   async listWallets(): Promise<string[]> {
     const d = await this.run(["wallet", "list", "--type", "agent", "--chain", WALLET_CHAIN], 30_000);
     const wallets = (d.wallets ?? []) as { address?: string }[];
     return [...new Set(wallets.map((w) => String(w.address ?? "").toLowerCase()).filter(Boolean))];
+  }
+
+  async loginStatus(): Promise<WalletLoginStatus> {
+    try {
+      const d = await this.run(["wallet", "status", "--type", "agent"], 30_000);
+      const t = (d.testnet ?? {}) as { email?: string; tokenStatus?: string; expiresIn?: string };
+      const loggedIn = t.tokenStatus === "VALID";
+      return { cli: true, loggedIn, email: loggedIn ? t.email ?? null : null, expiresIn: loggedIn ? t.expiresIn ?? null : null };
+    } catch (e) {
+      if (/ENOENT|not recognized|not found/i.test(e instanceof Error ? e.message : String(e))) return { cli: false, loggedIn: false, email: null, expiresIn: null };
+      throw e;
+    }
+  }
+
+  async loginStart(email: string) {
+    const d = await this.run(["wallet", "login", email, "--type", "agent", "--testnet", "--init"], 60_000);
+    // The CLI says what to run next: "circle wallet login --request <id> --otp <code>".
+    const id = /--request\s+(\S+)/.exec(String(d.message ?? ""))?.[1];
+    if (!id) throw new WalletError("Circle didn't start the login. Try again.");
+    return { requestId: id };
+  }
+
+  async loginFinish(requestId: string, code: string) {
+    const d = await this.run(["wallet", "login", "--request", requestId, "--otp", code, "--type", "agent", "--testnet"], 60_000);
+    return { email: /Logged in as (\S+)/.exec(String(d.message ?? ""))?.[1] ?? null };
+  }
+
+  async fundTestnet(address: string) {
+    await this.run(["wallet", "fund", "--address", address, "--chain", WALLET_CHAIN], 60_000);
   }
 }

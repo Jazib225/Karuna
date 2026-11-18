@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPublicClient, createTestClient, createWalletClient, defineChain, http, type Address, type PublicClient } from "viem";
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
-import { Kind, actionTypedData, encodeChange, type Change } from "@prekaruna/dharma";
+import { Kind, actionTypedData, encodeChange, settingChange, type Change } from "@prekaruna/dharma";
 import { Store } from "../src/store.ts";
 import { Gatekeeper, type SignedAction } from "../src/gatekeeper.ts";
 import { ViemChainWriter } from "../src/chain.ts";
@@ -175,6 +175,25 @@ describe("pivot: agents converging on the same new target", () => {
     expect(gk.isFrozen()).toMatchObject({ by: "Tripwire" });
     expect(gk.snapshot().swarm.trips[0].reason).toMatch(/2 agents went after the same new target/);
   }, 30_000);
+
+  it("the team can vote the Swarm Stopper's trigger up, or off; it applies once the vote passes", async () => {
+    await gk.submitAction(await sign(Kind.Propose, settingChange("swarmAgents", 3)));
+    expect(gk.settings().swarmAgents).toBe(2); // not until the vote passes
+    await passTimelock();
+    expect(gk.snapshot().swarm.agentsToTrip).toBe(3);
+    await gk.propose(research, { type: "transfer", to: STRANGER, amountUsd: 1 });
+    await gk.propose(supplies, { type: "transfer", to: STRANGER, amountUsd: 1 });
+    expect(gk.isFrozen()).toBeNull(); // two isn't enough any more
+    await gk.propose(bills, { type: "transfer", to: STRANGER, amountUsd: 1 });
+    expect(gk.isFrozen()).toMatchObject({ by: "Tripwire" });
+  }, 60_000);
+
+  it("with the Swarm Stopper voted off, agents converging on a new target don't freeze anyone", async () => {
+    await gk.submitAction(await sign(Kind.Propose, settingChange("swarmAgents", 0)));
+    await passTimelock();
+    for (const a of [research, supplies, bills]) await gk.propose(a, { type: "transfer", to: STRANGER, amountUsd: 1 });
+    expect(gk.isFrozen()).toBeNull();
+  }, 60_000);
 
   it("the same agent retrying, or several agents paying a known payee, is not a swarm", async () => {
     await gk.propose(research, { type: "transfer", to: STRANGER, amountUsd: 1 });

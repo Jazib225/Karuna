@@ -8,10 +8,11 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { remoteInvite } from "./invite.ts";
 import { timingSafeEqual } from "node:crypto";
 import { defaultRules } from "@prekaruna/engine";
-import { ConfigError } from "./config.ts";
+import { ConfigError, isSetUp } from "./config.ts";
 import { isTransient, scrub } from "./chain.ts";
-import { GatekeeperError, type AgentAction, type Gatekeeper, type SignedAction, type SignedDecision } from "./gatekeeper.ts";
-import type { WalletBackend } from "./wallet.ts";
+import { GatekeeperError, SESSION_ENDED, type AgentAction, type Gatekeeper, type SignedAction, type SignedDecision } from "./gatekeeper.ts";
+import type { Permission } from "@prekaruna/dharma";
+import { WalletError, type WalletBackend } from "./wallet.ts";
 import type { EgressProxy } from "./proxy.ts";
 import type { SecretStore } from "./secrets.ts";
 import type { Accounts } from "./accounts.ts";
@@ -48,7 +49,8 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
 }
 
 function fail(res: ServerResponse, e: unknown) {
-  if (e instanceof GatekeeperError) return send(res, e.status, { error: e.message });
+  // session: true tells the console to sign a new session and try once more.
+  if (e instanceof GatekeeperError) return send(res, e.status, { error: e.message, ...(e.message === SESSION_ENDED ? { session: true } : {}) });
   if (e instanceof ConfigError) return send(res, 400, { error: e.message });
   if (isTransient(e)) return send(res, 503, { error: "The Arc RPC is busy (rate limited). Try again in a moment — or set ARC_RPC_URL to your QuickNode endpoint." });
   console.error("gatekeeper error:", scrub(e));
@@ -60,6 +62,42 @@ const safeEq = (a: string, b: string) => {
   const y = Buffer.from(b);
   return x.length === y.length && timingSafeEqual(x, y);
 };
+
+/**
+ * Console requests that need a role's permission, checked against the request's console session.
+ * Signed member actions (votes, approvals, escrow cancels) are checked against their signer instead,
+ * in the Gatekeeper. Reads, sign-in, joining and the relay's reports need no role.
+ */
+/** A Circle CLI call whose failure the person can act on (a wrong code, the faucet's limit): 400 with Circle's words. */
+async function walletCall<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    if (e instanceof WalletError) throw new GatekeeperError(e.message, 400);
+    throw e;
+  }
+}
+
+const GATED: [method: string, path: RegExp, perm: Permission][] = [
+  ["POST", /^\/wallet\/gateway-deposit$/, "wallet"],
+  ["POST", /^\/devices\/[\w-]+\/(approve|deny|revoke)$/, "agents"],
+  ["POST", /^\/connectors\/tools\/.+\/accept$/, "agents"],
+  ["POST", /^\/agents\/(draft|build|prepare)$/, "agents"],
+  ["PATCH", /^\/agents\/[\w-]+\/built$/, "agents"],
+  ["POST", /^\/agents\/[\w-]+\/(run|rotate-token)$/, "agents"],
+  ["POST", /^\/runs\/[\w-]+\/(stop|undo)$/, "agents"],
+  ["POST", /^\/inbox$/, "agents"],
+  ["POST", /^\/traps(\/[\w-]+\/plant)?$/, "agents"],
+  ["POST", /^\/shield\/test$/, "agents"],
+  ["POST", /^\/keys$/, "agents"],
+  ["DELETE", /^\/keys\/[a-z0-9-]+$/, "agents"],
+  ["POST", /^\/sandbox\/[\w-]+\/stop$/, "agents"],
+  ["POST", /^\/(rules\/draft|dharma\/code)$/, "propose"],
+  ["POST", /^\/(pause|resume)$/, "freeze"],
+  ["PATCH", /^\/settings$/, "team"],
+  ["POST", /^\/invites$/, "team"],
+  ["DELETE", /^\/invites\/inv_[\w-]+$/, "team"],
+];
 
 // ---------------------------------------------------------------- agent API
 
@@ -215,6 +253,14 @@ export function consoleApi(
         }
         return send(res, 200, walletCache.value);
       }
+      let m0: RegExpMatchArray | null;
+      if (method === "GET" && path === "/wallets/status") {
+        if (!wallet.loginStatus) return send(res, 200, { cli: true, loggedIn: true, email: null, expiresIn: null });
+        return send(res, 200, await wallet.loginStatus());
+      }
+      if (method === "GET" && (m0 = path.match(/^\/wallets\/(0x[0-9a-fA-F]{40})\/balance$/))) {
+        return send(res, 200, await wallet.balances(m0[1].toLowerCase()));
+      }
       if (method === "GET" && path === "/wallets/detect") {
         try {
           return send(res, 200, { wallets: await wallet.listWallets() });
@@ -226,12 +272,48 @@ export function consoleApi(
       const body = method === "GET" || method === "DELETE" ? {} : await readBody(req);
       let m: RegExpMatchArray | null;
 
-      // Add funds to Gateway (from the org's Circle wallet). Balances are re-read right after.
+      // Who is asking (their console session), and whether their role allows it.
+      const me = gk.sessionMember(String(req.headers["x-karuna-session"] ?? "") || undefined);
+      const gate = GATED.find(([gm, gp]) => gm === method && gp.test(path));
+      if (gate) gk.requirePermission(me, gate[2]);
+
+      // The Circle wallet, from the console (no terminal): sign in with an emailed code, and get test
+      // USDC from Circle's faucet. Before setup anyone at this machine can; after, it needs "wallet".
+      if (method === "POST" && path.startsWith("/wallets/")) {
+        if (isSetUp(gk.org) && path !== "/wallets/fund") gk.requirePermission(me, "wallet");
+        if (path === "/wallets/login") {
+          const email = String(body.email ?? "").trim();
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 200) throw new GatekeeperError("Enter a valid email address", 400);
+          if (!wallet.loginStart) throw new GatekeeperError("This wallet can't sign in from the console", 501);
+          return send(res, 200, await walletCall(() => wallet.loginStart!(email)));
+        }
+        if (path === "/wallets/login/verify") {
+          const requestId = String(body.requestId ?? "");
+          const code = String(body.code ?? "").trim().toUpperCase();
+          if (!/^[\w-]{4,200}$/.test(requestId)) throw new GatekeeperError("Start again: send a new code", 400);
+          if (!/^([A-Z0-9]{3}-)?\d{6}$/.test(code)) throw new GatekeeperError("Enter the 6-digit code from the email", 400);
+          if (!wallet.loginFinish) throw new GatekeeperError("This wallet can't sign in from the console", 501);
+          const r = await walletCall(() => wallet.loginFinish!(requestId, code));
+          walletCache = null;
+          return send(res, 200, { ...r, wallets: await wallet.listWallets().catch(() => []) });
+        }
+        if (path === "/wallets/fund") {
+          const address = String(body.address ?? "").toLowerCase();
+          if (!/^0x[0-9a-f]{40}$/.test(address)) throw new GatekeeperError("Pick a wallet", 400);
+          if (!wallet.fundTestnet) throw new GatekeeperError("This wallet can't use the faucet", 501);
+          await walletCall(() => wallet.fundTestnet!(address));
+          walletCache = null;
+          return send(res, 200, { ok: true });
+        }
+      }
+
+      if (method === "POST" && path === "/session") return send(res, 200, await gk.startConsoleSession(body));
+      if (method === "POST" && path === "/viewers") return send(res, 200, (gk.addViewer(me, body.address), { ok: true }));
+      if (method === "DELETE" && (m = path.match(/^\/viewers\/(0x[0-9a-fA-F]{40})$/))) return send(res, 200, (gk.removeViewer(me, m[1]), { ok: true }));
+
       if (method === "POST" && path === "/wallet/gateway-deposit") {
-        const addr = gk.org.wallet?.address;
-        const have = addr ? Number((await wallet.balances(addr)).usdc) : undefined;
-        const r = await gk.depositToGateway(body.amount, have);
-        walletCache = null;
+        const r = await gk.depositGateway((body as { amountUsd?: unknown }).amountUsd);
+        walletCache = null; // show the new balances on the next read
         return send(res, 200, r);
       }
 
@@ -292,7 +374,7 @@ export function consoleApi(
       if (method === "POST" && path === "/pause") return send(res, 200, { paused: gk.pause(String(body.by ?? "console")) });
       if (method === "POST" && path === "/resume") return send(res, 200, { paused: gk.resume(String(body.by ?? "console")) });
       // Invite links: make and revoke yours; use someone else's (this Gatekeeper reaches their Karuna).
-      if (method === "POST" && path === "/invites") return send(res, 200, gk.createInvite());
+      if (method === "POST" && path === "/invites") return send(res, 200, gk.createInvite({ days: body.days, uses: body.uses }));
       if (method === "DELETE" && (m = path.match(/^\/invites\/(inv_[\w-]+)$/))) return send(res, 200, (gk.revokeInvite(m[1]), { ok: true }));
       if (method === "POST" && path === "/invites/lookup") return send(res, 200, await remoteInvite(body.link, ""));
       if (method === "POST" && path === "/invites/send") return send(res, 200, await remoteInvite(body.link, "/request", { address: body.address, name: body.name, signature: body.signature }));

@@ -16,7 +16,8 @@ import {
   type Address, type Chain, type Hex, type PublicClient, type WalletClient,
 } from "viem";
 import { arcTestnet } from "viem/chains";
-import { DHARMA_ABI, DHARMA_PROXY_ABI, MAX_LEVEL, OUTCOME_NAMES, STATUS_NAMES, decodeChange, fromBytes32, fromMicro, type Change, type LevelLimits } from "@prekaruna/dharma";
+import { DHARMA_ABI, DHARMA_PROXY_ABI, MAX_LEVEL, OUTCOME_NAMES, STATUS_NAMES, decodeChange, fromBytes32, fromMicro, type Change, type LevelLimits, decodeRolePerms, type Structure
+} from "@prekaruna/dharma";
 import { DHARMA_BYTECODE, DHARMA_PROXY_BYTECODE } from "@prekaruna/dharma/bytecode";
 import type { OnchainRule } from "@prekaruna/engine";
 import { WALLET_CHAIN } from "./config.ts";
@@ -24,7 +25,9 @@ import { WALLET_CHAIN } from "./config.ts";
 export type WriteFn =
   | "tighten" | "propose" | "vote" | "execute" | "anchorLog" | "requestApproval" | "reportTestFailed"
   // v3
-  | "anchorWithRecord" | "reportTripwire" | "reportUnapprovedTransfer";
+  | "anchorWithRecord" | "reportTripwire" | "reportUnapprovedTransfer"
+  // v4
+  | "manage";
 
 export interface DeployArgs {
   firstMember: Address;
@@ -167,7 +170,7 @@ async function simulate(client: PublicClient, from: Address, contract: Address, 
  * Dharma.gatekeeper, the org's Circle wallet.
  */
 export const isMemberSigned = (fn: WriteFn, args: readonly unknown[]) =>
-  fn === "propose" || fn === "vote" || fn === "execute" || (fn === "tighten" && String(args[2] ?? "").toLowerCase() !== zeroAddress);
+  fn === "propose" || fn === "vote" || fn === "execute" || fn === "manage" || (fn === "tighten" && String(args[2] ?? "").toLowerCase() !== zeroAddress);
 
 /**
  * Member-signed writes go through `relay` (a plain key that only pays gas: about a second on Arc)
@@ -279,6 +282,9 @@ export interface OnchainPolicy {
   agents: { id: string; capUsd: number; level?: number }[]; // level: Dharma v3+
   /** What each trust level may pay (index = level). Null before Dharma v3. */
   levelLimits: LevelLimits[] | null;
+  /** Team roles (Dharma v4; null before): the structure, each role's permission bits by role id,
+   *  and each member's role id and permission bits (lowercase address keys). */
+  team: { structure: Structure; rolePerms: Record<number, number>; roles: Record<string, number>; perms: Record<string, number> } | null;
   domains: string[];
   proposals: OnchainProposal[];
   chainTime: number; // latest block timestamp, for timelock math
@@ -332,6 +338,21 @@ export async function readPolicy(client: PublicClient, address: Address, maxProp
     levelOf = new Map(lv[0].map((id, i) => [fromBytes32(id), Number(lv[1][i])]));
     levelLimits = limits.map((l) => ({ perPaymentUsd: fromMicro(l.perPaymentMicroUsd), dailyUsd: fromMicro(l.dailyMicroUsd) }));
   }
+  // Team roles (v4): the structure, every role, and each member's role and permissions.
+  let team: OnchainPolicy["team"] = null;
+  if (Number(codeVersion) >= 4) {
+    const [structure, packed, ...each] = await readMany<readonly [number, bigint, ...number[]]>(
+      client,
+      [{ functionName: "structure" }, { functionName: "rolePerms" }, ...members.flatMap((m) => [{ functionName: "roleOf", args: [m] }, { functionName: "permissionsOf", args: [m] }])],
+      address,
+    );
+    const t = { structure: (Number(structure) === 1 ? "tree" : "flat") as Structure, rolePerms: Object.fromEntries(decodeRolePerms(packed)), roles: {} as Record<string, number>, perms: {} as Record<string, number> };
+    members.forEach((m, i) => {
+      t.roles[m.toLowerCase()] = Number(each[2 * i]);
+      t.perms[m.toLowerCase()] = Number(each[2 * i + 1]);
+    });
+    team = t;
+  }
   const n = Number(count);
   const ids = Array.from({ length: Math.min(n, maxProposals) }, (_, i) => n - 1 - i);
   type RawProposal = { op: number; data: Hex; proposer: Address; createdAt: bigint; queuedAt: bigint; yes: number; no: number; status: number; core: boolean; eta: bigint };
@@ -375,6 +396,7 @@ export async function readPolicy(client: PublicClient, address: Address, maxProp
       return { id: a, capUsd: fromMicro(agents[1][i]), ...(levelOf ? { level: levelOf.get(a) ?? 0 } : {}) };
     }),
     levelLimits,
+    team,
     domains: [...domains],
     proposals: raw.map((p, i) => {
       let change: Change | null = null;

@@ -16,7 +16,7 @@ export function inviteTypedData(org: string, invite: string, member: Address, na
 
 export const inviteCode = (link: string) => link.trim().match(/\/invite\/(inv_[\w-]{8,40})\/?$/)?.[1] ?? null;
 
-export interface SentJoin { link: string; org: string; address: string; sentAt: string; status?: "pending" | "member" | "none" }
+export interface SentJoin { link: string; org: string; address: string; sentAt: string; status?: "pending" | "member" | "viewer" | "none" }
 const KEY = "karuna.joins.v1";
 
 function all(): SentJoin[] {
@@ -52,7 +52,7 @@ export async function sendJoin(me: Signer, link: string, org: string, name: stri
 }
 
 export async function joinStatus(j: SentJoin) {
-  const r = await api<{ status: "pending" | "member" | "none" }>("/invites/status", { link: j.link, address: j.address });
+  const r = await api<{ status: "pending" | "member" | "viewer" | "none" }>("/invites/status", { link: j.link, address: j.address });
   saveJoin({ ...j, status: r.status });
   return r.status;
 }

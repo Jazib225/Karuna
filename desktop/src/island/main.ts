@@ -16,6 +16,8 @@ interface Decision { type: "decision"; id: string; action_type: string; summary:
 interface ApprovalRequested {
   type: "approval_requested"; id: string; action_type: string; payload: Record<string, unknown>; payload_hash: string;
   reversible: boolean; agent_reason: string | null; expires_at: string | null; agent?: string;
+  /** Why Karuna held it (the rule that matched) and what happens if no member answers. */
+  why?: string | null; if_unanswered?: string | null;
 }
 type GkEvent =
   | Decision
@@ -345,6 +347,8 @@ function approvalCard(a: ApprovalRequested): HTMLElement {
   }
   box.append(head);
   if (fact) box.append(el("div", "appr-fact", fact));
+  if (a.why) box.append(el("div", "appr-why", `Held: ${a.why}`));
+  if (a.if_unanswered) box.append(el("div", "appr-unanswered", a.if_unanswered));
 
   // The agent's own explanation: shown short and quiet, and marked as its words, not Karuna's.
   if (a.agent_reason) {
