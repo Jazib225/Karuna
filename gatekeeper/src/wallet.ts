@@ -5,9 +5,10 @@
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
-import { formatUnits, erc20Abi, createPublicClient, http, type Address } from "viem";
+import { formatUnits, parseUnits, erc20Abi, createPublicClient, http, type Address } from "viem";
 import { arcTestnet } from "viem/chains";
 import { USDC_TOKEN, WALLET_CHAIN } from "./config.ts";
+import { randomUUID } from "node:crypto";
 
 export interface X402Quote {
   amountUsd: number;
@@ -79,6 +80,9 @@ function extractJson(text: string): Record<string, unknown> | null {
     return null;
   }
 }
+
+/** How much Gateway may pull from the wallet before another approval (one approval covers many deposits). */
+const GATEWAY_ALLOWANCE_USD = Number(process.env.KARUNA_GATEWAY_ALLOWANCE_USD ?? 100);
 
 export class CircleCliWallet implements WalletBackend {
   private readonly bin: string;
@@ -159,16 +163,6 @@ export class CircleCliWallet implements WalletBackend {
     return { txRef: ref ? String(ref) : "submitted", raw: d };
   }
 
-  async depositGateway(from: string, amountUsd: number) {
-    // "direct": an on-chain deposit on Arc itself; the balance stays on Arc for `services pay`.
-    const d = await this.run(
-      ["gateway", "deposit", "--amount", String(amountUsd), "--address", from, "--chain", WALLET_CHAIN, "--method", "direct", "--timeout", "150"],
-      180_000,
-    );
-    const ref = d.txHash ?? d.transactionHash ?? d.hash ?? d.id ?? d.transactionId ?? (d.transaction as { id?: string })?.id;
-    return { txRef: ref ? String(ref) : "submitted", raw: d };
-  }
-
   async balances(address: string) {
     const [raw, decimals] = await Promise.all([
       this.rpc.readContract({ address: USDC_TOKEN, abi: erc20Abi, functionName: "balanceOf", args: [address as Address] }),
@@ -178,10 +172,77 @@ export class CircleCliWallet implements WalletBackend {
     try {
       const g = await this.run(["gateway", "balance", "--address", address, "--chain", WALLET_CHAIN], 30_000);
       gateway = String(g.total ?? "0");
+      if (/^0x[0-9a-fA-F]{40}$/.test(String(g.backingEOA ?? ""))) this.backingKeys.set(address.toLowerCase(), String(g.backingEOA));
     } catch {
       gateway = null; // CLI not logged in or Gateway unavailable; on-chain balance still shown
     }
     return { usdc: formatUnits(raw, decimals), gateway };
+  }
+
+  /** Circle Gateway's wallet contract on Arc testnet (where deposits go). */
+  private gateway: Address = (process.env.KARUNA_GATEWAY_WALLET ?? "0x0077777d7EBA4688BDeF3E311b846F25870A19B9") as Address;
+
+  /**
+   * Add funds to Gateway in one transaction. Circle's `gateway deposit` sends two every time (an
+   * approval, then the deposit, ~13s). Here the wallet approves Gateway once for a standing amount
+   * (GATEWAY_ALLOWANCE_USD), and each deposit is a single `deposit` call while that lasts. Gateway
+   * only ever pulls from the wallet that calls `deposit`, so the approval can't be used by anyone else.
+   */
+  async depositGateway(address: string, amountUsd: number): Promise<{ txRef: string; raw: unknown }> {
+    const [decimals, allowance] = await Promise.all([
+      this.rpc.readContract({ address: USDC_TOKEN, abi: erc20Abi, functionName: "decimals" }),
+      this.rpc.readContract({ address: USDC_TOKEN, abi: erc20Abi, functionName: "allowance", args: [address as Address, this.gateway] }),
+    ]);
+    const value = parseUnits(String(amountUsd), decimals);
+    // Gateway keeps an agent wallet's balance under its backing key (what `gateway balance` and
+    // nanopayments use), so deposits are credited to that key, as Circle's own deposit does.
+    const owner = await this.backingKey(address).catch(() => null);
+    if (!owner) return this.cliDeposit(address, amountUsd, new Error("couldn't find the wallet's backing key"));
+    try {
+      if (allowance < value) {
+        const standing = parseUnits(String(Math.max(amountUsd, GATEWAY_ALLOWANCE_USD)), decimals);
+        await this.execute(address, USDC_TOKEN, "approve(address,uint256)", [this.gateway, standing.toString()]);
+      }
+    } catch (e) {
+      return this.cliDeposit(address, amountUsd, e); // nothing moved: Circle's own deposit instead
+    }
+    // The deposit itself. Not retried another way if it fails: it may still have gone through.
+    const ref = await this.execute(address, this.gateway, "depositFor(address,address,uint256)", [USDC_TOKEN, owner, value.toString()]);
+    return { txRef: ref ?? "submitted", raw: { method: "depositFor", owner } };
+  }
+
+  private backingKeys = new Map<string, string>();
+  /** The key Gateway files this wallet's balance under (Circle reports it with the balance). */
+  private async backingKey(address: string): Promise<string> {
+    const known = this.backingKeys.get(address.toLowerCase());
+    if (known) return known;
+    const g = await this.run(["gateway", "balance", "--address", address, "--chain", WALLET_CHAIN], 30_000);
+    const key = String(g.backingEOA ?? "");
+    if (!/^0x[0-9a-fA-F]{40}$/.test(key)) throw new WalletError("Circle didn't report the wallet's backing key");
+    this.backingKeys.set(address.toLowerCase(), key);
+    return key;
+  }
+
+  /** One contract call from the agent wallet (Circle signs and sends it). Returns its tx hash or id. */
+  private async execute(address: string, contract: string, fn: string, args: string[]) {
+    const d = await this.run(
+      ["wallet", "execute", fn, ...args, "--contract", contract, "--address", address, "--chain", WALLET_CHAIN, "--idempotency-key", randomUUID()],
+      120_000,
+    );
+    const ref = d.txHash ?? d.transactionHash ?? d.hash ?? d.id ?? d.transactionId ?? (d.transaction as { id?: string; txHash?: string } | undefined)?.txHash;
+    return ref ? String(ref) : null;
+  }
+
+  /** Circle's standard deposit (approval + deposit). */
+  private async cliDeposit(address: string, amountUsd: number, why?: unknown) {
+    if (why) console.error(`gatekeeper · one-step Gateway deposit unavailable, using Circle's deposit: ${why instanceof Error ? why.message : String(why)}`);
+    // "direct": an onchain deposit from this wallet on Arc testnet (gas is paid in USDC there).
+    const d = await this.run(
+      ["gateway", "deposit", "--amount", String(amountUsd), "--address", address, "--chain", WALLET_CHAIN, "--method", "direct", "--timeout", "180"],
+      200_000,
+    );
+    const ref = d.txHash ?? d.transactionHash ?? d.hash ?? d.depositTxHash ?? (d.transaction as { hash?: string; id?: string } | undefined)?.hash ?? d.id;
+    return { txRef: ref ? String(ref) : "submitted", raw: d };
   }
 
   async listWallets(): Promise<string[]> {

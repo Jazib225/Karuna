@@ -241,7 +241,7 @@ export default function App() {
   else if (!s.setUp) body = <Setup s={s} me={signer.me} run={run} busy={busy} account={account} onJoin={() => setJoining(true)} />;
   else if (!s.policy) body = <Loading text="Reading Dharma from Arc…" />;
   else if (!s.policy.members.some((m) => m.address === signer.me!.address.toLowerCase()) && !isViewer) body = <Setup s={s} me={signer.me} run={run} busy={busy} account={account} onJoin={() => setJoining(true)} replace />;
-  else body = <Console s={s} log={gk.log} wallet={gk.wallet} run={run} busy={busy} me={signer.me} offline={gk.offline} refresh={gk.refresh} account={account} />;
+  else body = <Console s={s} log={gk.log} wallet={gk.wallet} refreshWallet={gk.refreshWallet} run={run} busy={busy} me={signer.me} offline={gk.offline} refresh={gk.refresh} account={account} />;
 
   return (
     <>
@@ -821,7 +821,7 @@ interface Ctx {
   can: (p: Permission) => boolean;
 }
 
-function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: { s: Snapshot; log: LogEntry[]; wallet: WalletInfo | null; run: Run; busy: boolean; me: Signer; offline: string | null; refresh: () => Promise<void>; account: AccountCtl }) {
+function Console({ s, log, wallet, refreshWallet, run, busy, me, offline, refresh, account }: { s: Snapshot; log: LogEntry[]; wallet: WalletInfo | null; refreshWallet: () => void; run: Run; busy: boolean; me: Signer; offline: string | null; refresh: () => Promise<void>; account: AccountCtl }) {
   const [view, setPage] = useState<Page>(() => {
     try {
       return PAGE_OF[localStorage.getItem("karuna.view") as View] ?? "overview";
@@ -1190,7 +1190,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
               </div>
             </div>
           )}
-          {view === "overview" && <Overview ctx={ctx} wallet={wallet} go={setView} />}
+          {view === "overview" && <Overview ctx={ctx} wallet={wallet} refreshWallet={refreshWallet} go={setView} />}
           {view === "activity" && <ActivityPage ctx={ctx} dharma={dharma} log={log} />}
           {view === "agents" && <Agents ctx={ctx} />}
           {view === "safety" && <Safety ctx={ctx} />}
@@ -1205,6 +1205,65 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
 }
 
 // ============================================================== overview
+
+/**
+ * Add funds to Gateway: USDC moves from the org's Circle wallet into its Gateway balance, which
+ * agents spend for paid data (x402 nanopayments). On testnet there's no other way to fill it.
+ */
+function AddFunds({ wallet, run, onClose, onDone }: { wallet: WalletInfo; run: Run; onClose: () => void; onDone: () => void }) {
+  const have = Number(wallet.usdc) || 0;
+  // Arc pays gas in USDC, so keep a little back when "Max" is used.
+  const max = Math.max(0, Math.floor((have - 0.02) * 100) / 100);
+  const [amount, setAmount] = useState(() => (max >= 1 ? "1" : max > 0 ? String(max) : ""));
+  const [sending, setSending] = useState(false);
+  const n = Number(amount);
+  const err = !amount.trim() ? null : !Number.isFinite(n) || n < 0.01 ? "Enter at least $0.01" : n > max ? `The wallet has ${usd(have)} (a little stays for fees)` : null;
+  const ok = !!amount.trim() && !err && !sending;
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    inputRef.current?.select();
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && !sending && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [sending]);
+  const submit = async () => {
+    if (!ok) return;
+    setSending(true);
+    const done = await run(() => api("/wallet/gateway-deposit", { amountUsd: n }), `Added ${usd(n)} to Gateway`);
+    setSending(false);
+    onDone();
+    if (done) onClose();
+  };
+  return (
+    <div className="confirm-backdrop" onMouseDown={(e) => e.target === e.currentTarget && !sending && onClose()}>
+      <form className="confirm-dialog add-funds-dialog" role="dialog" aria-modal="true" aria-labelledby="add-funds-title" onSubmit={(e) => { e.preventDefault(); void submit(); }}>
+        <span className="confirm-mark" aria-hidden><Icon name="wallet" size={18} /></span>
+        <div className="confirm-body">
+          <p className="confirm-lead" id="add-funds-title"><b>Add funds to Gateway</b></p>
+          <p className="muted small" style={{ margin: 0 }}>Moves USDC from your Circle wallet into Gateway, which your agents spend on paid data. It stays your organization's money.</p>
+          <div className="funds-flow">
+            <span><small>Circle wallet</small><b>{usd(have)}</b></span>
+            <Icon name="arrow" size={14} />
+            <span><small>Gateway</small><b>{wallet.gateway == null ? "—" : usd(Number(wallet.gateway))}</b></span>
+          </div>
+          <label className="field">
+            <span>Amount</span>
+            <span className={`input-icon${err ? " bad" : ""}`}>
+              <span className="input-prefix" aria-hidden>$</span>
+              <input ref={inputRef} className="plain-input mono" inputMode="decimal" aria-label="Amount in USDC" value={amount} disabled={sending} onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ""))} placeholder="0.00" />
+              <button type="button" className="input-toggle" disabled={sending || max <= 0} onMouseDown={(e) => e.preventDefault()} onClick={() => setAmount(String(max))}>Max</button>
+            </span>
+            {err && <small className="bad-text" role="alert">{err}</small>}
+          </label>
+        </div>
+        <div className="confirm-actions">
+          <button type="button" className="btn btn-ghost" disabled={sending} onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn btn-dark" disabled={!ok}>{sending ? <span className="shimmer">Adding…</span> : `Add ${amount && !err ? usd(n) : "funds"}`}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
 
 /** The proposal form's field label for each setting's value. */
 const SETTING_FIELD: Record<Exclude<SettingName, "requireGvisor">, string> = {
@@ -1233,38 +1292,8 @@ function SettingValue({ ctx, name }: { ctx: Ctx; name: SettingName }) {
   );
 }
 
-/** The wallet tile's Gateway line, with Add funds: moves USDC from the org's wallet into Gateway, which paid data (x402) draws on. */
-function GatewayFunds({ ctx, wallet }: { ctx: Ctx; wallet: WalletInfo | null }) {
-  const [open, setOpen] = useState(false);
-  const [amt, setAmt] = useState("");
-  const n = Number(amt);
-  const max = wallet ? Number(wallet.usdc) : 0;
-  if (!open) {
-    return (
-      <div className="note">
-        Gateway {wallet?.gateway ?? "—"}
-        {wallet && ctx.can("wallet") && <> · <button className="link-btn" onClick={() => setOpen(true)}>Add funds</button></>}
-      </div>
-    );
-  }
-  const error = amt && !(n > 0) ? "Enter an amount above $0" : n > max ? `The wallet holds ${usd(max)}` : null;
-  return (
-    <form className="gateway-add" onSubmit={(e) => {
-      e.preventDefault();
-      if (error || !(n > 0)) return;
-      void ctx.run(() => api("/wallet/gateway-deposit", { amountUsd: n }), `Added ${usd(n)} to Gateway`).then((ok) => {
-        if (ok) { setOpen(false); setAmt(""); }
-      });
-    }}>
-      <input className="select-sm mono" inputMode="decimal" autoFocus placeholder="USDC" aria-label="Amount to move into Gateway, in USDC" value={amt} onChange={(e) => setAmt(e.target.value)} />
-      <button className="btn btn-dark btn-sm" disabled={ctx.busy || !!error || !(n > 0)}>Add</button>
-      <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setOpen(false); setAmt(""); }}>Close</button>
-      {error && <small className="bad-text">{error}</small>}
-    </form>
-  );
-}
-
-function Overview({ ctx, wallet, go }: { ctx: Ctx; wallet: WalletInfo | null; go: (v: View) => void }) {
+function Overview({ ctx, wallet, refreshWallet, go }: { ctx: Ctx; wallet: WalletInfo | null; refreshWallet: () => void; go: (v: View) => void }) {
+  const [adding, setAdding] = useState(false);
   const { s } = ctx;
   const pol = s.policy!;
   const pending = s.proposals.filter((p) => p.status === "pending");
@@ -1288,9 +1317,10 @@ function Overview({ ctx, wallet, go }: { ctx: Ctx; wallet: WalletInfo | null; go
   ];
   return (
     <div className="stack">
+      {adding && wallet && <AddFunds wallet={wallet} run={ctx.run} onClose={() => setAdding(false)} onDone={refreshWallet} />}
       <div className="tiles">
         <div className={`tile rise ${pending.length ? "attention" : ""}`} style={st(0)}><div className="k">Waiting for you <Icon name="approvals" size={14} /></div><div className="v heading-gradient">{pending.length}</div><div className="note">{pending.length ? "to approve" : "all clear"}</div></div>
-        <div className="tile rise" style={st(1)}><div className="k">Wallet (USDC) <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{wallet ? usd(Number(wallet.usdc)) : "…"}</div><GatewayFunds ctx={ctx} wallet={wallet} /></div>
+        <div className="tile rise" style={st(1)}><div className="k">Wallet (USDC) <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{wallet ? usd(Number(wallet.usdc)) : "…"}</div><div className="note wallet-note"><span>Gateway {wallet?.gateway == null ? "—" : usd(Number(wallet.gateway))}</span>{wallet && ctx.can("wallet") && <button type="button" className="add-funds" onClick={() => setAdding(true)}><Icon name="plus" size={12} /> Add funds</button>}</div></div>
         <div className="tile rise" style={st(2)}><div className="k" title="Actions Karuna blocked before they ran, in the last 7 days">Stopped this week <Icon name="shield" size={14} /></div><div className="v heading-gradient">{stoppedWeek}</div><div className="note one-line">of {week.length} actions{inEscrow > 0 ? ` · $${Math.round(inEscrow).toLocaleString()} in escrow` : ""}</div></div>
         <div className="tile rise" style={st(3)}><div className="k">Actions today <Icon name="activity" size={14} /></div><div className="v heading-gradient">{todays.length}</div><div className="note one-line">{allowedToday} allowed · {blockedToday} blocked · {heldToday} held</div></div>
         <div className="tile rise" style={st(4)}><div className="k">Spent today <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{usd(spent)}</div><div className="note">of {usd(pol.agents.filter((a) => a.active).reduce((n, a) => n + a.capUsd, 0))} allowed</div></div>

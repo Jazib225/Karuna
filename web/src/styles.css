@@ -999,6 +999,17 @@ html, body, * { scrollbar-width: none; }
 .sent-join { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
 .field small.ok-text { display: inline-flex; align-items: center; gap: 5px; }
 
+/* Add funds to Gateway: the link on the Wallet tile and its dialog (built on the confirm dialog). */
+.tile .wallet-note { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.add-funds { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-2); color: var(--ink); font: 500 11.5px/1.4 var(--font-sans, inherit); cursor: pointer; }
+.add-funds:hover { border-color: var(--line-strong); }
+.add-funds-dialog .confirm-body { gap: 12px; }
+.funds-flow { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-2); border: 1px solid var(--line); color: var(--n500); }
+.funds-flow span { display: grid; gap: 2px; }
+.funds-flow small { font-family: var(--font-mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .1em; }
+.funds-flow b { color: var(--ink); font-size: 15px; font-variant-numeric: tabular-nums; }
+.input-prefix { position: absolute; left: 12px; top: 50%; translate: 0 -50%; color: var(--n500); font-family: var(--font-mono); font-size: 14px; pointer-events: none; }
+
 /* worst case */
 .worst .kv b.mono { font-size: 12px; text-align: right; overflow-wrap: anywhere; }
 .worst-line { display: flex; gap: 6px; align-items: baseline; font-size: 12.5px; color: var(--n600); line-height: 1.45; margin: 2px 0 8px; }
@@ -1024,9 +1035,6 @@ html, body, * { scrollbar-width: none; }
 @media (max-width: 640px) { .escrow-tr { grid-template-columns: 1fr auto; } .escrow-tr .small { grid-column: 1 / -1; grid-row: 2; } }
 
 /* Gateway: Add funds on the wallet tile */
-.gateway-add { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.gateway-add input { width: 90px; }
-.gateway-add small { flex-basis: 100%; font-size: 12px; }
 
 /* A tile line that must stay on one line: the font shrinks a little in a narrow tile instead of wrapping. */
 .tile:has(.note.one-line) { container-type: inline-size; }
