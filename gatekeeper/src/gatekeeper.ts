@@ -615,6 +615,28 @@ export class Gatekeeper extends EventEmitter {
     await this.releaseDueEscrows();
   }
 
+  // ================================================================ Gateway (x402 purchases)
+
+  /** Move USDC from the org's wallet into its Circle Gateway balance. The money stays the org's. */
+  async depositGateway(amount: unknown) {
+    this.requireReady();
+    const from = this.org.wallet?.address;
+    if (!from) throw new GatekeeperError("This org has no wallet yet", 409);
+    if (!this.deps.wallet.depositGateway) throw new GatekeeperError("This wallet can't add funds to Gateway", 501);
+    const amountUsd = Number(amount);
+    if (!Number.isFinite(amountUsd) || amountUsd <= 0) throw new GatekeeperError("Enter an amount above $0");
+    if (this.walletUsd !== null && amountUsd > this.walletUsd) throw new GatekeeperError(`The wallet holds ${usd(this.walletUsd)}; enter that or less`);
+    let txRef: string;
+    try {
+      ({ txRef } = await this.deps.wallet.depositGateway(from, amountUsd));
+    } catch (e) {
+      throw new GatekeeperError(`Gateway deposit failed: ${scrub(e)}. Check the Gateway balance before trying again.`, 502);
+    }
+    this.logEvent({ type: "gateway-deposit", amountUsd, txRef });
+    this.save();
+    return { amountUsd, txRef };
+  }
+
   // ================================================================ escrow (undo for large payments)
 
   /** The escrow setting for this agent's payment, or null: the strictest active `escrow` rule that applies. */
@@ -3106,8 +3128,11 @@ export class Gatekeeper extends EventEmitter {
               eligibility: level === null ? null : levelUpEligibility(record, level),
             };
           }),
+          // Agents with a token but not on Dharma: shown only while a vote to add them is open or
+          // queued. A removed agent (or one whose vote failed) isn't waiting on anything.
           ...Object.keys(this.org.agentTokens)
             .filter((id) => !pol.agents.some((a) => a.id === id))
+            .filter((id) => pol.proposals.some((p) => (p.status === "open" || p.status === "queued") && p.change?.op === "SetAgent" && p.change.id === id))
             .map((id) => ({ id, name: L.agent(id) ?? id, capUsd: 0, spentTodayUsd: 0, active: false, hasToken: true, level: null, record: null, eligibility: null, built: null })),
         ],
         payees: pol.payees.map((p) => ({ account: lower(p.account), category: p.category, name: L.payee(p.account) ?? null })),

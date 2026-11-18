@@ -226,6 +226,12 @@ export function consoleApi(
       const body = method === "GET" || method === "DELETE" ? {} : await readBody(req);
       let m: RegExpMatchArray | null;
 
+      if (method === "POST" && path === "/wallet/gateway-deposit") {
+        const r = await gk.depositGateway((body as { amountUsd?: unknown }).amountUsd);
+        walletCache = null; // show the new balances on the next read
+        return send(res, 200, r);
+      }
+
       if (method === "GET" && (m = path.match(/^\/dharma\/nonce\/(0x[0-9a-fA-F]{40})$/))) return send(res, 200, { nonce: String(await gk.nonceOf(m[1])) });
       if (method === "POST" && path === "/chain-event") {
         // The relay saw a Dharma event (QuickNode Stream or direct RPC): re-read policy now.

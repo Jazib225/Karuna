@@ -29,6 +29,8 @@ export interface WalletBackend {
   transfer(from: string, to: string, amountUsd: number, idempotencyKey: string): Promise<{ txRef: string; raw: unknown }>;
   balances(address: string): Promise<{ usdc: string; gateway: string | null }>;
   listWallets(): Promise<string[]>;
+  /** Move USDC from the wallet into its Circle Gateway balance, which x402 purchases draw on. */
+  depositGateway?(from: string, amountUsd: number): Promise<{ txRef: string; raw: unknown }>;
 }
 
 export class WalletError extends Error {
@@ -136,6 +138,16 @@ export class CircleCliWallet implements WalletBackend {
     const d = await this.run(
       ["wallet", "transfer", to, "--amount", String(amountUsd), "--token", USDC_TOKEN, "--address", from,
         "--chain", WALLET_CHAIN, "--idempotency-key", idempotencyKey],
+      180_000,
+    );
+    const ref = d.txHash ?? d.transactionHash ?? d.hash ?? d.id ?? d.transactionId ?? (d.transaction as { id?: string })?.id;
+    return { txRef: ref ? String(ref) : "submitted", raw: d };
+  }
+
+  async depositGateway(from: string, amountUsd: number) {
+    // "direct": an on-chain deposit on Arc itself; the balance stays on Arc for `services pay`.
+    const d = await this.run(
+      ["gateway", "deposit", "--amount", String(amountUsd), "--address", from, "--chain", WALLET_CHAIN, "--method", "direct", "--timeout", "150"],
       180_000,
     );
     const ref = d.txHash ?? d.transactionHash ?? d.hash ?? d.id ?? d.transactionId ?? (d.transaction as { id?: string })?.id;

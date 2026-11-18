@@ -899,6 +899,37 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
 
 // ============================================================== overview
 
+/** The wallet tile's Gateway line, with Add funds: moves USDC from the org's wallet into Gateway, which paid data (x402) draws on. */
+function GatewayFunds({ ctx, wallet }: { ctx: Ctx; wallet: WalletInfo | null }) {
+  const [open, setOpen] = useState(false);
+  const [amt, setAmt] = useState("");
+  const n = Number(amt);
+  const max = wallet ? Number(wallet.usdc) : 0;
+  if (!open) {
+    return (
+      <div className="note">
+        Gateway {wallet?.gateway ?? "—"}
+        {wallet && <> · <button className="link-btn" onClick={() => setOpen(true)}>Add funds</button></>}
+      </div>
+    );
+  }
+  const error = amt && !(n > 0) ? "Enter an amount above $0" : n > max ? `The wallet holds ${usd(max)}` : null;
+  return (
+    <form className="gateway-add" onSubmit={(e) => {
+      e.preventDefault();
+      if (error || !(n > 0)) return;
+      void ctx.run(() => api("/wallet/gateway-deposit", { amountUsd: n }), `Added ${usd(n)} to Gateway`).then((ok) => {
+        if (ok) { setOpen(false); setAmt(""); }
+      });
+    }}>
+      <input className="select-sm mono" inputMode="decimal" autoFocus placeholder="USDC" aria-label="Amount to move into Gateway, in USDC" value={amt} onChange={(e) => setAmt(e.target.value)} />
+      <button className="btn btn-dark btn-sm" disabled={ctx.busy || !!error || !(n > 0)}>Add</button>
+      <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setOpen(false); setAmt(""); }}>Close</button>
+      {error && <small className="bad-text">{error}</small>}
+    </form>
+  );
+}
+
 function Overview({ ctx, wallet, go }: { ctx: Ctx; wallet: WalletInfo | null; go: (v: View) => void }) {
   const { s } = ctx;
   const pol = s.policy!;
@@ -921,7 +952,7 @@ function Overview({ ctx, wallet, go }: { ctx: Ctx; wallet: WalletInfo | null; go
     <div className="stack">
       <div className="tiles">
         <div className={`tile rise ${pending.length ? "attention" : ""}`} style={st(0)}><div className="k">Waiting for you <Icon name="approvals" size={14} /></div><div className="v heading-gradient">{pending.length}</div><div className="note">{pending.length ? "to approve" : "all clear"}</div></div>
-        <div className="tile rise" style={st(1)}><div className="k">Wallet (USDC) <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{wallet ? usd(Number(wallet.usdc)) : "…"}</div><div className="note">Gateway {wallet?.gateway ?? "—"}</div></div>
+        <div className="tile rise" style={st(1)}><div className="k">Wallet (USDC) <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{wallet ? usd(Number(wallet.usdc)) : "…"}</div><GatewayFunds ctx={ctx} wallet={wallet} /></div>
         <div className="tile rise" style={st(2)}><div className="k">Actions today <Icon name="activity" size={14} /></div><div className="v heading-gradient">{todays.length}</div><div className="note">{allowedToday} allowed · {blockedToday} blocked · {heldToday} held</div></div>
         <div className="tile rise" style={st(3)}><div className="k">Spent today <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{usd(spent)}</div><div className="note">of {usd(pol.agents.filter((a) => a.active).reduce((n, a) => n + a.capUsd, 0))} allowed</div></div>
       </div>

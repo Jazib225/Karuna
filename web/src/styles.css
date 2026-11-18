@@ -992,3 +992,8 @@ html, body, * { scrollbar-width: none; }
 /* payments in escrow */
 .escrow-tr { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; }
 @media (max-width: 640px) { .escrow-tr { grid-template-columns: 1fr auto; } .escrow-tr .small { grid-column: 1 / -1; grid-row: 2; } }
+
+/* Gateway: Add funds on the wallet tile */
+.gateway-add { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.gateway-add input { width: 90px; }
+.gateway-add small { flex-basis: 100%; font-size: 12px; }

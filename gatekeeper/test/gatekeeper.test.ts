@@ -65,6 +65,10 @@ class FakeWallet implements WalletBackend {
   async listWallets() {
     return [];
   }
+  async depositGateway(_f: string, amountUsd: number) {
+    this.paid.push({ kind: "gateway", amount: amountUsd, to: "gateway" });
+    return { txRef: "0xdeposit", raw: {} };
+  }
 }
 
 // ---------------------------------------------------------------- per-test org
@@ -261,6 +265,31 @@ describe("Rule changes: every member edit is voted on; only panic is instant", (
     await waitTimelock();
     expect((await gk.propose(id, { type: "action", tool: "shell", command: "ls" })).status).toBe("allowed");
   }, 30_000);
+
+  it("an agent shows as awaiting a vote only while that vote is pending; once removed it leaves the list", async () => {
+    const card = (id: string) => gk.snapshot().policy!.agents.find((a) => a.id === id);
+    const { id } = gk.prepareAgent("Short-lived agent");
+    await propose(alice, { op: "SetAgent", id, capUsd: 1 });
+    expect(card(id)).toMatchObject({ active: false });
+    await waitTimelock();
+    expect(card(id)).toMatchObject({ active: true });
+    await propose(alice, { op: "RemoveAgent", id });
+    await waitTimelock();
+    expect(card(id)).toBeUndefined();
+  }, 30_000);
+});
+
+describe("Gateway funds", () => {
+  it("a member moves USDC from the wallet into Gateway; bad amounts and more than the wallet holds are refused", async () => {
+    gk.walletUsd = 10;
+    await expect(gk.depositGateway(0)).rejects.toThrow(/above \$0/);
+    await expect(gk.depositGateway("abc")).rejects.toThrow(/above \$0/);
+    await expect(gk.depositGateway(11)).rejects.toThrow(/wallet holds \$10\.00/);
+    expect(wallet.paid).toEqual([]);
+    expect(await gk.depositGateway(2.5)).toEqual({ amountUsd: 2.5, txRef: "0xdeposit" });
+    expect(wallet.paid).toEqual([{ kind: "gateway", amount: 2.5, to: "gateway" }]);
+    expect(gk.logTail(5).some((e) => e.event?.type === "gateway-deposit")).toBe(true);
+  });
 });
 
 describe("invite links", () => {
