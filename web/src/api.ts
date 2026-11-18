@@ -108,6 +108,13 @@ export interface RunSummary {
   id: string; agentId: string; agentName: string; trigger: string; startedAt: string; endedAt: string | null;
   status: "starting" | "running" | "done" | "failed" | "stopped"; built: boolean; host: string | null;
   steps: number; actions: number; models: string[]; reasoningVisible: boolean; waiting: number;
+  /** Files it changed in writable folders, and how many of those were undone. */
+  changes?: number; undone?: number;
+}
+
+/** A file a run changed in a writable folder (snapshotted first, so it can be undone). */
+export interface RunFileChange {
+  mount: string; path: string; kind: "added" | "modified" | "deleted"; diff: string | null; binary: boolean; undoneAt?: string;
 }
 
 export interface ModelExchange {
@@ -121,7 +128,7 @@ export type RunStep =
   | { at: string; kind: "action"; summary: string; outcome: "allowed" | "denied" | "waiting"; ruleId?: string; reason?: string; proposalId?: string; now?: string }
   | { at: string; kind: "note"; text: string };
 
-export type RunDetail = Omit<RunSummary, "steps"> & { steps: RunStep[] };
+export type RunDetail = Omit<RunSummary, "steps" | "changes"> & { steps: RunStep[]; changes?: number; fileChanges?: RunFileChange[] };
 
 export interface AgentDraftView {
   name: string; instructions: string; schedule: Schedule; limits: string; note: string; model: string;

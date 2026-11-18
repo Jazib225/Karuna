@@ -214,6 +214,8 @@ export interface GatekeeperDeps {
   chatUrl?: string; // the public address chat apps reach Karuna at (a tunnel to the public port)
   /** Starts a built agent's sandbox run (`karuna run` with the hosted runner). Returns a stop function. */
   launcher?: (run: { agentId: string; token: string; runId: string; onOutput: (line: string) => void; onExit: (code: number) => void }) => () => void;
+  /** Undoes a run's file changes from its snapshot on this machine (`karuna undo`). PATH = one file's host path. */
+  undo?: (run: { runId: string; path?: string }) => Promise<{ restored: { mount: string; path: string }[]; skipped: { mount: string; path: string; reason: string }[]; error?: string }>;
 }
 
 /** One `karuna run`: an agent in a box, reachable only through the egress proxy. */
@@ -273,7 +275,25 @@ export interface Run {
   exitCode?: number;
   host?: string | null;
   isolation?: string;
+  /** Files the run changed in writable mounts (the runner snapshots them first, so they can be undone). */
+  changes?: RunFileChange[];
 }
+
+export interface RunFileChange {
+  mount: string; // host folder
+  path: string; // relative to it, "/"-separated
+  kind: "added" | "modified" | "deleted";
+  diff: string | null;
+  binary: boolean;
+  undoneAt?: string;
+}
+const MAX_RUN_CHANGES = 500;
+const MAX_DIFF_CHARS = 20_000;
+/** A run's file on the host: its mount folder plus the "/"-separated path inside it. */
+const joinHost = (mount: string, rel: string) => {
+  const sep = mount.includes("\\") ? "\\" : "/";
+  return `${mount.replace(/[\\/]+$/, "")}${sep}${rel.split("/").join(sep)}`;
+};
 
 export type RunStep =
   | { at: string; kind: "model"; exchange: ModelExchange; status: number }
@@ -345,6 +365,7 @@ function runSummary(r: Run, agentName: string) {
   return {
     id: r.id, agentId: r.agentId, agentName, trigger: r.trigger, startedAt: r.startedAt, endedAt: r.endedAt ?? null, status: r.status,
     built: r.built, host: r.host ?? null, steps: r.steps.length, actions, models,
+    changes: (r.changes ?? []).length, undone: (r.changes ?? []).filter((c) => c.undoneAt).length,
     reasoningVisible: modelSteps > 0 || actions === 0,
     waiting: r.steps.filter((s) => s.kind === "action" && s.outcome === "waiting").length,
   };
@@ -2222,7 +2243,68 @@ export class Gatekeeper extends EventEmitter {
       const p = this.state.proposals.find((x) => x.id === st.proposalId);
       return p ? { ...st, now: p.status } : st;
     });
-    return { ...runSummary(r, this.labels().agent(r.agentId) ?? r.agentId), steps };
+    return { ...runSummary(r, this.labels().agent(r.agentId) ?? r.agentId), steps, fileChanges: r.changes ?? [] };
+  }
+
+  /**
+   * The runner's report of what a run changed in its writable mounts. From the run's own session,
+   * or (after the box exited) from the agent's token for one of its own runs.
+   */
+  recordRunChanges(auth: { token: string } | { agentId: string }, body: { runId?: unknown; changes?: unknown }) {
+    const run = "token" in auth
+      ? this.runOf(auth.token)
+      : (this.state.runs ?? []).find((r) => r.id === body.runId && r.agentId === auth.agentId) ?? null;
+    if (!run) throw new GatekeeperError("No such run", 404);
+    if (!Array.isArray(body.changes)) throw new GatekeeperError("changes must be a list", 400);
+    const KINDS = ["added", "modified", "deleted"];
+    run.changes = (body.changes as Record<string, unknown>[]).slice(0, MAX_RUN_CHANGES).flatMap((c) => {
+      if (!c || typeof c.mount !== "string" || typeof c.path !== "string" || !KINDS.includes(c.kind as string)) return [];
+      if (c.path.split("/").includes("..")) return [];
+      const diff = typeof c.diff === "string" ? (c.diff.length > MAX_DIFF_CHARS ? `${c.diff.slice(0, MAX_DIFF_CHARS)}\n… (cut)` : c.diff) : null;
+      return [{ mount: c.mount.slice(0, 500), path: c.path.slice(0, 500), kind: c.kind as RunFileChange["kind"], diff, binary: c.binary === true }];
+    });
+    if (run.changes.length) {
+      const n = run.changes.length;
+      this.addStep(run, { at: this.now().toISOString(), kind: "note", text: `Karuna: ${n} file${n === 1 ? "" : "s"} changed in writable folders (snapshot kept, can be undone)` });
+    }
+    this.save();
+    return { ok: true, changes: run.changes.length };
+  }
+
+  /** Console: put a run's files back (all of them, or one), from the snapshot on the runner's machine. */
+  async undoRunChanges(id: string, input: { mount?: unknown; path?: unknown } = {}) {
+    const run = (this.state.runs ?? []).find((x) => x.id === id);
+    if (!run) throw new GatekeeperError("No such run", 404);
+    if (run.status === "running" || run.status === "starting") throw new GatekeeperError("Stop the run before undoing its changes", 409);
+    const all = run.changes ?? [];
+    const one = typeof input.path === "string" ? all.find((c) => c.path === input.path && (input.mount === undefined || c.mount === input.mount)) : undefined;
+    if (typeof input.path === "string" && !one) throw new GatekeeperError("That file isn't one of this run's changes", 404);
+    if (one ? one.undoneAt : !all.some((c) => !c.undoneAt)) throw new GatekeeperError("Already undone", 409);
+    const hostPath = one ? joinHost(one.mount, one.path) : undefined;
+    const command = `pnpm karuna undo --run ${id}${hostPath ? ` --path "${hostPath}"` : ""}`;
+    if (!this.deps.undo) throw new GatekeeperError(`Undo runs on the machine that ran it. There, run: ${command}`, 501);
+    const r = await this.deps.undo({ runId: id, ...(hostPath ? { path: hostPath } : {}) });
+    const at = this.now().toISOString();
+    const find = (x: { mount: string; path: string }) => all.find((c) => c.path === x.path && c.mount === x.mount) ?? all.find((c) => c.path === x.path);
+    for (const x of r.restored) {
+      const c = find(x);
+      if (c) c.undoneAt = at;
+    }
+    for (const x of r.skipped) {
+      const c = x.reason === "already undone" ? find(x) : undefined;
+      if (c) c.undoneAt ??= at;
+    }
+    if (r.restored.length) {
+      const names = r.restored.map((x) => x.path);
+      this.addStep(run, { at, kind: "note", text: `Karuna: undid ${names.length} file change${names.length === 1 ? "" : "s"} (${names.slice(0, 5).join(", ")}${names.length > 5 ? ", …" : ""})` });
+      this.logEvent({ type: "run-undone", agent: run.agentId, run: id, files: names.slice(0, 50) });
+    }
+    this.save();
+    const failed = r.skipped.filter((x) => x.reason !== "already undone");
+    if (!r.restored.length && (r.error || failed.length)) {
+      throw new GatekeeperError(`${r.error ?? failed.map((x) => `${x.path}: ${x.reason}`).join("; ")}. On the machine that ran it: ${command}`, 409);
+    }
+    return { restored: r.restored, skipped: r.skipped };
   }
 
   /** Console: stop a run now (its box stops on the next heartbeat; its network is cut at once). */

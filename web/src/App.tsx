@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import type { Address } from "viem";
 import { isAddr, isNoLimit, decodeChange, describeChange, describeScope, NO_LIMIT_USD, waitText, type Change } from "@prekaruna/dharma";
-import { api, useGatekeeper, type LooseningPreview, type AgentExposure, type Exposure, type AgentView, type AgentDraftView, type Governance, type LogEntry, type Proposal, type Rule, type RunDetail, type RunStep, type Schedule, type Snapshot, type WalletInfo } from "./api.ts";
+import { api, useGatekeeper, type LooseningPreview, type AgentExposure, type Exposure, type AgentView, type AgentDraftView, type Governance, type LogEntry, type Proposal, type Rule, type RunDetail, type RunFileChange, type RunStep, type Schedule, type Snapshot, type WalletInfo } from "./api.ts";
 import { Kind, SignerUnavailable, decidePayment, loadSigner, signerKey, submitChange, type Signer } from "./signer.ts";
 import { accountEmail, createAccount, signIn as accountSignIn, signOut as accountSignOut } from "./account.ts";
 import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
@@ -2526,7 +2526,7 @@ function RunsPanel({ ctx, agentId, onClose }: { ctx: Ctx; agentId: string; onClo
             {runs.map((r) => (
               <button key={r.id} className={`run-item ${open === r.id ? "on" : ""}`} onClick={() => setOpen(r.id)}>
                 <span className={`run-dot ${r.status}`} />
-                <span><b>{r.trigger}</b><small>{ago(r.startedAt)} · {r.actions} action{r.actions === 1 ? "" : "s"}{r.waiting ? ` · ${r.waiting} waiting` : ""}</small></span>
+                <span><b>{r.trigger}</b><small>{ago(r.startedAt)} · {r.actions} action{r.actions === 1 ? "" : "s"}{r.waiting ? ` · ${r.waiting} waiting` : ""}{r.changes ? ` · ${r.changes} file${r.changes === 1 ? "" : "s"} changed${r.undone ? `, ${r.undone} undone` : ""}` : ""}</small></span>
               </button>
             ))}
           </div>
@@ -2573,6 +2573,7 @@ function RunTimeline({ ctx, id }: { ctx: Ctx; id: string }) {
         </span>
       </div>
       {!r.reasoningVisible && <p className="notice small">This agent's reasoning isn't visible; only its actions are.</p>}
+      {(r.fileChanges ?? []).length > 0 && <RunFiles ctx={ctx} r={r} live={live} />}
       {steps.length === 0 && <p className="muted small pad">{live ? <span className="shimmer">Starting…</span> : "Nothing recorded."}</p>}
       <ol className="steps">
         {steps.map((st, i) => (
@@ -2610,6 +2611,41 @@ function RunTimeline({ ctx, id }: { ctx: Ctx; id: string }) {
           </li>
         ))}
       </ol>
+    </div>
+  );
+}
+
+/** What a run changed in writable folders, as diffs, with Undo for the run or one file. */
+function RunFiles({ ctx, r, live }: { ctx: Ctx; r: RunDetail; live: boolean }) {
+  const { run, busy } = ctx;
+  const files = r.fileChanges ?? [];
+  const left = files.filter((f) => !f.undoneAt).length;
+  const KIND = { added: "added", modified: "changed", deleted: "deleted" } as const;
+  const undo = async (f?: RunFileChange) => {
+    const what = f ? `Put ${f.path} back the way it was before this run?` : `Put all ${left} file${left === 1 ? "" : "s"} back the way they were before this run?`;
+    if (!(await askConfirm(`${what} Files the run added are removed.`, { action: f ? "Undo this change" : "Undo this run", danger: true }))) return;
+    run(() => api(`/runs/${r.id}/undo`, f ? { mount: f.mount, path: f.path } : {}), f ? `Undid ${f.path}` : "Undid this run's file changes");
+  };
+  return (
+    <div className="run-files">
+      <div className="run-files-hd">
+        <span className="field-label">Files changed · {files.length}{left < files.length ? ` · ${files.length - left} undone` : ""}</span>
+        {left > 0 && <button className="btn btn-deny btn-sm" disabled={busy || live} title={live ? "Stop the run first" : undefined} onClick={() => undo()}>Undo this run</button>}
+      </div>
+      {files.map((f) => (
+        <details key={`${f.mount}/${f.path}`} className={`run-file ${f.undoneAt ? "undone" : ""}`}>
+          <summary>
+            <span className={`file-kind ${f.kind}`}>{KIND[f.kind]}</span>
+            <span className="mono small grow" title={f.mount}>{f.path}</span>
+            {f.undoneAt ? <span className="muted small">undone</span> : (
+              <button className="link-btn small" disabled={busy || live} onClick={(e) => { e.preventDefault(); undo(f); }}>Undo this change</button>
+            )}
+          </summary>
+          {f.binary ? <p className="muted small">Binary file; no diff shown.</p> : f.diff ? (
+            <pre className="snippet diff">{f.diff.split("\n").map((l, i) => <span key={i} className={l.startsWith("+") && !l.startsWith("+++") ? "add" : l.startsWith("-") && !l.startsWith("---") ? "del" : ""}>{l || " "}</span>)}</pre>
+          ) : <p className="muted small">No diff kept.</p>}
+        </details>
+      ))}
     </div>
   );
 }

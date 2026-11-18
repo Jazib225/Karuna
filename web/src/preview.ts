@@ -225,6 +225,7 @@ export const previewSnapshot: Snapshot = {
   ],
   runs: [
     { id: "run-1", agentId: "flour-buyer", agentName: "Flour buyer", trigger: "Daily at 09:00", startedAt: iso(240), endedAt: null, status: "running", built: true, host: "bakery-mini", steps: 6, actions: 2, models: ["claude-sonnet-5-5 (Anthropic)"], reasoningVisible: true, waiting: 1 },
+    { id: "run-dev", agentId: "supplies", agentName: "Supplies agent", trigger: "karuna run on sam-laptop", startedAt: iso(5400), endedAt: iso(5100), status: "done", built: false, host: "sam-laptop", steps: 4, actions: 1, models: [], reasoningVisible: false, waiting: 0, changes: 3, undone: 1 },
     { id: "run-0", agentId: "flour-buyer", agentName: "Flour buyer", trigger: "Run now", startedAt: iso(86400), endedAt: iso(86300), status: "done", built: true, host: "bakery-mini", steps: 5, actions: 1, models: ["claude-sonnet-5-5 (Anthropic)"], reasoningVisible: true, waiting: 0 },
   ],
   devices: [
@@ -276,6 +277,11 @@ export function previewRun(id: string): RunDetail {
   const summary = previewSnapshot.runs!.find((r) => r.id === id) ?? previewSnapshot.runs![0];
   return {
     ...summary,
+    ...(summary.id === "run-dev" ? { fileChanges: [
+      { mount: "/home/sam/bakery/books", path: "orders/2026-11.csv", kind: "modified" as const, binary: false, diff: "@@ -3,3 +3,4 @@\n 2026-11-14,Valley Flour,2,62.40\n 2026-11-15,Valley Flour,2,62.40\n-2026-11-16,Oven Repair,1,180.00\n+2026-11-16,Oven Repair,1,1800.00\n+2026-11-17,Unknown Ltd,1,950.00" },
+      { mount: "/home/sam/bakery/books", path: "notes/supplier.txt", kind: "added" as const, binary: false, diff: "+New bank details for Oven Repair: 0x9f3…" },
+      { mount: "/home/sam/bakery/books", path: "old/invoice-114.pdf", kind: "deleted" as const, binary: true, diff: null, undoneAt: iso(4000) },
+    ] } : {}),
     steps: [
       { at: iso(238), kind: "model", status: 200, exchange: { provider: "Anthropic", model: "claude-sonnet-5-5", asked: "Run started: Daily at 09:00. Your instructions: Every morning, buy today's grain prices…", system: "", toolsOffered: ["list_payees", "pay", "buy_data", "web_get"], said: "I'll get today's grain prices first.", thinking: "", toolCalls: [{ name: "buy_data", input: "{\"url\":\"https://api.grainfeed.dev/v2/flour\",\"max_usd\":0.1}" }], stopReason: "tool_use" } },
       { at: iso(236), kind: "action", summary: "Payee: Grain price feed · Amount: $0.05 · x402 GET api.grainfeed.dev/v2/flour", outcome: "allowed", ruleId: "payment-within-allowance", reason: "Known recipient and within the agent's daily allowance" },
