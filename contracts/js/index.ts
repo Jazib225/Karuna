@@ -5,7 +5,8 @@ import {
   decodeAbiParameters, encodeAbiParameters, hexToString, isAddress, stringToHex, type Address, type Hex,
 } from "viem";
 
-export { DHARMA_ABI, DHARMA_PROXY_ABI } from "./abi.ts";
+export { DHARMA_ABI, DHARMA_PROXY_ABI, ESCROW_ABI } from "./abi.ts";
+export * from "./escrow.ts";
 
 export const ARC_TESTNET_CHAIN_ID = 5042002;
 
