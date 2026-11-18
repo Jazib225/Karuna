@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEven
 import type { Address } from "viem";
 import { isAddr, isNoLimit, decodeChange, describeChange, describeScope, NO_LIMIT_USD, waitText, type Change } from "@prekaruna/dharma";
 import { api, useGatekeeper, type LooseningPreview, type AgentExposure, type Exposure, type AgentView, type AgentDraftView, type Governance, type LogEntry, type Proposal, type Rule, type RunDetail, type RunFileChange, type RunStep, type Schedule, type Snapshot, type WalletInfo } from "./api.ts";
-import { Kind, SignerUnavailable, decidePayment, loadSigner, signerKey, submitChange, type Signer } from "./signer.ts";
+import { Kind, SignerUnavailable, cancelEscrow, decidePayment, loadSigner, signerKey, submitChange, type Signer } from "./signer.ts";
 import { accountEmail, createAccount, signIn as accountSignIn, signOut as accountSignOut } from "./account.ts";
 import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
 import { Palette, type Command } from "./palette.tsx";
@@ -869,8 +869,9 @@ function Rows({ ctx, items }: { ctx: Ctx; items: Proposal[] }) {
     <div className="gk">
       {items.map((p) => {
         const o = p.decision.outcome;
-        const label = p.status === "executed" ? "paid" : p.status === "failed" ? "failed" : o === "approval" ? (p.status === "pending" ? "require approval" : p.status) : o;
-        const cls = p.status === "failed" || p.status === "denied" ? "deny" : p.status === "executed" ? "allow" : o;
+        const held = p.escrow && (p.escrow.status === "held" || p.escrow.status === "opening");
+        const label = p.escrow?.status === "cancelled" ? "cancelled" : held ? "in escrow" : p.status === "executed" ? "paid" : p.status === "failed" ? "failed" : o === "approval" ? (p.status === "pending" ? "require approval" : p.status) : o;
+        const cls = p.escrow?.status === "cancelled" || p.status === "failed" || p.status === "denied" ? "deny" : held ? "approval" : p.status === "executed" ? "allow" : o;
         return (
           <div className={`item ${Date.now() - Date.parse(p.createdAt) < 4000 ? "fresh" : ""}`} key={p.id}>
             <span className="caret">›</span>
@@ -897,9 +898,40 @@ function ActivityPage({ ctx, dharma, log }: { ctx: Ctx; dharma: Address; log: Lo
     <div className="stack">
       {pending.length === 0 && live.length === 0 && <div className="card"><Empty icon="check">Nothing is waiting for you.</Empty></div>}
       {pending.map((p, i) => <div className="rise" style={st(i)} key={p.id}><ApprovalCard p={p} ctx={ctx} dharma={dharma} /></div>)}
+      <EscrowHolds ctx={ctx} />
       <Ballots ctx={ctx} />
       <UpgradeCard ctx={ctx} />
       <Activity ctx={ctx} log={log} />
+    </div>
+  );
+}
+
+/** Payments waiting in escrow: any one member can cancel before release, and the USDC comes back. */
+function EscrowHolds({ ctx }: { ctx: Ctx }) {
+  const { s, me, run, busy } = ctx;
+  const held = s.proposals.filter((p) => p.escrow && (p.escrow.status === "held" || p.escrow.status === "opening"));
+  if (!held.length) return null;
+  const agentName = (id: string) => s.policy!.agents.find((a) => a.id === id)?.name ?? id;
+  const payee = (a?: string) => (a ? s.policy!.payees.find((x) => x.account === a.toLowerCase())?.name ?? short(a) : "—");
+  return (
+    <div className="card">
+      <div className="hd"><h2>In escrow</h2><span className="sub">any member can cancel before release; the USDC returns to the wallet</span></div>
+      <div className="table">
+        {held.map((p) => {
+          const e = p.escrow!;
+          return (
+            <div className="tr escrow-tr" key={p.id}>
+              <span className="b">{usd(p.payload?.amountUsd ?? p.request.amountUsd ?? 0)} to {payee(p.request.to)}</span>
+              <span className="small muted">{agentName(p.agentId)} · {e.blocked ?? (e.status === "opening" ? "placing in escrow…" : `releases ${new Date(e.releaseAt).toLocaleString()}`)}</span>
+              <button className="btn btn-deny btn-sm" disabled={busy || e.status !== "held" || !e.holdId}
+                onClick={async () => (await askConfirm(`Cancel this ${usd(p.payload?.amountUsd ?? 0)} payment? The USDC goes back to the org's wallet and the payee gets nothing.`, { action: "Cancel payment", danger: true }))
+                  && run(() => cancelEscrow(me, e.address as Address, e.holdId!, p.id), "Cancelled; the USDC is back in the wallet")}>
+                Cancel
+              </button>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

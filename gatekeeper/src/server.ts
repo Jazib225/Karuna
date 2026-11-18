@@ -243,6 +243,7 @@ export function consoleApi(
       if (method === "POST" && (m = path.match(/^\/agents\/([\w-]+)\/run$/))) return send(res, 200, gk.runBuiltAgent(m[1], "Run now"));
       if (method === "POST" && (m = path.match(/^\/runs\/([\w-]+)\/stop$/))) return send(res, 200, gk.stopRun(m[1]));
       if (method === "POST" && (m = path.match(/^\/runs\/([\w-]+)\/undo$/))) return send(res, 200, await gk.undoRunChanges(m[1], body));
+      if (method === "POST" && (m = path.match(/^\/proposals\/([\w-]+)\/escrow-cancel$/))) return send(res, 200, await gk.cancelEscrow(m[1], body));
       if (accounts && method === "POST" && path === "/auth/salt") return send(res, 200, accounts.salt(body.email));
       if (accounts && method === "POST" && path === "/auth/create") return send(res, 200, accounts.create(body));
       if (accounts && method === "POST" && path === "/auth/sign-in") return send(res, 200, accounts.signIn(body));

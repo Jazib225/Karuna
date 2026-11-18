@@ -935,7 +935,7 @@ html, body, * { scrollbar-width: none; }
 .worst .kv b.mono { font-size: 12px; text-align: right; overflow-wrap: anywhere; }
 .worst-line { display: flex; gap: 6px; align-items: baseline; font-size: 12.5px; color: var(--n600); line-height: 1.45; margin: 2px 0 8px; }
 .preview-warn { border-color: var(--danger-line); }
-.worst-delta { margin: 0; padding-left: 18px; display: grid; gap: 2px; }
+.worst-delta { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; }
 .worst-delta .up { color: var(--danger); }
 .worst-delta .down { color: var(--n600); }
 
@@ -950,3 +950,7 @@ html, body, * { scrollbar-width: none; }
 .snippet.diff span { display: block; white-space: pre-wrap; }
 .snippet.diff .add { background: var(--n100); font-weight: 600; }
 .snippet.diff .del { color: var(--danger); background: var(--danger-bg); }
+
+/* payments in escrow */
+.escrow-tr { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; }
+@media (max-width: 640px) { .escrow-tr { grid-template-columns: 1fr auto; } .escrow-tr .small { grid-column: 1 / -1; grid-row: 2; } }

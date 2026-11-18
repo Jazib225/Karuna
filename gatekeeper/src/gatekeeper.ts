@@ -14,9 +14,10 @@ import {
 } from "@prekaruna/engine";
 import {
   DHARMA_ABI, Kind, LEVEL_UP_STREAK, actionTypedData, decodeChange, describeChange, encodeChange, levelLabel, levelUpEligibility, opName,
-  paymentDecisionTypedData, toBytes32, toMicro,
+  escrowCancelTypedData, escrowRef, paymentDecisionTypedData, toBytes32, toMicro,
   type AgentRecord, type Change,
 } from "@prekaruna/dharma";
+import type { EscrowBackend } from "./escrow.ts";
 import {
   ConfigError, DEFAULT_ALLOWLISTED_DOMAINS, EXPLORER, USDC_TOKEN, WALLET_CHAIN, emptyOrg, isSetUp,
   requireAddress, requireText, slugId, type OrgFile,
@@ -84,6 +85,21 @@ export interface Proposal {
   result?: unknown; // returned to the agent on success
   txRef?: string;
   error?: string; // human-facing only
+  /** A large payment held in the org's Escrow: any member can cancel it before it releases. */
+  escrow?: EscrowHoldView;
+}
+
+export interface EscrowHoldView {
+  address: string; // the org's Escrow
+  status: "opening" | "held" | "released" | "cancelled";
+  holdId?: string; // the Escrow's hold id (decimal)
+  releaseAt: string;
+  openTx?: string;
+  releaseTx?: string;
+  cancelTx?: string;
+  cancelledBy?: string;
+  /** Why the Gatekeeper couldn't release it yet (frozen, payee removed): it waits for a member. */
+  blocked?: string;
 }
 
 /** The only shape an agent ever sees. No reasons, ever (CLAUDE.md §2 rule 7). */
@@ -214,6 +230,8 @@ export interface GatekeeperDeps {
   chatUrl?: string; // the public address chat apps reach Karuna at (a tunnel to the public port)
   /** Starts a built agent's sandbox run (`karuna run` with the hosted runner). Returns a stop function. */
   launcher?: (run: { agentId: string; token: string; runId: string; onOutput: (line: string) => void; onExit: (code: number) => void }) => () => void;
+  /** Escrow for large payments (the relayer key opens and releases holds). None: escrow rules make such payments fail. */
+  escrow?: EscrowBackend;
   /** Undoes a run's file changes from its snapshot on this machine (`karuna undo`). PATH = one file's host path. */
   undo?: (run: { runId: string; path?: string }) => Promise<{ restored: { mount: string; path: string }[]; skipped: { mount: string; path: string; reason: string }[]; error?: string }>;
 }
@@ -500,7 +518,7 @@ export class Gatekeeper extends EventEmitter {
 
   private addSpend(agentId: string, amount: number) {
     const day = (this.state.spend[this.today()] ??= {});
-    day[agentId] = Math.round(((day[agentId] ?? 0) + amount) * 1e6) / 1e6;
+    day[agentId] = Math.max(0, Math.round(((day[agentId] ?? 0) + amount) * 1e6) / 1e6);
   }
 
   // ------------------------------------------------ Dharma plumbing
@@ -582,6 +600,99 @@ export class Gatekeeper extends EventEmitter {
     this.shieldHousekeeping();
     this.scheduleBuiltAgents();
     this.watchConnectors();
+    await this.releaseDueEscrows();
+  }
+
+  // ================================================================ escrow (undo for large payments)
+
+  /** The escrow setting for this agent's payment, or null: the strictest active `escrow` rule that applies. */
+  escrowFor(agentId: string, amountUsd: number): { thresholdUsd: number; waitSeconds: number } | null {
+    const rules = (this.policy?.rules ?? []).filter((r) => r.active && !r.builtin && r.scope === "escrow" && (!r.agent || r.agent === agentId));
+    if (!rules.length) return null;
+    const thresholdUsd = Math.min(...rules.map((r) => r.maxUsd));
+    const waitSeconds = Math.max(...rules.map((r) => Number(r.target) || 0));
+    return amountUsd >= thresholdUsd && waitSeconds > 0 ? { thresholdUsd, waitSeconds } : null;
+  }
+
+  /** The org's Escrow, deployed by the relayer the first time a payment needs it. */
+  private escrowDeploying: Promise<string> | null = null;
+  private async ensureEscrow(): Promise<string> {
+    if (this.org.escrow) return this.org.escrow.address;
+    if (!this.deps.escrow) throw new GatekeeperError("Escrow is on for this payment, but this Karuna has no relayer key (KARUNA_RELAYER_KEY) to hold it. Nothing was paid.", 503);
+    this.escrowDeploying ??= (async () => {
+      const d = await this.deps.escrow!.deploy({ dharma: this.dharmaAddress(), refundTo: this.org.wallet!.address as Address });
+      this.org.escrow = { address: lower(d.address), opener: lower(this.deps.escrow!.opener), deployedAt: this.now().toISOString(), txRef: d.txRef };
+      this.logEvent({ type: "escrow-deployed", escrow: this.org.escrow.address, opener: this.org.escrow.opener, txRef: d.txRef });
+      this.save();
+      return this.org.escrow.address;
+    })().finally(() => (this.escrowDeploying = null));
+    return this.escrowDeploying;
+  }
+
+  private releasing = false;
+  /** Release every hold whose window has passed (anyone may; the Gatekeeper does it promptly). */
+  async releaseDueEscrows() {
+    if (this.releasing || !this.deps.escrow) return;
+    const now = this.now().getTime();
+    const due = this.state.proposals.filter((p) => p.escrow?.status === "held" && p.escrow.holdId && Date.parse(p.escrow.releaseAt) <= now);
+    if (!due.length) return;
+    this.releasing = true;
+    try {
+      for (const p of due) {
+        const e = p.escrow!;
+        try {
+          const r = await this.deps.escrow.release(e.address as Address, BigInt(e.holdId!));
+          e.status = "released";
+          e.releaseTx = r.txRef;
+          delete e.blocked;
+          this.logEvent({ type: "escrow-released", proposalId: p.id, holdId: e.holdId, txRef: r.txRef });
+        } catch (err) {
+          const reason = err instanceof ChainError ? err.reason : undefined;
+          const blocked = reason === "Frozen" ? "Agents are frozen; it releases once they're unfrozen, or a member can cancel it."
+            : reason === "NotPayee" ? "The payee was removed; a member should cancel it."
+            : reason === "NotHeld" ? null
+            : `Couldn't release yet: ${scrub(err)}`;
+          if (blocked === null) e.status = "released"; // settled already (released by someone else)
+          else if (e.blocked !== blocked) {
+            e.blocked = blocked;
+            this.logEvent({ type: "escrow-release-blocked", proposalId: p.id, holdId: e.holdId, detail: blocked });
+          }
+        }
+      }
+      this.save();
+    } finally {
+      this.releasing = false;
+    }
+  }
+
+  /** A member cancels a held payment (signed; the Escrow checks the signer is a member). The USDC returns to the org's wallet. */
+  async cancelEscrow(paymentId: string, input: { signer?: unknown; signature?: unknown }) {
+    const p = this.state.proposals.find((x) => x.id === paymentId);
+    const e = p?.escrow;
+    if (!p || !e) throw new GatekeeperError("That payment isn't in escrow", 404);
+    if (e.status !== "held" || !e.holdId) throw new GatekeeperError(e.status === "opening" ? "It's still being placed in escrow; try again in a moment" : `It was already ${e.status}`, 409);
+    if (!this.deps.escrow) throw new GatekeeperError("This Karuna has no relayer key to send the cancel", 503);
+    const signer = requireAddress(input.signer, "signer");
+    if (!this.isMember(signer)) throw new GatekeeperError("This key is not a Dharma member", 403);
+    const signature = String(input.signature ?? "") as Hex;
+    const typed = escrowCancelTypedData(e.address as Address, this.requireReady().chainId, { id: BigInt(e.holdId) });
+    if (!(await verifyTypedData({ address: signer as Address, ...typed, signature }))) throw new GatekeeperError("Signature does not match this cancel", 401);
+    try {
+      const r = await this.deps.escrow.cancel(e.address as Address, BigInt(e.holdId), signature);
+      e.status = "cancelled";
+      e.cancelTx = r.txRef;
+      e.cancelledBy = lower(signer);
+      delete e.blocked;
+    } catch (err) {
+      if (err instanceof ChainError && err.reason === "NotHeld") throw new GatekeeperError("Too late: it was already released or cancelled", 409);
+      throw new GatekeeperError(`Cancel failed: ${scrub(err)}`, 502);
+    }
+    const pay = p.payload!;
+    this.addSpend(p.agentId, -pay.amountUsd); // the money came back
+    this.logEvent({ type: "escrow-cancelled", proposalId: p.id, holdId: e.holdId, by: lower(signer), amountUsd: pay.amountUsd, txRef: e.cancelTx });
+    this.emit("notice", { kind: "escrow", agent: p.agentId, tone: "good", summary: `Cancelled ${usd(pay.amountUsd)} in escrow; it's back in the wallet` });
+    this.save();
+    return { status: "cancelled" as const, txRef: e.cancelTx };
   }
 
   private connectorsCheckedAt = 0;
@@ -1130,6 +1241,19 @@ export class Gatekeeper extends EventEmitter {
         const r = await this.deps.wallet.payX402(pay.from, pay.url, pay.method, pay.body, pay.amountUsd, p.id);
         p.result = r.response;
         p.txRef = r.transaction;
+      } else if (this.escrowFor(p.agentId, pay.amountUsd)) {
+        const e = this.escrowFor(p.agentId, pay.amountUsd)!;
+        const escrow = await this.ensureEscrow();
+        const releaseAt = Math.floor(this.now().getTime() / 1000) + e.waitSeconds;
+        // Marked before the USDC moves, so the watchdog knows the transfer into the Escrow is ours.
+        p.escrow = { address: escrow, status: "opening", releaseAt: new Date(releaseAt * 1000).toISOString() };
+        this.save();
+        const r = await this.deps.wallet.transfer(pay.from, escrow, pay.amountUsd, p.id);
+        p.txRef = r.txRef;
+        const h = await this.deps.escrow!.open(escrow as Address, { payee: pay.to as Address, amountUsd: pay.amountUsd, releaseAt, ref: escrowRef(p.id) });
+        p.escrow = { ...p.escrow, status: "held", holdId: h.id.toString(), openTx: h.txRef };
+        p.result = { sent: pay.amountUsd, to: pay.to, txRef: r.txRef, escrowedUntil: p.escrow.releaseAt };
+        this.logEvent({ type: "escrowed", proposalId: p.id, escrow, holdId: p.escrow.holdId, releaseAt: p.escrow.releaseAt, amountUsd: pay.amountUsd, txRef: h.txRef });
       } else {
         const r = await this.deps.wallet.transfer(pay.from, pay.to, pay.amountUsd, p.id);
         p.result = { sent: pay.amountUsd, to: pay.to, txRef: r.txRef };
@@ -1714,7 +1838,7 @@ export class Gatekeeper extends EventEmitter {
       : this.state.proposals.find((p) =>
           !!p.payload && !claimed.has(p.id) && (p.status === "executing" || p.status === "executed") &&
           Math.round(p.payload.amountUsd * 1e6) === micro &&
-          lower(p.payload.kind === "transfer" ? p.payload.to : p.payload.seller) === to);
+          (lower(p.payload.kind === "transfer" ? p.payload.to : p.payload.seller) === to || (!!p.escrow && lower(p.escrow.address) === to)));
     if (to === GATEWAY_WALLET) ev.verdict = "gateway-deposit";
     else if (match) {
       ev.verdict = "matched";
@@ -2812,6 +2936,7 @@ export class Gatekeeper extends EventEmitter {
         name: this.org.name,
         wallet: this.org.wallet,
         dharma: this.org.dharma ? { ...this.org.dharma, explorer: `${EXPLORER}/address/${this.org.dharma.address}` } : null,
+        escrow: this.org.escrow ? { ...this.org.escrow, explorer: `${EXPLORER}/address/${this.org.escrow.address}` } : null,
       },
       policy: pol && {
         loaded: true,

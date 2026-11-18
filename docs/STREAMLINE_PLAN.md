@@ -47,8 +47,10 @@ vote) don't go straight to the payee:
 - x402 data purchases stay instant (tiny amounts, paid via Gateway).
 - This also applies to a Level 3 agent with no payment limit: large payments are still cancellable.
 
-**Settings (Dharma).** `escrowThreshold` and `escrowWindow`: lowering the threshold or lengthening the
-window is instant (tightening); the reverse is a vote. Both are choices in the proposal form.
+**Settings (Dharma).** An `escrow` rule (amount from, hold time), proposed from the proposal form and
+voted like any rule. With several, the strictest applies (lowest amount, longest hold). The org's
+Escrow is deployed by the relayer the first time a payment needs it; without a relayer key, a payment
+that should be escrowed fails and nothing is paid.
 
 ## 4. Worst-case meter
 

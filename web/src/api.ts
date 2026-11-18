@@ -25,6 +25,11 @@ export interface Proposal {
   resolvedAt?: string;
   txRef?: string;
   error?: string;
+  /** A large payment held in the org's Escrow: any member can cancel it before it releases. */
+  escrow?: {
+    address: string; status: "opening" | "held" | "released" | "cancelled"; holdId?: string; releaseAt: string;
+    openTx?: string; releaseTx?: string; cancelTx?: string; cancelledBy?: string; blocked?: string;
+  };
 }
 
 export interface OnchainRule {
@@ -165,6 +170,7 @@ export interface Snapshot {
     name: string;
     wallet: { address: string; chain: string } | null;
     dharma: { address: string; chainId: number; deployedAt: string; txRef: string; explorer: string } | null;
+    escrow?: { address: string; opener: string; deployedAt: string; txRef: string; explorer: string } | null;
   };
   policy: null | {
     loaded: true;

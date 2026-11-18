@@ -219,6 +219,8 @@ export function describeScope(scope: string, target: string, n: { agent?: (id: s
       return `mounting ${target}`;
     case "unsandboxed":
       return "running outside the sandbox";
+    case "escrow":
+      return `escrow: payments wait ${waitText(Number(target))} before release, and any member can cancel them`;
     default:
       return `${scope}${target ? ` → ${target}` : ""}`;
   }
@@ -232,6 +234,9 @@ export function describeChange(c: Change, l: Labels = {}): string {
   switch (c.op) {
     case "AddRule": {
       if (!c.scope) return `Re-enable default rule ${c.id}`;
+      if (c.scope === "escrow") {
+        return `Hold payments of ${usd(c.maxUsd ?? 0)} or more in escrow for ${waitText(Number(c.target))}${c.agent ? ` for ${ag(c.agent)}` : ""}; any member can cancel before release (${c.id})`;
+      }
       const who = c.agent ? ag(c.agent) : "every agent";
       return `${c.outcome === "Allow" ? "Allow" : c.outcome === "Deny" ? "Block" : "Require approval for"} ${describeScope(c.scope, c.target ?? "", { agent: ag, payee: p })} for ${who}${c.outcome === "Allow" && c.maxUsd ? ` up to ${usd(c.maxUsd)}` : ""} (${c.id})`;
     }

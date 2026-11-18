@@ -159,6 +159,14 @@ export const previewSnapshot: Snapshot = {
   ],
   proposals: [
     {
+      id: "p-8", agentId: "supplies", createdAt: iso(1500), action: { type: "transfer", to: flour, amountUsd: 240 },
+      request: { tool: "payment", to: flour, amountUsd: 240, paymentKind: "transfer" },
+      decision: { outcome: "allow", ruleId: "learn-supplies-flour", reason: "Allowed by Dharma rule" },
+      facts: [], payload: { kind: "transfer", amountUsd: 240 }, payloadHash: "cd".repeat(32), status: "executed",
+      approvals: [], approvalsNeeded: 1, txRef: "0x" + "12".repeat(32),
+      escrow: { address: "0x00000000000000000000000000000000000000e5", status: "held", holdId: "3", releaseAt: new Date(Date.now() + 20 * 3600_000).toISOString() },
+    },
+    {
       id: "p-9", agentId: "payables", createdAt: iso(95), action: { type: "transfer", to: flour, amountUsd: 612.5 },
       reason: "Monthly flour invoice #2291 from Valley Flour Co., matches last month's order.",
       request: { tool: "payment", to: flour, amountUsd: 612.5, paymentKind: "transfer" },
