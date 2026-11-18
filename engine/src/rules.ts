@@ -25,11 +25,45 @@ function isAllowlisted(url: string, ctx: PolicyContext): boolean {
 
 function touchesSecret(r: Request): boolean {
   const hay = `${r.path ?? ""} ${cmd(r)}`.toLowerCase();
-  return /(^|[\s/"'=(])\.env(\b|["')])/.test(hay) || /\.pem\b/.test(hay) || /\bid_rsa\b/.test(hay);
+  return /(^|[\s/"'=(<>])\.env(\b|["')])/.test(hay) || /\.pem\b/.test(hay) || /\bid_rsa\b/.test(hay);
 }
 
-const RM_RF_ROOT = /\brm\s+(-[a-z]*\s+)*-?[a-z]*\s*(-rf|-fr|-r\s+-f|-f\s+-r)\s+\/(\s|$|\*)/i;
-const RM_RF_ANY = /\brm\s+-[a-z]*r[a-z]*f?|rm\s+-[a-z]*f[a-z]*r/i; // rm with both r and f flags
+/** A shell command split into the commands it runs: `a && b`, `a; b`, `a | b`, `$(b)`, backticks, new lines. */
+export function shellParts(command: string): string[] {
+  // A lone `&` runs in the background; `2>&1` and `&>file` are redirects, not separators.
+  return command.split(/&&|\|\||\|&?|[;\n`]|(?<![<>&])&(?!>)|\$\(|\)/).map((s) => s.trim()).filter(Boolean);
+}
+
+/** Any `rm` in the command that deletes recursively, with flags in any form (-rf, -f -r, --recursive), and whether one aims at /. */
+function rmRecursive(command: string): { any: boolean; root: boolean } {
+  let any = false;
+  let root = false;
+  for (const part of shellParts(command)) {
+    const words = part.split(/\s+/);
+    const at = words.findIndex((w) => /^(\S*\/)?rm$/i.test(w));
+    if (at === -1) continue;
+    let recursive = false;
+    let i = at + 1;
+    for (; i < words.length && words[i]!.startsWith("-"); i++) {
+      const w = words[i]!;
+      if (w === "--") {
+        i++;
+        break;
+      }
+      if (w.startsWith("--")) recursive ||= w.toLowerCase() === "--recursive";
+      else recursive ||= /r/i.test(w.slice(1));
+    }
+    if (!recursive) continue;
+    any = true;
+    if (words.slice(i).some((t) => /^["']?\/\*?["']?$/.test(t))) root = true;
+  }
+  return { any, root };
+}
+
+const RM_RF_ROOT_RE = /\brm\s+(-[a-z]*\s+)*-?[a-z]*\s*(-rf|-fr|-r\s+-f|-f\s+-r)\s+\/(\s|$|\*)/i;
+const RM_RF_ANY_RE = /\brm\s+-[a-z]*r[a-z]*f?|rm\s+-[a-z]*f[a-z]*r/i; // a recursive rm
+const RM_RF_ROOT = { test: (c: string) => RM_RF_ROOT_RE.test(c) || rmRecursive(c).root };
+const RM_RF_ANY = { test: (c: string) => RM_RF_ANY_RE.test(c) || rmRecursive(c).any };
 const FORKBOMB = /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/;
 const MKFS = /\bmkfs(\.\w+)?\b/i;
 const PKG_INSTALL = /\b(npm|pnpm|yarn)\s+(install|add|i)\b|\bpip3?\s+install\b/i;
@@ -416,12 +450,16 @@ export function commandMatches(command: string, target: string): boolean {
  * Slashes either way, a leading `./`, and case don't matter.
  */
 export function pathMatches(path: string, target: string): boolean {
-  const norm = (s: string) => s.trim().replace(/\\/g, "/").replace(/^(\.\/)+/, "").replace(/\/+$/, "").toLowerCase();
-  const p = norm(path);
+  const norm = (s: string) => s.trim().replace(/\\/g, "/").replace(/^\/+/, "").replace(/^(\.\/)+/, "").replace(/\/+$/, "").toLowerCase();
   const t = norm(target);
   if (!t) return true;
-  if (t.includes("*")) return globRe(t).test(p) || globRe(t).test(p.split("/").pop() ?? "");
-  return p === t || p.startsWith(`${t}/`);
+  // A coding agent's project is presented as `workspace/…`: a rule on `finance` covers `workspace/finance/…` too.
+  const full = norm(path);
+  const candidates = /^workspace(\/|$)/.test(full) && !/^workspace(\/|$)/.test(t) ? [full, full.replace(/^workspace\/?/, "")] : [full];
+  return candidates.some((p) => {
+    if (t.includes("*")) return globRe(t).test(p) || globRe(t).test(p.split("/").pop() ?? "");
+    return p === t || p.startsWith(`${t}/`);
+  });
 }
 
 /** A custom (non-default) Dharma rule as an engine rule. Unknown scopes never match. */
@@ -452,7 +490,13 @@ export function customRule(r: OnchainRule): Rule {
         return !target || httpTargetMatches(req.url, target);
       }
       if (kind === "shell") {
-        return req.tool === "shell" && commandMatches(req.command ?? "", r.target);
+        if (req.tool !== "shell") return false;
+        const command = req.command ?? "";
+        const parts = shellParts(command);
+        // An allow covers a chain only if every command in it is allowed (`npm test && rm -rf x` isn't
+        // `npm test`); a block or approval applies if any command in it matches (`cd x && terraform apply`).
+        if (r.outcome === "allow") return parts.length > 0 && parts.every((p) => commandMatches(p, r.target));
+        return commandMatches(command, r.target) || parts.some((p) => commandMatches(p, r.target));
       }
       if (kind === "file") {
         if (req.tool !== "file") return false;

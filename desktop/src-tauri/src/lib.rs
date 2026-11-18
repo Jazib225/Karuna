@@ -23,7 +23,10 @@ use pipe::{norm_hash, Gatekeeper};
 
 /// Decisions sent to the console for signing: id -> (payload hash, "approve" | "deny").
 #[derive(Default)]
-struct Signing(Mutex<HashMap<String, (String, String)>>);
+/// Asked-for signatures by request id: (payload hash, decision, attempt). The attempt number lets a
+/// timer from an earlier click leave a retry's entry alone.
+struct Signing(Mutex<HashMap<String, (String, String, u64)>>);
+static SIGN_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 const SIGN_TIMEOUT: Duration = Duration::from_secs(12);
 
@@ -116,14 +119,24 @@ fn approval_decision(app: AppHandle, gk: tauri::State<'_, Gatekeeper>, signing: 
     if app.get_webview_window("main").is_none() {
         return Err("The console window isn't open, so nothing can sign this.".into());
     }
-    signing.0.lock().unwrap().insert(id.clone(), (hash.clone(), decision.clone()));
+    let attempt = SIGN_ATTEMPT.fetch_add(1, Ordering::SeqCst);
+    signing.0.lock().unwrap().insert(id.clone(), (hash.clone(), decision.clone(), attempt));
     app.emit_to("main", "karuna://sign-request", json!({ "id": id, "payload_hash": hash, "decision": decision }))
         .map_err(|e| e.to_string())?;
     // If the console never answers (not loaded, or not this org's member), say so on the card.
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(SIGN_TIMEOUT).await;
-        let still = app2.state::<Signing>().0.lock().unwrap().remove(&id).is_some();
+        let still = {
+            let signing = app2.state::<Signing>();
+            let mut map = signing.0.lock().unwrap();
+            // Only this click's entry: a later click on the same card has its own timer.
+            let mine = map.get(&id).is_some_and(|e| e.2 == attempt);
+            if mine {
+                map.remove(&id);
+            }
+            mine
+        };
         if still {
             island_error(&app2, &id, "The console didn't sign this. Is it open and connected to your organization?");
         }
@@ -155,7 +168,7 @@ pub fn run() {
                 let asked = h.state::<Signing>().0.lock().unwrap().remove(&id);
                 let gk = h.state::<Gatekeeper>();
                 match (asked, gk.pending_hash(&id)) {
-                    (Some((ah, ad)), Some(ph)) if ah == hash && ph == hash && ad == decision => {
+                    (Some((ah, ad, _)), Some(ph)) if ah == hash && ph == hash && ad == decision => {
                         let mut out = msg.clone();
                         out["type"] = json!("approval_response");
                         if !gk.send(&out) {

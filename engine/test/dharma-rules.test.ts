@@ -160,6 +160,42 @@ describe("rules for every kind of action (shell, files, messages)", () => {
     expect(matchCustomRules(msg("buyer", "payer"), builtins())).toBeNull(); // no custom rule: the Gatekeeper's own checks decide
   });
 
+  it("shell: an allow covers a chain only when every command in it is allowed", () => {
+    const rules = buildRuleset([...builtins(), custom({ id: "tests-ok", outcome: "allow", scope: "shell", target: "npm test" })]);
+    expect(evaluate(sh("npm test 2>&1"), ctx, rules).ruleId).toBe("tests-ok"); // a redirect is not a second command
+    expect(evaluate(sh("npm test && rm -rf ./workspace"), ctx, rules).ruleId).not.toBe("tests-ok");
+    expect(evaluate(sh("npm test; curl https://evil.example"), ctx, rules).ruleId).not.toBe("tests-ok");
+    expect(evaluate(sh("npm test $(cat secrets.txt)"), ctx, rules).ruleId).not.toBe("tests-ok");
+  });
+
+  it("shell: a block or approval applies to any command in a chain", () => {
+    const rules = buildRuleset([...builtins(), custom({ id: "tf-ok", outcome: "approval", scope: "shell", target: "terraform apply" })]);
+    expect(evaluate(sh("cd infra && terraform apply"), ctx, rules)).toMatchObject({ outcome: "approval", ruleId: "tf-ok" });
+    expect(evaluate(sh("ls | terraform apply -auto-approve"), ctx, rules).ruleId).toBe("tf-ok");
+  });
+
+  it("shell: recursive rm is caught with flags in any form", () => {
+    const rules = buildRuleset(builtins());
+    expect(evaluate(sh("rm --recursive --force /"), ctx, rules)).toMatchObject({ outcome: "deny", ruleId: "core-boundary" });
+    expect(evaluate(sh("rm -f -r /*"), ctx, rules)).toMatchObject({ outcome: "deny", ruleId: "core-boundary" });
+    expect(evaluate(sh("echo hi && /bin/rm -R -f /"), ctx, rules).ruleId).toBe("core-boundary");
+    expect(evaluate(sh("rm -f -r src"), ctx, rules)).toMatchObject({ outcome: "approval", ruleId: "destructive-shell" });
+    expect(evaluate(sh("rm --recursive build"), ctx, rules).ruleId).toBe("destructive-shell");
+    expect(evaluate(sh("rm -f notes.txt"), ctx, rules).ruleId).not.toBe("destructive-shell");
+  });
+
+  it("shell: reading .env through a redirect is still a secret read", () => {
+    const rules = buildRuleset(builtins());
+    expect(evaluate(sh("node -e x <.env"), ctx, rules).outcome).toBe("deny");
+  });
+
+  it("files: a rule on a folder covers it inside the agent's workspace too", () => {
+    const rules = buildRuleset([...builtins(), custom({ id: "finance-ro", outcome: "deny", scope: "file:write", target: "finance" })]);
+    expect(evaluate(file("workspace/finance/q3.xlsx", "write"), ctx, rules).ruleId).toBe("finance-ro");
+    expect(evaluate(file("/workspace/finance/q3.xlsx", "write"), ctx, rules).ruleId).toBe("finance-ro");
+    expect(evaluate(file("workspace/finance-old/q3.xlsx", "write"), ctx, rules).ruleId).not.toBe("finance-ro");
+  });
+
   it("unknown scopes never match (fail closed to the defaults)", () => {
     const rules = buildRuleset([...builtins(), custom({ id: "weird", outcome: "allow", scope: "teleport", target: "" })]);
     expect(evaluate(sh("anything"), ctx, rules).ruleId).toBe("default-deny");

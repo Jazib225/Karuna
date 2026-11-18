@@ -64,10 +64,13 @@ const answer = (r: { status: string; id: string; result?: unknown }) =>
   : "Karuna blocked this.";
 
 function inWorkspace(p: string) {
-  const full = normalize(join(WORKSPACE, p.replace(/^\/?workspace\/?/, "")));
-  if (!full.startsWith(WORKSPACE)) throw new Error("only files in your workspace");
+  const full = normalize(join(WORKSPACE, p.replace(/^\/?workspace\/?/, ""))).replace(/\\/g, "/");
+  if (full !== WORKSPACE && !full.startsWith(`${WORKSPACE}/`)) throw new Error("only files in your workspace");
   return full;
 }
+
+/** The path as Karuna should judge it: the file that will actually be written, not what the model typed (`a/../finance/x`). */
+const workspacePath = (full: string) => full.slice(WORKSPACE.length + 1);
 
 /** How long a save waits for a person before the run gives up on it. */
 const WRITE_WAIT_MS = Number(process.env.KARUNA_WRITE_WAIT_SECONDS ?? 600) * 1000;
@@ -125,7 +128,7 @@ async function run(name: string, input: Record<string, unknown>): Promise<string
       // approves or denies it (the card shows what would be written); this run waits for them.
       const f = inWorkspace(String(input.path));
       const content = String(input.content ?? "");
-      const verdict = await checkWrite(String(input.path), content);
+      const verdict = await checkWrite(workspacePath(f), content);
       if (verdict !== "allowed") return verdict === "denied" ? "Karuna blocked this." : "Not saved: nobody approved it in time.";
       mkdirSync(dirname(f), { recursive: true });
       writeFileSync(f, content);

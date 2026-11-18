@@ -1019,7 +1019,15 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
     };
     // A freeze alert ("Unfreezing needs a member vote") stays only while agents are still frozen.
     const thawed = (a: Alert) => !!a.whileFrozen && !sRef.current.frozen;
-    const t = setInterval(() => setAlerts((prev) => prev.filter((a) => (a.sticky && !nothingToVote(a) && !thawed(a)) || Date.now() - a.at < 8000)), 1000);
+    // Same array back when nothing expired, so the whole console doesn't re-render every second.
+    const t = setInterval(
+      () =>
+        setAlerts((prev) => {
+          const kept = prev.filter((a) => (a.sticky && !nothingToVote(a) && !thawed(a)) || Date.now() - a.at < 8000);
+          return kept.length === prev.length ? prev : kept;
+        }),
+      1000,
+    );
     return () => clearInterval(t);
   }, []);
   const dismiss = (id: string) => setAlerts((prev) => prev.filter((a) => a.id !== id));
@@ -1049,7 +1057,8 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
     }
   }, [s.shield.alerts]);
 
-  const pending = s.proposals.filter((p) => p.status === "pending");
+  // Waiting on me: not ones I've already signed that still need someone else's approval.
+  const pending = s.proposals.filter((p) => p.status === "pending" && !p.approvals.some((a) => a.memberId === myAddr));
   const ballots = pol.proposals.filter((g) => g.status === "open" && !g.voters.includes(myAddr));
   const frozen = s.frozen || null;
   const openUnfreeze = pol.proposals.find((g) => g.change?.op === "Unfreeze" && (g.status === "open" || g.status === "queued"));
@@ -1268,6 +1277,8 @@ function Overview({ ctx, wallet, go }: { ctx: Ctx; wallet: WalletInfo | null; go
   const { s } = ctx;
   const pol = s.policy!;
   const pending = s.proposals.filter((p) => p.status === "pending");
+  const myAddr = ctx.me.address.toLowerCase();
+  const waitingOnMe = pending.filter((p) => !p.approvals.some((a) => a.memberId === myAddr)).length;
   const spent = pol.agents.reduce((n, a) => n + a.spentTodayUsd, 0);
   const live = pol.proposals.filter((g) => g.status === "open" || g.status === "queued");
   const today = new Date().toDateString();
@@ -1295,7 +1306,7 @@ function Overview({ ctx, wallet, go }: { ctx: Ctx; wallet: WalletInfo | null; go
   return (
     <div className="stack">
       <div className="tiles">
-        <div className={`tile rise ${pending.length ? "attention" : ""}`} style={st(0)}><div className="k">Waiting for you <Icon name="approvals" size={14} /></div><div className="v heading-gradient">{pending.length}</div><div className="note">{pending.length ? "to approve" : "all clear"}</div></div>
+        <div className={`tile rise ${waitingOnMe ? "attention" : ""}`} style={st(0)}><div className="k">Waiting for you <Icon name="approvals" size={14} /></div><div className="v heading-gradient">{waitingOnMe}</div><div className="note">{waitingOnMe ? "to approve" : "all clear"}</div></div>
         <div className="tile rise" style={st(1)}><div className="k">Wallet (USDC) <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{wallet ? usd(Number(wallet.usdc)) : "…"}</div><GatewayFunds ctx={ctx} wallet={wallet} /></div>
         <div className="tile rise" style={st(2)}><div className="k" title="Actions Karuna blocked before they ran, in the last 7 days">Stopped this week <Icon name="shield" size={14} /></div><div className="v heading-gradient">{stoppedWeek}</div><div className="note one-line">of {week.length} actions{inEscrow > 0 ? ` · $${Math.round(inEscrow).toLocaleString()} in escrow` : ""}</div></div>
         <div className="tile rise" style={st(3)}><div className="k">Actions today <Icon name="activity" size={14} /></div><div className="v heading-gradient">{actionsToday}</div><div className="note one-line">{allowedToday} allowed · {blockedToday} blocked · {heldToday} held</div></div>
@@ -3340,7 +3351,9 @@ function RunTimeline({ ctx, id }: { ctx: Ctx; id: string }) {
     let alive = true;
     const load = () => (PREVIEW ? setR(previewRun(id)) : void api<RunDetail>(`/runs/${id}`).then((x) => alive && setR(x)).catch(() => undefined));
     load();
-    const t = setInterval(load, 3000);
+    // A finished run doesn't change: no fallback polling for it.
+    const finished = !!summary && summary.status !== "running" && summary.status !== "starting";
+    const t = finished ? undefined : setInterval(load, 3000);
     return () => {
       alive = false;
       clearInterval(t);

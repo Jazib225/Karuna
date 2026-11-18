@@ -371,8 +371,15 @@ export function useGatekeeper() {
     return running.current;
   }, []);
 
+  // A burst of changes (a backfill, a run's steps) asks for the wallet many times: one read at a time.
+  const walletBusy = useRef(false);
   const refreshWallet = useCallback(() => {
-    api<WalletInfo | null>("/wallet").then(setWallet).catch(() => undefined);
+    if (walletBusy.current) return;
+    walletBusy.current = true;
+    api<WalletInfo | null>("/wallet")
+      .then(setWallet)
+      .catch(() => undefined)
+      .finally(() => (walletBusy.current = false));
   }, []);
 
   useEffect(() => {
@@ -387,13 +394,19 @@ export function useGatekeeper() {
     let backoff = 1000;
     let closed = false;
     let lastSeen = Date.now();
+    let reopening = false;
     const reopen = () => {
+      // One reopen at a time: the watchdog must not keep cancelling a scheduled retry (with a 15 s
+      // backoff it fires first every time, and the stream would never come back).
+      if (reopening) return;
+      reopening = true;
       es?.close();
       clearTimeout(retry);
       retry = setTimeout(open, backoff);
       backoff = Math.min(backoff * 2, 15_000);
     };
     const open = () => {
+      reopening = false;
       if (closed) return;
       lastSeen = Date.now();
       es = new EventSource("/api/events");

@@ -139,7 +139,9 @@ export class Relay extends EventEmitter {
     if (!this.opts.securityToken) return { status: 503, body: { error: "QUICKNODE_SECURITY_TOKEN not configured" } };
     let payload: string;
     try {
-      payload = (headers["content-encoding"] === "gzip" ? gunzipSync(rawBody) : rawBody).toString("utf8");
+      // Bounded: the body is unzipped before its signature can be checked, so a small zip bomb
+      // can't exhaust memory.
+      payload = (headers["content-encoding"] === "gzip" ? gunzipSync(rawBody, { maxOutputLength: 32 * 1024 * 1024 }) : rawBody).toString("utf8");
     } catch {
       this.stats.rejected++;
       return { status: 400, body: { error: "bad body" } };
@@ -197,8 +199,11 @@ export class Relay extends EventEmitter {
     const latest = this.opts.securityToken ? head - BigInt(this.opts.lagBlocks ?? 40) : head;
     if (this.lastBlock === null) this.lastBlock = latest - 20n;
     if (latest <= this.lastBlock) return;
-    const from = latest - this.lastBlock > 2000n ? latest - 2000n : this.lastBlock + 1n;
-    const logs = await client.getLogs({ address: dharma as Address, fromBlock: from, toBlock: latest });
+    // At most 2000 blocks a pass, from where the last pass ended: after an outage the net catches
+    // up over a few polls instead of skipping the gap.
+    const from = this.lastBlock + 1n;
+    const to = latest - from >= 2000n ? from + 1999n : latest;
+    const logs = await client.getLogs({ address: dharma as Address, fromBlock: from, toBlock: to });
     this.stats.lastRpcPollAt = Date.now();
     this.ingest(decodeDharmaLogs(logs.map(toRaw), this.allowed(), "rpc"));
     // The watchdog's safety net: USDC out of the wallet, from either emitter.
@@ -207,11 +212,11 @@ export class Relay extends EventEmitter {
       const from32 = `0x${"0".repeat(24)}${wallet.toLowerCase().slice(2)}` as `0x${string}`;
       const out = await client.request({
         method: "eth_getLogs",
-        params: [{ address: Object.keys(USDC_EMITTERS) as `0x${string}`[], topics: [TRANSFER_TOPIC as `0x${string}`, from32], fromBlock: `0x${from.toString(16)}`, toBlock: `0x${latest.toString(16)}` }],
+        params: [{ address: Object.keys(USDC_EMITTERS) as `0x${string}`[], topics: [TRANSFER_TOPIC as `0x${string}`, from32], fromBlock: `0x${from.toString(16)}`, toBlock: `0x${to.toString(16)}` }],
       } as never) as { address: string; topics: string[]; data: string; blockNumber: string; transactionHash: string; logIndex: string }[];
       this.ingestTransfers(decodeWalletTransfers(out, wallet, "rpc"));
     }
-    this.lastBlock = latest;
+    this.lastBlock = to;
   }
 
   /**

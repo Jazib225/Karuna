@@ -437,6 +437,8 @@ export class Gatekeeper extends EventEmitter {
   private lastSyncKey = "";
   private lastFingerprint = "";
   private lastFullRead = 0;
+  private syncStarted = 0; // full policy reads begun
+  private syncApplied = 0; // the newest one applied
   private timer: NodeJS.Timeout | null = null;
   private readonly now: () => Date;
   /** Live sandbox runs, by session token. In memory: a Gatekeeper restart ends every run. */
@@ -477,7 +479,13 @@ export class Gatekeeper extends EventEmitter {
   /** Load the onchain policy, then keep it fresh and run governance housekeeping. */
   async start(intervalMs = 4000) {
     await this.sync().catch((e) => console.error("dharma sync:", scrub(e)));
-    this.timer = setInterval(() => void this.housekeeping().catch((e) => console.error("gatekeeper:", scrub(e))), intervalMs);
+    // One housekeeping pass at a time: a slow chain read must not stack passes (and duplicate anchors).
+    let busy = false;
+    this.timer = setInterval(() => {
+      if (busy) return;
+      busy = true;
+      void this.housekeeping().catch((e) => console.error("gatekeeper:", scrub(e))).finally(() => (busy = false));
+    }, intervalMs);
   }
 
   stop() {
@@ -488,7 +496,13 @@ export class Gatekeeper extends EventEmitter {
   // ------------------------------------------------ persistence helpers
 
   private save() {
-    if (this.state.proposals.length > MAX_PROPOSALS_KEPT) this.state.proposals = this.state.proposals.slice(-MAX_PROPOSALS_KEPT);
+    if (this.state.proposals.length > MAX_PROPOSALS_KEPT) {
+      // Drop the oldest finished ones only: a held request, a payment being sent or money in escrow
+      // stays however many cards come after it.
+      const live = (p: Proposal) => p.status === "pending" || p.status === "executing" || p.escrow?.status === "held" || p.escrow?.status === "opening";
+      let extra = this.state.proposals.length - MAX_PROPOSALS_KEPT;
+      this.state.proposals = this.state.proposals.filter((p) => live(p) || extra-- <= 0);
+    }
     this.deps.store.writeJson("org.json", this.org);
     this.deps.store.writeJson("state.json", this.state);
     this.emit("change");
@@ -533,8 +547,21 @@ export class Gatekeeper extends EventEmitter {
         allowlistedDomains: pol.domains,
         levelLimits: pol.levelLimits ?? undefined,
       },
-      this.spentToday(),
+      this.spentIncludingInFlight(),
     );
+  }
+
+  /**
+   * Today's spend plus payments still being sent: a payment counts against the allowance from the
+   * moment it's decided, so simultaneous payments can't each see the full allowance.
+   */
+  private spentIncludingInFlight(): Record<string, number> {
+    const spent = this.spentToday();
+    for (const id of this.executing) {
+      const p = this.state.proposals.find((x) => x.id === id);
+      if (p?.payload) spent[p.agentId] = (spent[p.agentId] ?? 0) + p.payload.amountUsd;
+    }
+    return spent;
   }
 
   private logEvent(event: LogEvent): LogEntry {
@@ -605,7 +632,12 @@ export class Gatekeeper extends EventEmitter {
       const live = this.policy.proposals.some((x) => x.status === "open" || x.status === "queued");
       if (fp === this.lastFingerprint && !live && Date.now() - this.lastFullRead < 30_000) return;
     }
+    const seq = ++this.syncStarted;
     const p = await readPolicy(this.deps.client, this.dharmaAddress());
+    // Reads overlap (housekeeping, and sync(true) after each write). One that started earlier but
+    // finished later is stale: applying it could undo a freeze or drop a just-added block.
+    if (seq < this.syncApplied) return;
+    this.syncApplied = seq;
     this.lastFullRead = Date.now();
     this.lastFingerprint = `${p.policyVersion}:${p.proposals.length ? Math.max(...p.proposals.map((x) => x.id)) + 1 : 0}:${p.frozen}:${p.logLength}`;
     this.policy = p;
@@ -2003,9 +2035,16 @@ export class Gatekeeper extends EventEmitter {
     return this.state.paused ?? null;
   }
 
-  /** Recent proposals, newest last (cheap: no log verification, unlike snapshot()). */
+  /**
+   * Recent proposals, newest last (cheap: no log verification, unlike snapshot()). Older ones still
+   * waiting on a person, being paid, or held in escrow are always included, so a burst of new cards
+   * can't push an open approval out of view (or make it look resolved).
+   */
   recentProposals(n = 300): Readonly<Proposal>[] {
-    return this.state.proposals.slice(-n);
+    const all = this.state.proposals;
+    const cut = Math.max(0, all.length - n);
+    const older = all.slice(0, cut).filter((p) => p.status === "pending" || p.status === "executing" || p.escrow?.status === "held" || p.escrow?.status === "opening");
+    return older.length ? [...older, ...all.slice(cut)] : all.slice(cut);
   }
 
   /** How long a held sandbox request waits before the box gets "pending" back. */
@@ -2701,8 +2740,9 @@ export class Gatekeeper extends EventEmitter {
     }
     const outcome = await this.waitForDecision(open.id, 20_000);
     if (outcome === "allowed") {
-      this.grants.delete(hash);
-      return run();
+      // One approval, one call: only the first waiter takes the pass (like the egress proxy's takeGrant).
+      if (this.takeGrant(open.id)) return run();
+      return { content: [{ type: "text" as const, text: "This approval was already used for the same call. Ask again if it should run twice." }] };
     }
     if (outcome === "denied") return blocked;
     return { content: [{ type: "text" as const, text: `Waiting for your team to approve this in Karuna (request ${open.id}). Try again once it's approved.` }] };
@@ -2812,6 +2852,7 @@ export class Gatekeeper extends EventEmitter {
     run.changes = (body.changes as Record<string, unknown>[]).slice(0, MAX_RUN_CHANGES).flatMap((c) => {
       if (!c || typeof c.mount !== "string" || typeof c.path !== "string" || !KINDS.includes(c.kind as string)) return [];
       if (c.path.split("/").includes("..")) return [];
+      if (/[\x00-\x1f]/.test(c.mount + c.path)) return []; // a box reports file paths, never control characters
       const diff = typeof c.diff === "string" ? (c.diff.length > MAX_DIFF_CHARS ? `${c.diff.slice(0, MAX_DIFF_CHARS)}\n… (cut)` : c.diff) : null;
       return [{ mount: c.mount.slice(0, 500), path: c.path.slice(0, 500), kind: c.kind as RunFileChange["kind"], diff, binary: c.binary === true }];
     });
@@ -3353,7 +3394,7 @@ export class Gatekeeper extends EventEmitter {
   snapshot() {
     const pol = this.policy;
     const spent = this.spentToday();
-    const v = this.log.verify();
+    const v = this.log.verifyNew(); // the console asks on every change: check only what's new
     const L = this.labels();
     const frozen = this.isFrozen();
     const worst = pol ? this.exposureNow(pol) : null;
@@ -3458,7 +3499,7 @@ export class Gatekeeper extends EventEmitter {
         return { ...m, test: t ? { id: t.id, status: t.status, template: t.template } : null };
       }),
       today: this.todayCounts(),
-      proposals: this.state.proposals.slice(-300).reverse().map((p) => ({ ...p, approvalsNeeded: this.approvalsNeeded(p), ifUnanswered: this.ifUnanswered(p) })),
+      proposals: this.recentProposals(300).slice().reverse().map((p) => ({ ...p, approvalsNeeded: this.approvalsNeeded(p), ifUnanswered: this.ifUnanswered(p) })),
       sandbox: this.sandboxView(),
       connectors: this.connectorDefs().map((c) => ({
         name: c.name, url: c.url, hasKey: !!c.key, error: this.connectorErrors.get(c.name) ?? null,

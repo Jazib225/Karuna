@@ -348,7 +348,11 @@ export function consoleApi(
       if (method === "POST" && path === "/traps") return send(res, 200, gk.mintTrapSet(body.agentId));
       if (method === "POST" && (m = path.match(/^\/traps\/([\w-]+)\/plant$/))) return send(res, 200, gk.plantTrapInInbox(m[1], body.agentId));
       if (method === "POST" && path === "/shield/test") return send(res, 200, gk.runTest(body as never));
-      if (method === "POST" && path === "/setup") return send(res, 200, await gk.setup(body as never));
+      // Replacing an organization archives it and its keys: only a member who can manage the team may.
+      if (method === "POST" && path === "/setup") {
+        if (isSetUp(gk.org)) gk.requirePermission(me, "team");
+        return send(res, 200, await gk.setup(body as never));
+      }
       if (method === "PATCH" && path === "/settings") return send(res, 200, (gk.renameOrg(body.orgName), { ok: true }));
       if (method === "POST" && path === "/dharma/action") return send(res, 200, await gk.submitAction(body as unknown as SignedAction));
       if (method === "POST" && path === "/rules/draft") return send(res, 200, await gk.draftRules(body.text));

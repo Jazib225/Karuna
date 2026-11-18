@@ -23,6 +23,7 @@ type GkEvent =
   | Decision
   | ApprovalRequested
   | { type: "approval_resolved"; id: string; result: string }
+  | { type: "approval_progress"; id: string; approvals: number; needed: number }
   | { type: "agent_paused"; by?: string }
   | { type: "agent_resumed" }
   | { type: "error"; id?: string; error: string };
@@ -93,6 +94,7 @@ const FEED_MAX = 3;
 const feed: { at: number; e: Decision }[] = [];
 const cardStatus = new Map<string, { text: string; err: boolean }>();
 let reasonOpen = false;
+let cardKey = "";
 
 type Mode = { mode: "notch" } | { mode: "floating"; x: number; y: number };
 const loadMode = (): Mode => {
@@ -455,7 +457,18 @@ function render() {
   clearTimeout(hideTimer);
   if (showCard) {
     card.hidden = false;
-    cardBody.replaceChildren(st === "pending" ? approvalCard(queue[0]) : feedView());
+    // Rebuild only when what the card shows changed: rebuilding on every event (a feed decision, a
+    // hover) swapped the buttons out from under a click in progress.
+    const a = queue[0];
+    const s = a && cardStatus.get(a.id);
+    const key =
+      st === "pending"
+        ? `a:${a.id}:${s?.err ? 1 : 0}:${s?.text ?? ""}:${expired(a)}`
+        : `f:${st}:${paused}:${feed.length}:${feed[0]?.at ?? 0}:${Math.floor(Date.now() / 30_000)}`;
+    if (key !== cardKey || !cardBody.firstChild) {
+      cardKey = key;
+      cardBody.replaceChildren(st === "pending" ? approvalCard(a) : feedView());
+    }
     placeCard();
     requestAnimationFrame(() => {
       card.classList.add("show");
@@ -539,7 +552,7 @@ function tickExpiry() {
 let lastRects = "";
 function reportRects() {
   if (!visible) return;
-  const rects: { x: number; y: number; w: number; h: number }[] = [];
+  const rects: { x: number; y: number; w: number; h: number; hoverOnly?: boolean }[] = [];
   if (!appearance.island) {
     if (lastRects !== "[]") {
       lastRects = "[]";
@@ -552,12 +565,12 @@ function reportRects() {
     const p = pill.getBoundingClientRect();
     // Retracted, the hover target is the strip at the top edge (a little taller to be easy to find).
     if (notch.classList.contains("open")) add(p);
-    else rects.push({ x: p.left, y: 0, w: p.width, h: 12 });
+    else rects.push({ x: p.left, y: 0, w: p.width, h: 12, hoverOnly: true }); // hover opens it; clicks pass through
   } else {
     add(floater.getBoundingClientRect(), 4);
   }
   if (!card.hidden && card.classList.contains("show")) add(card.getBoundingClientRect(), 6);
-  const key = JSON.stringify(rects.map((r) => [r.x, r.y, r.w, r.h].map(Math.round)));
+  const key = JSON.stringify(rects.map((r) => [...[r.x, r.y, r.w, r.h].map(Math.round), r.hoverOnly ? 1 : 0]));
   if (key === lastRects) return;
   lastRects = key;
   void invoke("island_rects", { rects });
@@ -691,6 +704,13 @@ function onEvent(ev: GkEvent) {
       flash(ev.result === "approved" ? "approved" : "denied", 2400);
       break;
     }
+    case "approval_progress": {
+      // My approval counted; another member still has to approve. Say so and retract the card.
+      const left = Math.max(1, ev.needed - ev.approvals);
+      cardStatus.set(ev.id, { text: `Your approval is in. ${left === 1 ? "One more member needs" : `${left} more members need`} to approve.`, err: false });
+      if (queue[0]?.id === ev.id) dismissed = ev.id;
+      break;
+    }
     case "agent_paused":
       paused = true;
       break;
@@ -711,6 +731,7 @@ void listen<{ connected: boolean }>("gk-status", (e) => {
   if (!connected) {
     queue.length = 0;
     cardStatus.clear();
+    paused = false; // the Gatekeeper re-sends its pause state when it reconnects
   }
   render();
 });

@@ -90,7 +90,11 @@ function buildImage(dir: string, agent: string, tmp: string, desktop: boolean): 
   const df = `FROM ${base}\nWORKDIR /app\nCOPY . .\n${install}\nUSER 10001:10001`;
   const file = join(tmp, "Dockerfile");
   writeFileSync(file, df);
-  writeFileSync(`${file}.dockerignore`, ["node_modules", ".git", ".venv", "venv", "__pycache__", ".env", ".env.*", "!.env.example", "*.pem", "*.key"].join("\n"));
+  // `**/` so a .env or key in a subfolder stays out too (the secret scan skips exactly these files).
+  writeFileSync(
+    `${file}.dockerignore`,
+    ["**/node_modules", "**/.git", "**/.venv", "**/venv", "**/__pycache__", "**/.env", "**/.env.*", "!**/.env.example", "!**/.env.sample", "!**/.env.template", "**/*.pem", "**/*.key"].join("\n"),
+  );
   const tag = `karuna-agent-${agent.toLowerCase()}${desktop ? "-desktop" : ""}:latest`;
   say(`building ${tag} from ${dir}`);
   docker(["build", "-q", "-t", tag, "-f", file, dir]);

@@ -26,6 +26,10 @@ pub struct Rect {
     pub y: f64,
     pub w: f64,
     pub h: f64,
+    /// Opens the island on hover but never takes clicks (the strip at the top edge while retracted),
+    /// so clicks there still reach the app underneath.
+    #[serde(default, rename = "hoverOnly")]
+    pub hover_only: bool,
 }
 
 #[derive(Default)]
@@ -35,6 +39,7 @@ pub struct IslandState {
     pub dragging: AtomicBool,
     pub visible: AtomicBool,
     hovering: AtomicBool,
+    taking_clicks: AtomicBool,
 }
 
 pub fn window(app: &AppHandle) -> Option<WebviewWindow> {
@@ -54,6 +59,7 @@ pub fn show(app: &AppHandle) {
     }
     let state = app.state::<Arc<IslandState>>();
     state.hovering.store(false, Ordering::SeqCst);
+    state.taking_clicks.store(false, Ordering::SeqCst);
     set_click_through(&win, true);
     let _ = win.show();
     let _ = win.set_always_on_top(true);
@@ -88,20 +94,27 @@ pub fn start_cursor_poll(app: AppHandle) {
         }
         std::thread::sleep(Duration::from_millis(16));
         let Some(win) = window(&app) else { continue };
-        let inside = state.dragging.load(Ordering::SeqCst) || cursor_over_rects(&win, &state);
+        let dragging = state.dragging.load(Ordering::SeqCst);
+        let (over, over_clickable) = cursor_over_rects(&win, &state);
+        let (inside, clicks) = (dragging || over, dragging || over_clickable);
+        if state.taking_clicks.swap(clicks, Ordering::SeqCst) != clicks {
+            set_click_through(&win, !clicks);
+        }
         if state.hovering.swap(inside, Ordering::SeqCst) != inside {
-            set_click_through(&win, !inside);
             let _ = win.emit("island-hover", json!({ "inside": inside }));
         }
     });
 }
 
-fn cursor_over_rects(win: &WebviewWindow, state: &IslandState) -> bool {
-    let Some((cx, cy)) = platform::cursor_physical() else { return false };
-    let Ok(origin) = win.outer_position() else { return false };
+/// Whether the cursor is over any interactive area, and over one that takes clicks.
+fn cursor_over_rects(win: &WebviewWindow, state: &IslandState) -> (bool, bool) {
+    let Some((cx, cy)) = platform::cursor_physical() else { return (false, false) };
+    let Ok(origin) = win.outer_position() else { return (false, false) };
     let scale = win.scale_factor().unwrap_or(1.0);
     let (x, y) = ((cx - origin.x as f64) / scale, (cy - origin.y as f64) / scale);
-    state.rects.lock().unwrap().iter().any(|r| x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h)
+    let rects = state.rects.lock().unwrap();
+    let hit = |r: &&Rect| x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+    (rects.iter().any(|r| hit(&r)), rects.iter().filter(hit).any(|r| !r.hover_only))
 }
 
 #[cfg(windows)]

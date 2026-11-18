@@ -69,7 +69,14 @@ export class EgressProxy {
       const port = Number(portStr) || 443;
       // Terminate TLS here with a certificate from the org's sandbox CA (the only CA the box trusts).
       const terminateTls = (stream: Duplex) => {
-        const tls = new TLSSocket(stream, { isServer: true, secureContext: this.ca.contextFor(host), ALPNProtocols: ["http/1.1"] }) as TLSSocket & { karunaTarget?: Target };
+        // A host the CA can't issue for (e.g. "1.2.3", not a valid IP) closes this tunnel, never the Gatekeeper.
+        let secureContext;
+        try {
+          secureContext = this.ca.contextFor(host);
+        } catch {
+          return void socket.destroy();
+        }
+        const tls = new TLSSocket(stream, { isServer: true, secureContext, ALPNProtocols: ["http/1.1"] }) as TLSSocket & { karunaTarget?: Target };
         tls.karunaTarget = { protocol: "https:", host, port };
         tls.on("error", () => socket.destroy());
         inner.emit("connection", tls);
