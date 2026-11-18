@@ -12,7 +12,8 @@ import {
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import {
-  Kind, actionTypedData, describeChange, encodeChange, paymentDecisionTypedData, settingChange, type Change,
+  Kind, actionTypedData, consoleSessionTypedData, describeChange, encodeChange, paymentDecisionTypedData, settingChange, type Change,
+  DELETE_ROLE, permissionBits,
 } from "@prekaruna/dharma";
 import { Store } from "../src/store.ts";
 import { SecretStore } from "../src/secrets.ts";
@@ -113,6 +114,7 @@ async function chainDeadline() {
 const tighten = async (who: PrivateKeyAccount, c: Change) => gk.submitAction(await sign(who, Kind.Tighten, c));
 const propose = async (who: PrivateKeyAccount, c: Change, label?: string) => gk.submitAction({ ...(await sign(who, Kind.Propose, c)), label });
 const vote = async (who: PrivateKeyAccount, id: number, c: Change, support = true) => gk.submitAction(await sign(who, Kind.Vote, c, id, support));
+const manage = async (who: PrivateKeyAccount, c: Change, label?: string) => gk.submitAction({ ...(await sign(who, Kind.Manage, c)), label });
 async function waitTimelock() {
   await test().increaseTime({ seconds: 65 });
   await test().mine({ blocks: 1 });
@@ -319,6 +321,86 @@ describe("settings: voted on Dharma like any rule", () => {
     expect(() => gk.startSession(id, { isolation: "docker" })).toThrow(/requires gVisor/);
     expect(gk.startSession(id, { isolation: "gvisor" }).agentId).toBe(id);
   }, 60_000);
+});
+
+describe("team roles: on Dharma, changed at once, never a vote", () => {
+  const addBob = async () => {
+    await propose(alice, { op: "AddMember", member: bob.address }, "Bob");
+    await waitTimelock();
+  };
+  const tree = async () => {
+    await addBob();
+    await manage(alice, { op: "SetStructure", structure: "tree" });
+  };
+
+  it("a new org is flat: every member can do everything, with no setup", async () => {
+    await addBob();
+    expect(gk.structure()).toBe("flat");
+    expect(gk.can(bob.address, "freeze")).toBe(true);
+    expect(gk.can(bob.address, "team")).toBe(true);
+    expect(gk.snapshot().roles.can[bob.address.toLowerCase()]).toContain("wallet");
+  }, 60_000);
+
+  it("a tree makes its creator Admin and everyone else a Member, who can't freeze or manage the team", async () => {
+    await tree();
+    expect(gk.structure()).toBe("tree");
+    expect(gk.roleOf(alice.address)).toBe("admin");
+    expect(gk.roleOf(bob.address)).toBe("member");
+    await expect(tighten(bob, { op: "Freeze" })).rejects.toThrow(/Freeze all agents/);
+    await expect(manage(bob, { op: "SetRole", member: alice.address, role: 2 })).rejects.toThrow(/Manage the team/);
+    await expect(propose(alice, { op: "SetStructure", structure: "flat" })).rejects.toThrow(/aren't proposals/);
+    // Admin hands it over: Bob becomes Admin and can freeze.
+    await manage(alice, { op: "SetRole", member: bob.address, role: 1 });
+    expect(gk.roleOf(bob.address)).toBe("admin");
+    await tighten(bob, { op: "Freeze" });
+    expect(gk.logTail(50).some((e) => e.event?.type === "dharma" && e.event.action === "manage")).toBe(true);
+  }, 90_000);
+
+  it("a Viewer comes from an access request: sees the console, can't act, and isn't a voter", async () => {
+    const carol = privateKeyToAccount(generatePrivateKey());
+    gk.requestAccess(carol.address, "Carol");
+    gk.addViewer(alice.address, carol.address);
+    expect(gk.roleOf(carol.address)).toBe("viewer");
+    expect(gk.can(carol.address, "approve")).toBe(false);
+    expect(gk.snapshot().roles.viewers).toEqual([{ address: carol.address.toLowerCase(), name: "Carol" }]);
+    expect(gk.snapshot().policy!.members).toHaveLength(1); // not on Dharma
+    await expect(manage(alice, { op: "SetRole", member: carol.address, role: 2 })).rejects.toThrow(/Propose adding them/);
+    gk.removeViewer(alice.address, carol.address);
+    expect(gk.roleOf(carol.address)).toBeNull();
+  }, 60_000);
+
+  it("custom roles: what each can do is on Dharma, the name stays here; voting is never limited", async () => {
+    await tree();
+    await manage(alice, { op: "SetRolePerms", role: 3, permissions: permissionBits(["approve", "cancelEscrow"]) }, "Approver");
+    expect(gk.roleDefs().find((d) => d.id === "role-3")).toMatchObject({ name: "Approver", permissions: ["approve", "cancelEscrow"] });
+    await manage(alice, { op: "SetRole", member: bob.address, role: 3 });
+    expect(gk.roleOf(bob.address)).toBe("role-3");
+    expect(gk.can(bob.address, "approve")).toBe(true);
+    expect(gk.can(bob.address, "propose")).toBe(false);
+    await expect(propose(bob, { op: "AddRule", id: "x", outcome: "Deny", scope: "shell" })).rejects.toThrow(/Propose changes/);
+    // Bob can't propose, but still votes on Alice's proposal.
+    const c: Change = { op: "AddDomain", domain: "example.com" };
+    const { proposalId } = await propose(alice, c);
+    await vote(bob, proposalId!, c);
+    // Deleting the role puts Bob back on Member.
+    await manage(alice, { op: "SetRolePerms", role: 3, permissions: DELETE_ROLE });
+    expect(gk.roleOf(bob.address)).toBe("member");
+    expect(gk.roleDefs().some((d) => d.id === "role-3")).toBe(false);
+  }, 120_000);
+
+  it("a console session is started by the member's own signature", async () => {
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const signature = await alice.signTypedData(consoleSessionTypedData(alice.address, BigInt(issuedAt)));
+    const { token, role } = await gk.startConsoleSession({ address: alice.address, issuedAt, signature });
+    expect(role).toBe("admin");
+    expect(gk.sessionMember(token)).toBe(alice.address.toLowerCase());
+    // Someone else's signature, or a key that isn't in the org, gets nothing.
+    await expect(gk.startConsoleSession({ address: bob.address, issuedAt, signature })).rejects.toThrow(/isn't signed by that key/);
+    const stranger = privateKeyToAccount(generatePrivateKey());
+    const sig2 = await stranger.signTypedData(consoleSessionTypedData(stranger.address, BigInt(issuedAt)));
+    await expect(gk.startConsoleSession({ address: stranger.address, issuedAt, signature: sig2 })).rejects.toThrow(/not part of this organization/);
+    expect(() => gk.requirePermission(null, "team")).toThrow(/session ended/);
+  });
 });
 
 describe("invite links", () => {

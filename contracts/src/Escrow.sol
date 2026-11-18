@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-/// What Escrow reads from the org's Dharma (the proxy address). Matches Dharma v3's views.
+/// What Escrow reads from the org's Dharma (the proxy address). Matches Dharma v3's views, plus v4's
+/// `permissionsOf` (team roles), which Escrow uses when it's there.
 interface IDharmaView {
     struct Payee {
         address account;
@@ -9,6 +10,7 @@ interface IDharmaView {
     }
 
     function isMember(address a) external view returns (bool);
+    function permissionsOf(address a) external view returns (uint16);
     function payees() external view returns (Payee[] memory);
     function frozen() external view returns (bool);
 }
@@ -112,8 +114,17 @@ contract Escrow {
 
     /// @notice A member cancels a hold themselves. The USDC goes back to the org's wallet.
     function cancel(uint256 id) external {
-        if (!dharma.isMember(msg.sender)) revert NotMember();
+        if (!_mayCancel(msg.sender)) revert NotMember();
         _cancel(id, msg.sender);
+    }
+
+    /// @dev On Dharma v4, only members whose role may cancel escrow; on older Dharma, any member.
+    function _mayCancel(address a) private view returns (bool) {
+        try dharma.permissionsOf(a) returns (uint16 p) {
+            return p & 2 != 0;
+        } catch {
+            return dharma.isMember(a);
+        }
     }
 
     /// @notice Anyone relays a member's signed `CancelEscrow(id)`. Replay is harmless: a hold settles
@@ -121,7 +132,7 @@ contract Escrow {
     function cancel(uint256 id, bytes calldata sig) external {
         address signer = _recover(cancelDigest(id), sig);
         if (signer == address(0)) revert BadSignature();
-        if (!dharma.isMember(signer)) revert NotMember();
+        if (!_mayCancel(signer)) revert NotMember();
         _cancel(id, signer);
     }
 

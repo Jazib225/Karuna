@@ -33,6 +33,11 @@ export interface OrgFile {
   dharmaCode?: { implementation: string; version: number; txRef: string; deployedAt: string };
   /** The org's Escrow for large payments (deployed the first time an escrow rule needs it). */
   escrow?: { address: string; opener: string; deployedAt: string; txRef: string };
+  /**
+   * Team roles (not policy, so not on Dharma): Member's permissions and custom roles, and who has
+   * which role. Admin and Viewer are fixed. Voting members with no entry are Members.
+   */
+  roles?: { defs?: { id: string; name: string; permissions: string[] }[]; assign?: Record<string, string> };
 }
 
 export interface Invite {

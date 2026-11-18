@@ -65,6 +65,13 @@ contract EscrowTest is Test {
         dharma.execute(id);
     }
 
+    function manage(uint256 pk, Dharma.Op op, bytes memory data) internal {
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 digest = dharma.actionDigest(Dharma.Kind.Manage, op, data, 0, false, dharma.nonces(vm.addr(pk)), deadline);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+        dharma.manage(op, data, vm.addr(pk), deadline, abi.encodePacked(r, s, v));
+    }
+
     function deposit(uint256 amount) internal {
         vm.prank(wallet); // the Gatekeeper's plain USDC transfer
         usdc.transfer(address(escrow), amount);
@@ -206,6 +213,18 @@ contract EscrowTest is Test {
         escrow.cancel(id);
         assertEq(uint8(status(id)), uint8(Escrow.Status.Cancelled));
         assertEq(usdc.balanceOf(wallet), 10_000e6);
+    }
+
+    function test_a_role_without_cancel_escrow_cannot_cancel() public {
+        uint256 id = openHold(800e6, REF);
+        manage(aliceKey, Dharma.Op.SetStructure, abi.encode(uint8(1))); // alice Admin, bob Member
+        manage(aliceKey, Dharma.Op.SetRolePerms, abi.encode(uint8(2), uint16(15 & ~uint16(2))));
+        vm.prank(bob);
+        vm.expectRevert(Escrow.NotMember.selector);
+        escrow.cancel(id);
+        vm.prank(alice);
+        escrow.cancel(id);
+        assertEq(uint8(status(id)), uint8(Escrow.Status.Cancelled));
     }
 
     function test_cancel_works_until_release_even_after_the_window() public {

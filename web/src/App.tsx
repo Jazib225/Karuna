@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import type { Address } from "viem";
-import { isAddr, isNoLimit, decodeChange, describeChange, describeScope, NO_LIMIT_USD, waitText, SETTINGS, settingChange, type Change, type SettingName } from "@prekaruna/dharma";
-import { api, useGatekeeper, type LooseningPreview, type AgentExposure, type Exposure, type AgentView, type AgentDraftView, type Governance, type LogEntry, type Proposal, type Rule, type RunDetail, type RunFileChange, type RunStep, type Schedule, type Snapshot, type WalletInfo } from "./api.ts";
+import { isAddr, isNoLimit, decodeChange, describeChange, describeScope, NO_LIMIT_USD, waitText, SETTINGS, settingChange, PERMISSIONS, ALL_PERMISSIONS, STRUCTURES, DELETE_ROLE, MAX_ROLE, ROLE_MEMBER, permissionBits, roleNumber, type Change, type SettingName, type Permission, type RoleDef, type Structure } from "@prekaruna/dharma";
+import { api, roleOf, setSessionSigner, useGatekeeper, type LooseningPreview, type AgentExposure, type Exposure, type AgentView, type AgentDraftView, type Governance, type LogEntry, type Proposal, type Rule, type RunDetail, type RunFileChange, type RunStep, type Schedule, type Snapshot, type WalletInfo } from "./api.ts";
 import { Kind, SignerUnavailable, cancelEscrow, decidePayment, loadSigner, signerKey, submitChange, type Signer } from "./signer.ts";
 import { accountEmail, createAccount, signIn as accountSignIn, signOut as accountSignOut } from "./account.ts";
 import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
@@ -229,6 +229,8 @@ export default function App() {
   const memberAddr = signer.me?.address.toLowerCase();
   const isMember = !!s?.policy?.members.some((m) => m.address === memberAddr);
   useEffect(() => setDesktopSigner(signer.me, (s?.org.dharma?.address as Address | undefined) ?? null, isMember), [signer.me, s?.org.dharma?.address, isMember]);
+  useEffect(() => setSessionSigner(PREVIEW ? null : (signer.me as never)), [signer.me]);
+  const isViewer = !!s && !!signer.me && roleOf(s, signer.me.address).id === "viewer";
   if (!s && gk.offline) body = <Offline reason={gk.offline} />;
   else if (!s) body = <Loading text="Connecting to the Gatekeeper…" />;
   else if (!signer.me) body = <div className="center"><Backdrop /><div className="onboard narrow"><div className="onboard-body"><h2 className="setup-title heading-gradient">No signing key</h2><p className="lede">{signer.error}</p><AccountBox key={account.email ?? "logged-out"} me={null} account={account} run={run} busy={busy} /></div></div></div>;
@@ -238,7 +240,7 @@ export default function App() {
   // already runs an organization archives that one to a backup folder first (Gatekeeper side).
   else if (!s.setUp) body = <Setup s={s} me={signer.me} run={run} busy={busy} account={account} onJoin={() => setJoining(true)} />;
   else if (!s.policy) body = <Loading text="Reading Dharma from Arc…" />;
-  else if (!s.policy.members.some((m) => m.address === signer.me!.address.toLowerCase())) body = <Setup s={s} me={signer.me} run={run} busy={busy} account={account} onJoin={() => setJoining(true)} replace />;
+  else if (!s.policy.members.some((m) => m.address === signer.me!.address.toLowerCase()) && !isViewer) body = <Setup s={s} me={signer.me} run={run} busy={busy} account={account} onJoin={() => setJoining(true)} replace />;
   else body = <Console s={s} log={gk.log} wallet={gk.wallet} run={run} busy={busy} me={signer.me} offline={gk.offline} refresh={gk.refresh} account={account} />;
 
   return (
@@ -286,80 +288,352 @@ function Offline({ reason }: { reason: string }) {
 
 // ============================================================== setup: deploy this org's Dharma
 
+const SETUP_STEPS = ["Account", "Organization", "Wallet", "Team", "Review"] as const;
+
+/**
+ * A new organization, one question per page: account, names, wallet, team structure, then a review
+ * before Dharma is deployed. Joining someone else's organization branches off the first page.
+ */
 function Setup({ s, me, run, busy, account, onJoin, replace = false }: { s: Snapshot; me: Signer; run: Run; busy: boolean; account: AccountCtl; onJoin: () => void; replace?: boolean }) {
-  const [detected, setDetected] = useState<string[] | null>(null);
-  const [detectErr, setDetectErr] = useState<string | null>(null);
+  const [step, setStep] = useState(-1); // -1: start a new organization or join one
   const [form, setForm] = useState({ orgName: "", memberName: "", walletAddress: "" });
-
-  useEffect(() => {
-    if (PREVIEW) {
-      setDetected([previewWallet.address]);
-      setForm((f) => ({ ...f, walletAddress: previewWallet.address }));
-      return;
-    }
-    api<{ wallets: string[]; error?: string }>("/wallets/detect")
-      .then((r) => {
-        setDetected(r.wallets);
-        if (r.error) setDetectErr(r.error);
-        if (r.wallets.length === 1) setForm((f) => ({ ...f, walletAddress: r.wallets[0] }));
-      })
-      .catch((e) => setDetectErr(String(e)));
-  }, []);
-
+  const [structure, setStructure] = useState<Structure>("flat");
+  const [balance, setBalance] = useState<number | null>(null);
   const deploying = busy || s.deploying;
-  const submit = async (e: FormEvent) => {
-    e.preventDefault();
-    await run(() => api("/setup", { ...form, memberAddress: me.address, replace }), "Dharma deployed — your organization is live");
-  };
+  const last = SETUP_STEPS.length - 1;
+
+  const create = () =>
+    run(async () => {
+      const r = await api<{ dharma: { address: string } }>("/setup", { ...form, memberAddress: me.address, replace });
+      // A new Dharma is Flat; a Tree is one signed role change, made right after.
+      if (structure === "tree") await submitChange(me, r.dharma.address as Address, { kind: Kind.Manage, change: { op: "SetStructure", structure: "tree" } });
+      return r;
+    }, "Your organization is live");
+
+  const ready = [
+    true,
+    !!form.orgName.trim() && !!form.memberName.trim(),
+    isAddr(form.walletAddress) && balance !== 0,
+    true,
+    true,
+  ][Math.max(step, 0)];
+
+  if (step === -1) {
+    return (
+      <div className="center">
+        <Backdrop />
+        <div className="onboard narrow rise">
+          <OnboardTop sub={replace ? "New organization" : "Get started"} />
+          <div className="onboard-body">
+            <div>
+              <h2 className="setup-title heading-gradient">Welcome to Karuna</h2>
+              <p className="lede">Your AI agents act only within rules your team agrees on, and no one can loosen them alone.</p>
+            </div>
+            <div className="choices">
+              <button type="button" className="choice start-choice" onClick={() => setStep(0)}>
+                <Icon name="plus" size={18} />
+                <span><b>Start a new organization</b><span className="choice-text">Set up your team's rulebook. You'll be its first member.</span></span>
+                <Icon name="arrow" size={16} className="choice-go" />
+              </button>
+              <button type="button" className="choice start-choice" onClick={onJoin}>
+                <Icon name="plug" size={18} />
+                <span><b>Join an organization</b><span className="choice-text">Use an invite link from one of its members.</span></span>
+                <Icon name="arrow" size={16} className="choice-go" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const page = (() => {
+    switch (step) {
+      case 0:
+        return (
+          <>
+            <StepHead title="Save your key to an account" lede="This browser holds the key that signs your votes and approvals. An account lets you use the same key on any device." />
+            <AccountBox key={account.email ?? "logged-out"} me={me} account={account} run={run} busy={busy} />
+          </>
+        );
+      case 1:
+        return (
+          <>
+            <StepHead title="Name your organization" lede="Both names stay private to this computer." />
+            <label className="field">
+              <span>Organization name</span>
+              <input required autoFocus value={form.orgName} onChange={(e) => setForm({ ...form, orgName: e.target.value })} placeholder="Your company" />
+            </label>
+            <label className="field">
+              <span>Your name</span>
+              <input required value={form.memberName} onChange={(e) => setForm({ ...form, memberName: e.target.value })} placeholder="First approver" />
+            </label>
+          </>
+        );
+      case 2:
+        return (
+          <>
+            <StepHead title="Connect a wallet" lede="Your agents' purchases are paid from a Circle wallet in USDC. It also covers the small fee to set up your organization." />
+            <WalletStep value={form.walletAddress} onChange={(w) => setForm((f) => ({ ...f, walletAddress: w }))} onBalance={setBalance} run={run} busy={busy} email={account.email} />
+          </>
+        );
+      case 3:
+        return (
+          <>
+            <StepHead title="How does your team work?" lede="You can switch later in Team. Every member can always vote either way." />
+            <StructureChoice value={structure} onPick={setStructure} disabled={deploying} stacked />
+          </>
+        );
+      default:
+        return (
+          <>
+            <StepHead title="Review and create" lede="Your rules live on Arc, so no one, not even Karuna, can change them alone. Every change needs your team's vote and a short wait; only the panic button acts at once." />
+            <dl className="review">
+              {([
+                ["Organization", form.orgName, 1],
+                ["You", form.memberName, 1],
+                ["Account", account.email ?? <span className="muted">Not saved to an account</span>, 0],
+                ["Wallet", <><span className="mono">{short(form.walletAddress)}</span>{balance !== null && <span className="muted"> · {fmtUsdc(balance)} USDC</span>}</>, 2],
+                ["Team", STRUCTURES[structure].label, 3],
+              ] as const).map(([k, v, to]) => (
+                <div className="review-row" key={k}>
+                  <dt>{k}</dt>
+                  <dd>{v}</dd>
+                  <button type="button" className="link-btn small" disabled={deploying} onClick={() => setStep(to)}>Change</button>
+                </div>
+              ))}
+            </dl>
+          </>
+        );
+    }
+  })();
 
   return (
     <div className="center">
       <Backdrop />
-      <form className="onboard narrow rise" onSubmit={submit}>
-        <OnboardTop sub="New organization" />
-        <div className="onboard-body">
-          <div>
-            <button type="button" className="back-btn" onClick={onJoin} disabled={deploying}>
-              <Icon name="plug" size={15} /> Ask to Join
+      <form className="onboard narrow rise" onSubmit={(e) => {
+        e.preventDefault();
+        if (!ready || deploying) return;
+        if (step === last) void create();
+        else setStep(step + 1);
+      }}>
+        <OnboardTop sub={replace ? "New organization" : "Get started"} />
+        <div className="setup-steps" aria-label={`Step ${step + 1} of ${SETUP_STEPS.length}: ${SETUP_STEPS[step]}`}>
+          <div className="setup-steps-bar">{SETUP_STEPS.map((n, i) => <span key={n} className={i < step ? "done" : i === step ? "on" : ""} />)}</div>
+          <div className="setup-steps-label"><span>Step {step + 1} of {SETUP_STEPS.length}</span><span>{SETUP_STEPS[step]}</span></div>
+        </div>
+        <div className="onboard-body" key={step}>
+          {page}
+          <div className="onboard-nav">
+            <button type="button" className="back-btn back" disabled={deploying} onClick={() => setStep(step - 1)}><Icon name="arrow" size={15} /> Back</button>
+            {step === 0 && !account.email && <button type="button" className="link-btn small" onClick={() => setStep(1)}>Skip for now</button>}
+            <button className="btn btn-dark btn-lg" type="submit" disabled={!ready || deploying || (step === 0 && !account.email)}>
+              {step === last
+                ? deploying ? <span className="shimmer">Setting up your organization…</span> : <>Create organization <span className="nudge"><Icon name="arrow" size={16} /></span></>
+                : <>Continue <span className="nudge"><Icon name="arrow" size={16} /></span></>}
             </button>
-            <h2 className="setup-title heading-gradient" style={{ marginTop: 14 }}>Set up your organization</h2>
-            <p className="lede">Karuna deploys your organization's own <b>Dharma</b> rulebook on Arc. Every rule change needs your team's vote and a short waiting period; only the panic button acts instantly. You'll be its first member.</p>
           </div>
-          <label className="field">
-            <span>Organization name</span>
-            <input required autoFocus value={form.orgName} onChange={(e) => setForm({ ...form, orgName: e.target.value })} placeholder="Your company" />
-          </label>
-          <label className="field">
-            <span>Your name</span>
-            <input required value={form.memberName} onChange={(e) => setForm({ ...form, memberName: e.target.value })} placeholder="First approver" />
-            <small>Kept private by your Gatekeeper. Names never go onchain.</small>
-          </label>
-          <div className="field">
-            <span>Wallet the Gatekeeper pays from</span>
-            {detected && detected.length > 0 && (
-              <div className="choices" role="radiogroup">
-                {detected.map((w) => (
-                  <button type="button" role="radio" aria-checked={form.walletAddress === w} key={w} className={`choice ${form.walletAddress === w ? "sel" : ""}`} onClick={() => setForm({ ...form, walletAddress: w })}>
-                    <span className="radio" /> <span className="mono">{short(w)}</span><span className="tag">Circle · Arc testnet</span>
-                  </button>
-                ))}
-              </div>
-            )}
-            <input required aria-label="Wallet address" className="mono" value={form.walletAddress} onChange={(e) => setForm({ ...form, walletAddress: e.target.value.trim() })} placeholder="0x… Circle agent wallet on Arc testnet" />
-            <small>
-              {detected === null
-                ? <span className="shimmer">Looking for Circle agent wallets on this machine…</span>
-                : detected.length
-                  ? `Found ${detected.length} Circle agent wallet${detected.length > 1 ? "s" : ""} logged in on this machine. It also pays to deploy Dharma.`
-                  : <>No logged-in Circle wallet found{detectErr ? ` (${detectErr})` : ""}. Run <span className="mono">circle wallet login &lt;email&gt; --testnet</span></>}
-            </small>
-          </div>
-          <AccountBox key={account.email ?? "logged-out"} me={me} account={account} run={run} busy={busy} />
-          <button className="btn btn-dark btn-lg btn-block" type="submit" disabled={deploying}>
-            {deploying ? <span className="shimmer">Deploying Dharma on Arc…</span> : <>Create organization <span className="nudge"><Icon name="arrow" size={16} /></span></>}
-          </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+function StepHead({ title, lede }: { title: string; lede: string }) {
+  return (
+    <div>
+      <h2 className="setup-title heading-gradient">{title}</h2>
+      <p className="lede">{lede}</p>
+    </div>
+  );
+}
+
+const fmtUsdc = (n: number) => (n >= 100 ? n.toFixed(0) : n.toFixed(2));
+
+interface WalletLogin { cli: boolean; loggedIn: boolean; email: string | null; expiresIn: string | null }
+const PREVIEW_NO_WALLET = PREVIEW && new URLSearchParams(location.search).has("nowallet");
+
+/**
+ * The Gatekeeper's Circle wallet, without a terminal: find the wallets this machine's Circle login
+ * has; if there's no login, sign in with a code Circle emails (a first sign-in creates the wallets);
+ * then top up from Circle's testnet faucet if it's empty.
+ */
+function WalletStep({ value, onChange, onBalance, run, busy, email: accountEmail }: {
+  value: string; onChange: (w: string) => void; onBalance: (n: number | null) => void; run: Run; busy: boolean; email: string | null;
+}) {
+  const [login, setLogin] = useState<WalletLogin | null>(null);
+  const [wallets, setWallets] = useState<string[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [balance, setBalance] = useState<number | null>(null);
+  const [email, setEmail] = useState(accountEmail ?? "");
+  const [requestId, setRequestId] = useState<string | null>(null);
+  const [code, setCode] = useState("");
+  const [waiting, setWaiting] = useState(false);
+  const [manual, setManual] = useState(false);
+
+  const load = async () => {
+    setErr(null);
+    if (PREVIEW) {
+      setLogin({ cli: true, loggedIn: !PREVIEW_NO_WALLET, email: "you@company.com", expiresIn: "27d" });
+      if (!PREVIEW_NO_WALLET) {
+        setWallets([previewWallet.address]);
+        if (!value) onChange(previewWallet.address);
+      }
+      return;
+    }
+    const st = await api<WalletLogin>("/wallets/status");
+    setLogin(st);
+    if (!st.loggedIn) return;
+    const r = await api<{ wallets: string[]; error?: string }>("/wallets/detect");
+    setWallets(r.wallets);
+    if (r.error) setErr(r.error);
+    if (!isAddr(value) && r.wallets.length) onChange(r.wallets[0]);
+  };
+  useEffect(() => {
+    load().catch((e) => setErr(e instanceof Error ? e.message : String(e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const readBalance = async (w: string) => {
+    if (PREVIEW) return Number(previewWallet.usdc);
+    const b = await api<{ usdc: string }>(`/wallets/${w}/balance`);
+    return Number(b.usdc);
+  };
+  useEffect(() => {
+    setBalance(null);
+    onBalance(null);
+    if (!isAddr(value)) return;
+    let live = true;
+    readBalance(value).then((n) => live && Number.isFinite(n) && (setBalance(n), onBalance(n))).catch(() => undefined);
+    return () => void (live = false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+
+  const sendCode = () => {
+    if (PREVIEW) return void setRequestId("preview");
+    void run(async () => setRequestId((await api<{ requestId: string }>("/wallets/login", { email: email.trim() })).requestId), `Circle sent a code to ${email.trim()}`);
+  };
+  const verify = () =>
+    void run(async () => {
+      await api("/wallets/login/verify", { requestId, code: code.trim() });
+      setRequestId(null);
+      setCode("");
+      await load();
+    }, "Signed in to Circle");
+  const fund = () =>
+    void run(async () => {
+      await api("/wallets/fund", { address: value });
+      setWaiting(true);
+      // The faucet's transfer lands in a few seconds: watch the balance until it does.
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const n = await readBalance(value).catch(() => null);
+        if (n !== null && n > 0) {
+          setBalance(n);
+          onBalance(n);
+          break;
+        }
+      }
+      setWaiting(false);
+    }, "Test USDC requested from Circle's faucet");
+  const enter = (fn: () => void) => (e: ReactKeyboardEvent) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      fn();
+    }
+  };
+
+  if (!login) return <p className="muted small">{err ?? <span className="shimmer">Looking for Circle wallets on this machine…</span>}</p>;
+
+  if (!login.cli) {
+    return (
+      <div className="keybox">
+        <span className="field-label"><Icon name="alert" size={14} /> Circle CLI not found</span>
+        <div className="small">The Gatekeeper uses Circle's CLI to pay. Install it on this machine, then come back to this page:</div>
+        <code className="token">npm install -g @circle-fin/cli</code>
+        <div><button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void load().catch((e) => setErr(String(e)))}>Check again</button></div>
+      </div>
+    );
+  }
+
+  if (!login.loggedIn) {
+    return (
+      <div className="keybox">
+        <span className="field-label"><Icon name="wallet" size={14} /> Sign in to Circle</span>
+        {!requestId ? (
+          <>
+            <label className="field">
+              <span>Email</span>
+              <span className="input-icon">
+                <Icon name="inbox" size={15} />
+                <input className="plain-input" type="email" aria-label="Circle email" autoComplete="email" autoFocus value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={enter(sendCode)} placeholder="you@company.com" />
+              </span>
+              <small>Circle emails you a sign-in code. Your first sign-in creates your wallet.</small>
+            </label>
+            <div><button type="button" className="btn btn-dark btn-sm" disabled={busy || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())} onClick={sendCode}>Email me a code</button></div>
+          </>
+        ) : (
+          <>
+            <label className="field">
+              <span>Code from the email</span>
+              <input className="mono code-input" inputMode="numeric" autoComplete="one-time-code" autoFocus aria-label="Code from Circle's email" value={code} maxLength={10} onChange={(e) => setCode(e.target.value)} onKeyDown={enter(verify)} placeholder="123456" />
+              <small>Sent to {email.trim()}. Type it here yourself and never share it: anyone with the code can use the wallet.</small>
+            </label>
+            <div className="row-form">
+              <button type="button" className="btn btn-dark btn-sm" disabled={busy || !/^([A-Za-z0-9]{3}-)?\d{6}$/.test(code.trim())} onClick={verify}>Verify</button>
+              <button type="button" className="link-btn small" disabled={busy} onClick={() => { setRequestId(null); setCode(""); }}>Use a different email</button>
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  const empty = balance === 0;
+  return (
+    <div className="stack-sm">
+      <div className="small muted">Signed in to Circle as <b>{login.email ?? "your account"}</b>.</div>
+      {wallets && wallets.length > 0 ? (
+        <div className="choices" role="radiogroup" aria-label="Wallet">
+          {wallets.map((w) => (
+            <button type="button" role="radio" aria-checked={value === w} key={w} className={`choice ${value === w ? "sel" : ""}`} onClick={() => onChange(w)}>
+              <span className="radio" /> <span className="mono">{short(w)}</span>
+              <span className="tag">{value === w && balance !== null ? `${fmtUsdc(balance)} USDC` : "Circle wallet"}</span>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <p className="muted small">{err ?? "No Circle wallets on this account yet."}</p>
+      )}
+      {isAddr(value) && empty && (
+        <div className="keybox">
+          <span className="field-label"><Icon name="alert" size={14} /> No USDC yet</span>
+          <div className="small">Setting up needs a little USDC to cover fees. Circle sends free test USDC.</div>
+          <div><button type="button" className="btn btn-dark btn-sm" disabled={busy || waiting} onClick={fund}>{waiting ? <span className="shimmer">Waiting for the faucet…</span> : "Get test USDC"}</button></div>
+        </div>
+      )}
+      {manual ? (
+        <label className="field">
+          <span>Wallet address</span>
+          <input className="mono" aria-label="Wallet address" value={value} onChange={(e) => onChange(e.target.value.trim())} placeholder="0x… Circle wallet address" />
+        </label>
+      ) : (
+        <div><button type="button" className="link-btn small" onClick={() => setManual(true)}>Enter an address instead</button></div>
+      )}
+    </div>
+  );
+}
+
+/** Flat (every member can do everything) or Tree (an Admin sets roles). */
+function StructureChoice({ value, onPick, disabled, stacked }: { value: Structure; onPick: (v: Structure) => void; disabled?: boolean; stacked?: boolean }) {
+  return (
+    <div className={`choices structure-choices${stacked ? " stacked" : ""}`} role="radiogroup" aria-label="Team structure">
+      {(Object.keys(STRUCTURES) as Structure[]).map((k) => (
+        <button type="button" role="radio" aria-checked={value === k} key={k} disabled={disabled} className={`choice ${value === k ? "sel" : ""}`} onClick={() => value !== k && onPick(k)}>
+          <span className="radio" />
+          <span><b>{STRUCTURES[k].label}</b><span className="choice-text">{STRUCTURES[k].text}</span></span>
+        </button>
+      ))}
     </div>
   );
 }
@@ -438,7 +712,7 @@ function Join({ me, run, busy, account, onBack }: { me: Signer; run: Run; busy: 
               <span className="field-label"><Icon name="inbox" size={14} /> Requests you sent</span>
               {sent.slice().reverse().map((j) => (
                 <div className="sent-join" key={j.link}>
-                  <div><b>{j.org}</b><div className="small muted">{j.status === "member" ? "You're a member" : j.status === "none" ? "Not found: they may have removed it" : "Waiting for their members' vote"} · sent {ago(j.sentAt)}</div></div>
+                  <div><b>{j.org}</b><div className="small muted">{j.status === "member" ? "You're a member" : j.status === "viewer" ? "You're a Viewer: you can see their console" : j.status === "none" ? "Not found: they may have removed it" : "Waiting for their members' vote"} · sent {ago(j.sentAt)}</div></div>
                   <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => check(j)}>Check</button>
                 </div>
               ))}
@@ -538,8 +812,13 @@ interface Ctx {
   busy: boolean;
   /** Sign a change. Every rule change is proposed for a vote; only the panic button (Freeze) applies at once. */
   change: (c: Change, label?: string) => Promise<boolean>;
+  /** Sign a team-role change (SetRole, SetRolePerms, SetStructure): applies at once, needs "team". */
+  manage: (c: Change, done: string, label?: string) => Promise<boolean>;
+  /** Every member can always vote, whatever their role. */
   vote: (g: Governance, support: boolean) => Promise<boolean>;
   name: (address?: string | null) => string;
+  /** What this person's role lets them do (the Gatekeeper checks it too). */
+  can: (p: Permission) => boolean;
 }
 
 function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: { s: Snapshot; log: LogEntry[]; wallet: WalletInfo | null; run: Run; busy: boolean; me: Signer; offline: string | null; refresh: () => Promise<void>; account: AccountCtl }) {
@@ -554,6 +833,22 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
     setPage(PAGE_OF[v] ?? "overview");
     window.scrollTo({ top: 0 });
   };
+  // A rule named in Activity opens on Rules, scrolled to and briefly highlighted.
+  useEffect(() => {
+    const open = (e: Event) => {
+      const id = (e as CustomEvent<string>).detail;
+      setPage("rules");
+      setTimeout(() => {
+        const row = document.getElementById(`rule-${id}`);
+        if (!row) return;
+        row.scrollIntoView({ block: "center", behavior: "smooth" });
+        row.classList.add("rule-focus");
+        setTimeout(() => row.classList.remove("rule-focus"), 2000);
+      }, 80);
+    };
+    window.addEventListener("karuna:open-rule", open);
+    return () => window.removeEventListener("karuna:open-rule", open);
+  }, []);
   const [menu, setMenu] = useState(false);
   const [sideHidden, setSideHidden] = useState(() => {
     try {
@@ -649,11 +944,20 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
   const myAddr = me.address.toLowerCase();
   const myName = pol.members.find((m) => m.address === myAddr)?.name ?? short(myAddr);
   const name = (a?: string | null) => (a ? (pol.members.find((m) => m.address === a.toLowerCase())?.name ?? short(a)) : "—");
+  const role = roleOf(s, me.address);
+  const refuse = (p: Permission) => {
+    void run(async () => {
+      throw new Error(`Your role (${role.def?.name ?? "none"}) can't do this. It needs "${PERMISSIONS[p]}"; ask an Admin.`);
+    });
+    return Promise.resolve(false);
+  };
   const ctx: Ctx = {
-    s, me, run, busy, name,
+    s, me, run, busy, name, can: role.can,
     change: (c, label) => {
       // Instant: the panic button, and a member lowering an agent's level. Everything else is voted on.
       const lowering = c.op === "SetLevel" && c.reason === "member";
+      const need: Permission = c.op === "Freeze" ? "freeze" : lowering ? "agents" : "propose";
+      if (!role.can(need)) return refuse(need);
       const now = c.op === "Freeze" || lowering;
       return run(
         () => submitChange(me, dharma, { kind: now ? Kind.Tighten : Kind.Propose, change: c, label }),
@@ -662,6 +966,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
         lowering ? "Level lowered — recorded on Dharma" : now ? "All agents frozen — recorded on Dharma" : liveRef.current ? undefined : `Proposed — goes to Votes: needs ${pol.required} vote${pol.required > 1 ? "s" : ""}, then ${pol.timelock}s`,
       );
     },
+    manage: (c, done, label) => !role.can("team") ? refuse("team") : run(() => submitChange(me, dharma, { kind: Kind.Manage, change: c, label }), done),
     vote: (g, support) => run(() => submitChange(me, dharma, { kind: Kind.Vote, change: g.change as Change, proposalId: g.id, support }), support ? "Vote recorded" : "Voted against"),
   };
 
@@ -762,7 +1067,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
     { id: "sidebar", label: sideHidden ? "Pin the sidebar" : "Hide the sidebar", hint: "View", icon: sideHidden ? "pin" : "panel", keywords: "menu nav", run: toggleSide },
     ...(frozen
       ? [{ id: "unfreeze", label: "Unfreeze agents (goes to a vote)", hint: "Safety", icon: "stop" as IconName, run: () => (openUnfreeze ? setView("votes") : void ctx.change({ op: "Unfreeze" })) }]
-      : [{ id: "freeze", label: "Freeze all agents", hint: "Safety", icon: "stop" as IconName, keywords: "panic stop", run: () => void askConfirm("Freeze every agent now? Unfreezing needs a vote.", { action: "Freeze all agents", danger: true, icon: "stop" }).then((ok) => ok && ctx.change({ op: "Freeze" })) }]),
+      : !role.can("freeze") ? [] : [{ id: "freeze", label: "Freeze all agents", hint: "Safety", icon: "stop" as IconName, keywords: "panic stop", run: () => void askConfirm("Freeze every agent now? Unfreezing needs a vote.", { action: "Freeze all agents", danger: true, icon: "stop" }).then((ok) => ok && ctx.change({ op: "Freeze" })) }]),
   ];
 
 
@@ -844,12 +1149,13 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
               ) : (
                 <button className="panic armed" disabled={busy} onClick={() => ctx.change({ op: "Unfreeze" })}>Propose unfreeze</button>
               )
-            ) : (
+            ) : role.can("freeze") ? (
               <button className="panic" disabled={busy} title="Freezes every agent at once. Unfreezing needs a vote." onClick={() => ctx.change({ op: "Freeze" })}><Icon name="stop" /> Freeze all agents</button>
-            )}
+            ) : null}
           </div>
         </header>
 
+        {role.id === "viewer" && <div className="viewer-note"><Icon name="team" size={14} /> You're a Viewer: you can see everything here, but approving and changing things is up to the members.</div>}
         <div className="alerts">
           {alerts.map((a) => (
             <div key={a.id} role="status" className={`alert ${a.tone}`}>
@@ -937,7 +1243,7 @@ function GatewayFunds({ ctx, wallet }: { ctx: Ctx; wallet: WalletInfo | null }) 
     return (
       <div className="note">
         Gateway {wallet?.gateway ?? "—"}
-        {wallet && <> · <button className="link-btn" onClick={() => setOpen(true)}>Add funds</button></>}
+        {wallet && ctx.can("wallet") && <> · <button className="link-btn" onClick={() => setOpen(true)}>Add funds</button></>}
       </div>
     );
   }
@@ -970,6 +1276,10 @@ function Overview({ ctx, wallet, go }: { ctx: Ctx; wallet: WalletInfo | null; go
   const allowedToday = count((p) => p.status === "allowed" || p.status === "executed" || p.status === "executing");
   const blockedToday = count((p) => p.status === "denied" || p.status === "failed");
   const heldToday = count((p) => p.status === "pending");
+  // What Karuna stopped before it ran, over the last 7 days, and the money waiting in escrow now.
+  const week = s.proposals.filter((p) => Date.now() - Date.parse(p.createdAt) < 7 * 86_400_000);
+  const stoppedWeek = week.filter((p) => p.status === "denied").length;
+  const inEscrow = s.proposals.filter((p) => p.escrow?.status === "held" || p.escrow?.status === "opening").reduce((n, p) => n + (p.payload?.amountUsd ?? 0), 0);
   const [startHidden, setStartHidden] = useState(() => isDismissed("get-started"));
   const steps = [
     { done: pol.agents.length > 0, text: "Add an agent", view: "agents" as View },
@@ -981,8 +1291,9 @@ function Overview({ ctx, wallet, go }: { ctx: Ctx; wallet: WalletInfo | null; go
       <div className="tiles">
         <div className={`tile rise ${pending.length ? "attention" : ""}`} style={st(0)}><div className="k">Waiting for you <Icon name="approvals" size={14} /></div><div className="v heading-gradient">{pending.length}</div><div className="note">{pending.length ? "to approve" : "all clear"}</div></div>
         <div className="tile rise" style={st(1)}><div className="k">Wallet (USDC) <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{wallet ? usd(Number(wallet.usdc)) : "…"}</div><GatewayFunds ctx={ctx} wallet={wallet} /></div>
-        <div className="tile rise" style={st(2)}><div className="k">Actions today <Icon name="activity" size={14} /></div><div className="v heading-gradient">{todays.length}</div><div className="note one-line">{allowedToday} allowed · {blockedToday} blocked · {heldToday} held</div></div>
-        <div className="tile rise" style={st(3)}><div className="k">Spent today <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{usd(spent)}</div><div className="note">of {usd(pol.agents.filter((a) => a.active).reduce((n, a) => n + a.capUsd, 0))} allowed</div></div>
+        <div className="tile rise" style={st(2)}><div className="k" title="Actions Karuna blocked before they ran, in the last 7 days">Stopped this week <Icon name="shield" size={14} /></div><div className="v heading-gradient">{stoppedWeek}</div><div className="note one-line">of {week.length} actions{inEscrow > 0 ? ` · $${Math.round(inEscrow).toLocaleString()} in escrow` : ""}</div></div>
+        <div className="tile rise" style={st(3)}><div className="k">Actions today <Icon name="activity" size={14} /></div><div className="v heading-gradient">{todays.length}</div><div className="note one-line">{allowedToday} allowed · {blockedToday} blocked · {heldToday} held</div></div>
+        <div className="tile rise" style={st(4)}><div className="k">Spent today <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{usd(spent)}</div><div className="note">of {usd(pol.agents.filter((a) => a.active).reduce((n, a) => n + a.capUsd, 0))} allowed</div></div>
       </div>
 
       {s.exposure && <WorstCase x={s.exposure} names={Object.fromEntries(pol.agents.map((a) => [a.id, a.name]))} />}
@@ -1073,7 +1384,7 @@ function Rows({ ctx, items }: { ctx: Ctx; items: Proposal[] }) {
             <span className="tool">{p.request.paymentKind ?? p.request.tool}</span>
             <span className={`act ${cls === "deny" ? "denied" : ""}`} title={describe(p, ctx)}><span className="ag">{ctx.s.policy!.agents.find((a) => a.id === p.agentId)?.name ?? p.agentId} · </span><span className="what">{describe(p, ctx)}</span></span>
             <Badge v={cls}>{label}</Badge>
-            <span className="pol">{p.decision.ruleId}</span>
+            <RuleRef ctx={ctx} id={p.decision.ruleId} />
             <span className="t">{isTx(p.txRef) ? <TxLink tx={p.txRef} s={ctx.s} /> : ago(p.createdAt)}</span>
           </div>
         );
@@ -1119,11 +1430,11 @@ function EscrowHolds({ ctx }: { ctx: Ctx }) {
             <div className="tr escrow-tr" key={p.id}>
               <span className="b">{usd(p.payload?.amountUsd ?? p.request.amountUsd ?? 0)} to {payee(p.request.to)}</span>
               <span className="small muted">{agentName(p.agentId)} · {e.blocked ?? (e.status === "opening" ? "placing in escrow…" : `releases ${new Date(e.releaseAt).toLocaleString()}`)}</span>
-              <button className="btn btn-deny btn-sm" disabled={busy || e.status !== "held" || !e.holdId}
+              {ctx.can("cancelEscrow") && <button className="btn btn-deny btn-sm" disabled={busy || e.status !== "held" || !e.holdId}
                 onClick={async () => (await askConfirm(`Cancel this ${usd(p.payload?.amountUsd ?? 0)} payment? The USDC goes back to the org's wallet and the payee gets nothing.`, { action: "Cancel payment", back: "Keep it", danger: true }))
                   && run(() => cancelEscrow(me, e.address as Address, e.holdId!, p.id), "Cancelled; the USDC is back in the wallet")}>
                 Cancel
-              </button>
+              </button>}
             </div>
           );
         })}
@@ -1153,8 +1464,9 @@ function ApprovalCard({ p, ctx, dharma }: { p: Proposal; ctx: Ctx; dharma: Addre
       <div className="facts">
         <div className="lbl"><Icon name="shield" size={14} /> Verified by Karuna</div>
         <dl>
-          {p.facts.map((f) => (<FactRow key={f.label} label={f.label} value={f.value} tone={f.tone} />))}
           <FactRow label="Why it needs you" value={p.decision.reason} />
+          {p.facts.map((f) => (<FactRow key={f.label} label={f.label} value={f.value} tone={f.tone} />))}
+          {p.ifUnanswered && <FactRow label="If nobody answers" value={p.ifUnanswered} />}
         </dl>
       </div>
       {p.reason && (
@@ -1170,10 +1482,12 @@ function ApprovalCard({ p, ctx, dharma }: { p: Proposal; ctx: Ctx; dharma: Addre
             two-person · {p.approvals.length}/{p.approvalsNeeded}{others.length ? ` · ${others.join(", ")} signed` : ""}
           </span>
         ) : <span className="spacer" />}
-        <button className="btn btn-deny" disabled={busy} onClick={() => decide(false)}>Deny</button>
-        <button className="btn btn-approve" disabled={busy || iApproved || !!s.frozen} title={s.frozen ? "Unfreeze before approving" : undefined} onClick={() => decide(true)}>
-          {iApproved ? <><Icon name="check" /> You signed</> : <><Icon name="pen" /> {p.payload ? `Sign & pay ${usd(p.payload.amountUsd)}` : "Sign approval"}</>}
-        </button>
+        {ctx.can("approve") ? <>
+          <button className="btn btn-deny" disabled={busy} onClick={() => decide(false)}>Deny</button>
+          <button className="btn btn-approve" disabled={busy || iApproved || !!s.frozen} title={s.frozen ? "Unfreeze before approving" : undefined} onClick={() => decide(true)}>
+            {iApproved ? <><Icon name="check" /> You signed</> : <><Icon name="pen" /> {p.payload ? `Sign & pay ${usd(p.payload.amountUsd)}` : "Sign approval"}</>}
+          </button>
+        </> : <span className="muted small">Waiting for a member who can approve</span>}
       </div>
     </article>
   );
@@ -1292,30 +1606,37 @@ function Meter({ a, frozen, label }: { a: AgentView; frozen?: boolean; label?: b
 
 function TokenReveal({ token, agent, agentId, onDone }: { token: string; agent: string; agentId: string; onDone: () => void }) {
   const [copied, setCopied] = useState(false);
+  const [dir, setDir] = useState("./my-agent");
+  const [cmd, setCmd] = useState("python main.py");
+  // One command with the token filled in: copy it, run it from the Karuna folder, done.
+  const command = `KARUNA_AGENT_TOKEN=${token} pnpm karuna run --agent ${agentId} ${dir.trim() || "."} -- ${cmd.trim() || "python main.py"}`;
   return (
     <div className="card reveal-token rise">
-      <div className="hd"><h2>Token for {agent}</h2><span className="badge badge-approval">shown once</span></div>
+      <div className="hd"><h2>Connect {agent}</h2><span className="badge badge-approval">token shown once</span></div>
       <div className="pad stack">
-        <p className="muted">Give this to the agent's runtime as <span className="mono">KARUNA_AGENT_TOKEN</span>. It only starts sandbox runs (the box itself never sees it), and only once Dharma has added the agent. Karuna stores just its hash, so copy it now.</p>
-        <div className="token-row">
-          <code className="token">{token}</code>
-          <button className="btn btn-ghost" onClick={() => { navigator.clipboard?.writeText(token); setCopied(true); }}><Icon name={copied ? "check" : "copy"} /> {copied ? "Copied" : "Copy"}</button>
+        <p className="muted">Run this from the Karuna folder to start {agent} in a Karuna sandbox. It works once Dharma has added the agent. Karuna keeps only a hash of the token, so copy the command now.</p>
+        <div className="connect-fields">
+          <label className="field"><span>Agent's folder</span><input className="mono" value={dir} onChange={(e) => setDir(e.target.value)} /></label>
+          <label className="field grow"><span>How it starts</span><input className="mono" value={cmd} onChange={(e) => setCmd(e.target.value)} /></label>
         </div>
-        <pre className="snippet">{`# run the agent in a Karuna sandbox (from the repo root)
-KARUNA_AGENT_TOKEN=${token} \\
-  pnpm karuna run --agent ${agentId} ./my-agent -- python main.py
-
-// inside the box, pay or buy through Karuna:
-import { KarunaAgent } from "@prekaruna/agents";
+        <div className="token-row">
+          <code className="token">{command}</code>
+          <button className="btn btn-ghost" onClick={() => { navigator.clipboard?.writeText(command); setCopied(true); }}><Icon name={copied ? "check" : "copy"} /> {copied ? "Copied" : "Copy"}</button>
+        </div>
+        <details className="connect-more">
+          <summary>Paying or buying from the agent's code</summary>
+          <pre className="snippet">{`import { KarunaAgent } from "@prekaruna/agents";
 
 const karuna = new KarunaAgent({
-  gatekeeperUrl: process.env.KARUNA_GATEKEEPER_URL!, // http://karuna.internal
+  gatekeeperUrl: process.env.KARUNA_GATEKEEPER_URL!, // set inside the sandbox
   token: process.env.KARUNA_AGENT_TOKEN!,           // this run's session, set by karuna run
 });
 
 const r = await karuna.buy(serviceUrl, { maxUsd: 0.01, reason: "why" });
-if (r.status === "pending") await karuna.wait(r.id); // a human decides`}</pre>
-        <button className="btn btn-dark" onClick={onDone}>I've stored the token</button>
+if (r.status === "pending") await karuna.wait(r.id); // a member decides`}</pre>
+        </details>
+        <p className="muted small">Claude Code, Cursor and chat apps don't need a token: they connect under Computers &amp; chats below.</p>
+        <button className="btn btn-dark" onClick={onDone}>I've copied it</button>
       </div>
     </div>
   );
@@ -1621,7 +1942,7 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
         <div className="hd window-hd"><h2>Rules on Dharma</h2><span className="sub">{listedRules.filter((r) => r.active).length} active</span></div>
         <div className="policy">
           {listedRules.map((r, i) => (
-            <div className={`p ${r.active ? "" : "off"}`} key={r.id}>
+            <div className={`p ${r.active ? "" : "off"}`} key={r.id} id={`rule-${r.id}`}>
               <span className="i">{String(i + 1).padStart(2, "0")}</span>
               <span className="nm">
                 <span>{r.id}{r.core && <span className="lock" title="Core boundary: can never be removed"><Icon name="lock" size={10} /> core</span>}</span>
@@ -1807,6 +2128,17 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
   );
 }
 
+/** The rule behind a decision: a link to it on Rules when it's a Dharma rule, plain text otherwise. */
+function RuleRef({ ctx, id }: { ctx: Ctx; id: string }) {
+  if (!ctx.s.policy?.rules.some((r) => r.id === id)) return <span className="pol">{id}</span>;
+  return (
+    <a className="pol pol-link" href="#rules" title="Open this rule" onClick={(e) => {
+      e.preventDefault();
+      window.dispatchEvent(new CustomEvent("karuna:open-rule", { detail: id }));
+    }}>{id}</a>
+  );
+}
+
 // ============================================================== signed log
 
 const LOG_PAGE = 15;
@@ -1878,7 +2210,7 @@ function Activity({ ctx, log }: { ctx: Ctx; log: LogEntry[] }) {
                   <span className="tool">{r.tool}</span>
                   <span className={`act ${o === "deny" ? "denied" : ""}`} title={what}><span className="ag">{who(r.agent)} · </span><span className="what">{what}</span></span>
                   <Badge v={o} />
-                  <span className="pol">{e.decision.ruleId}</span>
+                  <RuleRef ctx={ctx} id={e.decision.ruleId} />
                   <span className="log">{anchoredMark} {e.hash.slice(0, 4)}…{e.hash.slice(-4)}</span>
                 </div>
               );
@@ -1912,9 +2244,14 @@ function Activity({ ctx, log }: { ctx: Ctx; log: LogEntry[] }) {
 // ============================================================== team
 
 function Team({ ctx }: { ctx: Ctx }) {
-  const { s, me, busy } = ctx;
+  const { s, me, busy, run } = ctx;
   const pol = s.policy!;
   const myAddr = me.address.toLowerCase();
+  const admin = ctx.can("team");
+  const roles = s.roles?.defs ?? [];
+  const roleName = (id: string | null | undefined) => roles.find((r) => r.id === id)?.name ?? "No role";
+  const tree = s.roles?.structure === "tree";
+  const setRole = (address: string, role: string) => ctx.manage({ op: "SetRole", member: address as Address, role: roleNumber(role)! }, `Role set to ${roleName(role)}`);
   return (
     <div className="stack">
       {s.enrollments.length > 0 && (
@@ -1924,31 +2261,58 @@ function Team({ ctx }: { ctx: Ctx }) {
             {s.enrollments.map((e) => {
               const proposed = pol.proposals.some((g) => g.change?.op === "AddMember" && String(g.change.member).toLowerCase() === e.address && (g.status === "open" || g.status === "queued"));
               return (
-                <div className="tr" key={e.address}>
+                <div className="tr team-tr" key={e.address}>
                   <span className="av">{e.name[0]?.toUpperCase()}</span>
                   <span className="b">{e.name}{e.via === "invite" && <span className="tag" style={{ marginLeft: 8 }}>invite link</span>}</span>
                   <span className="mono small">{e.address}</span>
-                  {proposed ? <Badge v="approval">proposed</Badge> : <button className="btn btn-dark btn-sm" disabled={busy} onClick={() => ctx.change({ op: "AddMember", member: e.address as Address }, e.name)}><Icon name="plus" size={14} /> Propose adding</button>}
+                  <span className="team-actions">
+                    {admin && !proposed && <button className="btn btn-ghost btn-sm" disabled={busy} title="Sees the console; doesn't vote, approve or change anything" onClick={() => run(() => api("/viewers", { address: e.address }), `${e.name} added as a Viewer`)}>Add as Viewer</button>}
+                    {proposed ? <Badge v="approval">proposed</Badge> : <button className="btn btn-dark btn-sm" disabled={busy} onClick={() => ctx.change({ op: "AddMember", member: e.address as Address }, e.name)}><Icon name="plus" size={14} /> Propose as voting member</button>}
+                  </span>
                 </div>
               );
             })}
           </div>
         </div>
       )}
-      <InviteLinks ctx={ctx} />
+      {admin && <InviteLinks ctx={ctx} />}
       <div className="card">
-        <div className="hd"><h2>Members</h2><span className="sub">{pol.members.length}</span></div>
+        <div className="hd"><h2>Members</h2><span className="sub">{pol.members.length} voting{s.roles?.viewers.length ? ` · ${s.roles.viewers.length} viewing` : ""}</span></div>
         <div className="table">
-          {pol.members.map((m) => (
-            <div className="tr" key={m.address}>
-              <span className="av">{(m.name ?? "?")[0]?.toUpperCase()}</span>
-              <span className="b">{m.name ?? "Unnamed"}{m.address === myAddr ? <span className="tag" style={{ marginLeft: 8 }}>this browser</span> : ""}</span>
-              <span className="mono small">{m.address}</span>
-              <button className="btn btn-deny btn-sm" disabled={busy || pol.members.length <= 1} onClick={() => ctx.change({ op: "RemoveMember", member: m.address as Address })}>Propose removal</button>
+          {pol.members.map((m) => {
+            const r = s.roles?.of[m.address] ?? "member";
+            return (
+              <div className="tr team-tr" key={m.address}>
+                <span className="av">{(m.name ?? "?")[0]?.toUpperCase()}</span>
+                <span className="b">{m.name ?? "Unnamed"}{m.address === myAddr ? <span className="tag" style={{ marginLeft: 8 }}>you</span> : ""}</span>
+                <span className="mono small">{m.address}</span>
+                <span className="team-actions">
+                  {!tree ? (
+                    <span className="tag">{(s.roles?.can[m.address]?.length ?? ALL_PERMISSIONS.length) === ALL_PERMISSIONS.length ? "Full access" : roleName(r)}</span>
+                  ) : admin ? (
+                    <select className="select-sm" aria-label={`${m.name ?? "Member"}'s role`} value={r} disabled={busy} onChange={(e) => void setRole(m.address, e.target.value)}>
+                      {roles.filter((d) => d.id !== "viewer").map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                    </select>
+                  ) : <span className="tag">{roleName(r)}</span>}
+                  <button className="btn btn-deny btn-sm" disabled={busy || pol.members.length <= 1} onClick={() => ctx.change({ op: "RemoveMember", member: m.address as Address })}>Propose removal</button>
+                </span>
+              </div>
+            );
+          })}
+          {(s.roles?.viewers ?? []).map((v) => (
+            <div className="tr team-tr" key={v.address}>
+              <span className="av">{(v.name ?? "?")[0]?.toUpperCase()}</span>
+              <span className="b">{v.name ?? "Unnamed"}{v.address === myAddr ? <span className="tag" style={{ marginLeft: 8 }}>you</span> : ""}</span>
+              <span className="mono small">{v.address}</span>
+              <span className="team-actions">
+                <span className="tag" title="Sees the console; doesn't vote, approve or change anything">Viewer</span>
+                {admin && <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => run(() => api(`/viewers/${v.address}`, undefined, "DELETE"), `${v.name ?? "Viewer"} removed`)}>Remove</button>}
+              </span>
             </div>
           ))}
         </div>
       </div>
+      <RolesCard ctx={ctx} />
       <div className="card">
         <div className="hd"><h2>Gatekeeper wallet</h2><span className="sub">{s.org.wallet?.chain}</span></div>
         <div className="pad stack-sm">
@@ -1956,6 +2320,81 @@ function Team({ ctx }: { ctx: Ctx }) {
           <p className="muted small">Pays for services and relays Dharma transactions.</p>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * The team's structure and what each role can do, on Dharma. A member with "team" changes them at
+ * once (a signed role change, no vote). Every member can always vote; Admin and Viewer are fixed.
+ */
+function RolesCard({ ctx }: { ctx: Ctx }) {
+  const { s, busy } = ctx;
+  const admin = ctx.can("team");
+  const team = s.roles;
+  const roles = team?.defs ?? [];
+  const structure = team?.structure ?? "flat";
+  const [name, setName] = useState("");
+  const setPerms = (r: RoleDef, perms: Permission[]) =>
+    ctx.manage({ op: "SetRolePerms", role: roleNumber(r.id)!, permissions: permissionBits(perms) }, `${r.name} updated`, r.builtin ? undefined : r.name);
+  const used = new Set(roles.map((r) => roleNumber(r.id)));
+  const free = Array.from({ length: MAX_ROLE - ROLE_MEMBER }, (_, i) => ROLE_MEMBER + 1 + i).find((n) => !used.has(n));
+  const pick = async (v: Structure) => {
+    const ok = await askConfirm(
+      v === "tree"
+        ? "Switch to a tree? You become an Admin. Other members get the Member role: they can't freeze agents or manage the team or wallet until an Admin gives them a role that can."
+        : "Switch to a flat team? Every member without a set role can do everything.",
+      { action: v === "tree" ? "Use a tree" : "Use a flat team" },
+    );
+    if (ok) await ctx.manage({ op: "SetStructure", structure: v }, v === "tree" ? "The team is now a tree" : "The team is now flat");
+  };
+  return (
+    <div className="card">
+      <div className="hd"><h2>Roles</h2><span className="sub">{!team?.onchain ? "needs a Dharma upgrade" : admin ? "on Dharma · changes apply at once" : "set by an Admin"}</span></div>
+      <div className="pad">
+        {team?.onchain
+          ? <StructureChoice value={structure} disabled={!admin || busy} onPick={(v) => void pick(v)} />
+          : <p className="muted small">This organization's Dharma predates roles, so every member can do everything. Upgrade Dharma to choose a structure.</p>}
+      </div>
+      {team?.onchain && structure === "tree" && (
+        <>
+          <div className="roles-wrap">
+            <table className="roles-table">
+              <thead>
+                <tr><th>Role</th>{ALL_PERMISSIONS.map((p) => <th key={p}>{PERMISSIONS[p]}</th>)}<th aria-label="Actions" /></tr>
+              </thead>
+              <tbody>
+                {roles.map((r) => {
+                  const locked = !admin || r.id === "admin" || r.id === "viewer";
+                  return (
+                    <tr key={r.id}>
+                      <td className="b">{r.name}</td>
+                      {ALL_PERMISSIONS.map((p) => (
+                        <td key={p}>
+                          <input type="checkbox" aria-label={`${r.name}: ${PERMISSIONS[p]}`} checked={r.permissions.includes(p)} disabled={locked || busy}
+                            onChange={(e) => void setPerms(r, e.target.checked ? [...r.permissions, p] : r.permissions.filter((x) => x !== p))} />
+                        </td>
+                      ))}
+                      <td>{admin && !r.builtin && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={async () => (await askConfirm(`Delete the ${r.name} role? Anyone with it becomes a Member.`, { action: "Delete role", danger: true })) && ctx.manage({ op: "SetRolePerms", role: roleNumber(r.id)!, permissions: DELETE_ROLE }, `${r.name} deleted`)}>Delete</button>}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          {admin && (
+            <form className="row-form pad" onSubmit={(e) => {
+              e.preventDefault();
+              if (free === undefined) return;
+              void ctx.manage({ op: "SetRolePerms", role: free, permissions: 0 }, `${name.trim()} added: tick what it can do`, name.trim()).then((ok) => ok && setName(""));
+            }}>
+              <input value={name} maxLength={30} onChange={(e) => setName(e.target.value)} placeholder="New role, e.g. Approver" aria-label="New role name" />
+              <button className="btn btn-dark btn-sm" disabled={busy || !name.trim() || free === undefined} title={free === undefined ? "13 custom roles at most" : undefined}><Icon name="plus" size={14} /> Add role</button>
+            </form>
+          )}
+        </>
+      )}
+      <p className="muted small pad" style={{ paddingTop: 0 }}>Every member can always vote. Roles decide what else they can do; who's a member still changes only by a vote.</p>
     </div>
   );
 }
@@ -2890,7 +3329,7 @@ function RunTimeline({ ctx, id }: { ctx: Ctx; id: string }) {
   const session = s.sandbox.sessions.find((x) => x.agentId === r.agentId);
   const decide = (proposalId: string, approve: boolean) => {
     const p = s.proposals.find((x) => x.id === proposalId);
-    if (!p) return;
+    if (!p || !ctx.can("approve")) return;
     run(() => decidePayment(me, s.org.dharma!.address as Address, p.id, p.payloadHash ?? "0".repeat(64), approve), approve ? "Approved" : "Denied");
   };
   return (

@@ -16,6 +16,8 @@ import {
   DHARMA_ABI, Kind, LEVEL_UP_STREAK, actionTypedData, decodeChange, describeChange, encodeChange, levelLabel, levelUpEligibility, opName,
   escrowCancelTypedData, escrowRef, paymentDecisionTypedData, toBytes32, toMicro, waitText, isSettingName, parseSetting, type SettingValues,
   type AgentRecord, type Change,
+  ADMIN_ROLE, MEMBER_ROLE, VIEWER_ROLE, PERMISSIONS, PERMISSION_BITS, ALL_PERMISSIONS, consoleSessionTypedData, permissionList, roleKey, roleNumber,
+  isRoleOp, DELETE_ROLE, ROLE_DEFAULT, ROLE_MEMBER, type Permission, type RoleDef, type Structure,
 } from "@prekaruna/dharma";
 import type { EscrowBackend } from "./escrow.ts";
 import {
@@ -199,6 +201,9 @@ export interface ShieldAlert {
 }
 
 const emptyState = (): State => ({ proposals: [], spend: {}, localFreeze: null, inbox: [], tests: [], alerts: [], traps: [], tainted: {}, swarmTrips: [], precedents: [] });
+
+/** A console request with no (or an expired) session: the console signs a new one and retries. */
+export const SESSION_ENDED = "Your session ended. Sign in again.";
 
 export class GatekeeperError extends Error {
   constructor(message: string, readonly status = 400) {
@@ -394,7 +399,7 @@ function runSummary(r: Run, agentName: string) {
 const DEVICE_TTL_MS = 30 * 60_000;
 /** Circle Gateway's wallet contract on EVM testnets: deposits there stay the org's money. */
 export const GATEWAY_WALLET = (process.env.KARUNA_GATEWAY_WALLET ?? "0x0077777d7EBA4688BDeF3E311b846F25870A19B9").toLowerCase();
-const KIND_NAMES = ["tighten", "propose", "vote"] as const;
+const KIND_NAMES = ["tighten", "propose", "vote", "manage"] as const;
 const INVITE_TTL_MS = 7 * 24 * 3600_000;
 const INVITE_MAX_USES = 10;
 
@@ -736,6 +741,7 @@ export class Gatekeeper extends EventEmitter {
     if (!this.deps.escrow) throw new GatekeeperError("This Karuna has no relayer key to send the cancel", 503);
     const signer = requireAddress(input.signer, "signer");
     if (!this.isMember(signer)) throw new GatekeeperError("This key is not a Dharma member", 403);
+    this.requirePermission(signer, "cancelEscrow");
     const signature = String(input.signature ?? "") as Hex;
     const typed = escrowCancelTypedData(e.address as Address, this.requireReady().chainId, { id: BigInt(e.holdId) });
     if (!(await verifyTypedData({ address: signer as Address, ...typed, signature }))) throw new GatekeeperError("Signature does not match this cancel", 401);
@@ -859,6 +865,147 @@ export class Gatekeeper extends EventEmitter {
     return !!this.policy?.members.some((m) => lower(m) === lower(a));
   }
 
+  // ================================================================ team roles and console sessions
+  // Roles are on Dharma (v4): a member with "team" changes them at once with a signed Manage action.
+  // They limit what a member may do; every member can always vote, and who's a member is still a vote.
+  // Kept here: custom role names, and Viewers (people who see the console but aren't members).
+
+  /** Console sessions: token -> member address. In memory, so a restart signs everyone in again. */
+  private consoleSessions = new Map<string, { address: string; expires: number }>();
+
+  private team() {
+    return this.policy?.team ?? null;
+  }
+
+  /** Flat (every member can do everything) or Tree (an Admin sets roles). Dharma before v4 is Flat. */
+  structure(): Structure {
+    return this.team()?.structure ?? "flat";
+  }
+
+  /** Custom role names, by Dharma role id. */
+  private roleNames(): Record<number, string> {
+    const out: Record<number, string> = {};
+    for (const d of this.org.roles?.defs ?? []) {
+      const n = roleNumber(d.id);
+      if (n !== null && n > ROLE_MEMBER) out[n] = d.name;
+    }
+    return out;
+  }
+
+  roleDefs(): RoleDef[] {
+    const t = this.team();
+    const names = this.roleNames();
+    const member: RoleDef = { ...MEMBER_ROLE, permissions: t ? permissionList(t.rolePerms[ROLE_MEMBER] ?? 0) : MEMBER_ROLE.permissions };
+    const custom = Object.entries(t?.rolePerms ?? {})
+      .map(([k, v]) => [Number(k), v] as const)
+      .filter(([n]) => n > ROLE_MEMBER)
+      .map(([n, v]): RoleDef => ({ id: roleKey(n), name: names[n] ?? `Role ${n}`, permissions: permissionList(v) }));
+    return [ADMIN_ROLE, member, ...custom, VIEWER_ROLE];
+  }
+
+  /** Someone's role: a member's comes from Dharma (in a Flat team, everyone's is Admin unless set);
+   *  anyone else is a Viewer only if a member added them as one. */
+  roleOf(address: string | null | undefined): string | null {
+    if (!address) return null;
+    const a = lower(address);
+    if (this.isMember(a)) {
+      const t = this.team();
+      const r = t?.roles[a] ?? ROLE_DEFAULT;
+      if (r !== ROLE_DEFAULT && t?.rolePerms[r] !== undefined) return roleKey(r);
+      return this.structure() === "tree" ? "member" : "admin";
+    }
+    return this.org.roles?.assign?.[a] === "viewer" ? "viewer" : null;
+  }
+
+  /** What Dharma lets this member do (Viewers can't act; before Dharma v4, members can do everything). */
+  can(address: string | null | undefined, perm: Permission): boolean {
+    if (!address || !this.isMember(address)) return false;
+    const t = this.team();
+    return !t || ((t.perms[lower(address)] ?? 0) & PERMISSION_BITS[perm]) !== 0;
+  }
+
+  /** Throws unless this person's role allows it (401 with no session, so the console signs in again). */
+  requirePermission(address: string | null | undefined, perm: Permission) {
+    if (!address) throw new GatekeeperError(SESSION_ENDED, 401);
+    if (this.can(address, perm)) return;
+    const role = this.roleDefs().find((d) => d.id === this.roleOf(address));
+    throw new GatekeeperError(role ? `Your role (${role.name}) can't do this. It needs "${PERMISSIONS[perm]}"; ask an Admin.` : "This key is not part of this organization", 403);
+  }
+
+  /** Start a console session from a signature by the member's key. */
+  async startConsoleSession(body: { address?: unknown; issuedAt?: unknown; signature?: unknown }) {
+    const a = requireAddress(body.address, "Signing key");
+    const issuedAt = Number(body.issuedAt);
+    if (!Number.isInteger(issuedAt) || Math.abs(issuedAt * 1000 - this.now().getTime()) > 5 * 60_000) throw new GatekeeperError("Check this computer's clock and try again", 400);
+    const ok = await verifyTypedData({ ...consoleSessionTypedData(a as Address, BigInt(issuedAt)), address: a as Address, signature: String(body.signature ?? "") as Hex }).catch(() => false);
+    if (!ok) throw new GatekeeperError("The session isn't signed by that key", 401);
+    if (!this.roleOf(a)) throw new GatekeeperError("This key is not part of this organization", 403);
+    const now = Date.now();
+    for (const [t, x] of this.consoleSessions) if (x.expires < now) this.consoleSessions.delete(t);
+    const token = `kcs_${randomBytes(24).toString("base64url")}`;
+    this.consoleSessions.set(token, { address: a, expires: now + 12 * 3_600_000 });
+    return { token, role: this.roleOf(a) };
+  }
+
+  /** Who a console request is from (its session), or null. */
+  sessionMember(token: string | undefined): string | null {
+    const x = token ? this.consoleSessions.get(token) : undefined;
+    if (!x || x.expires < Date.now()) return null;
+    return x.address;
+  }
+
+  private rolesFile() {
+    const r = (this.org.roles ??= {});
+    r.assign ??= {};
+    r.defs ??= [];
+    return r as { defs: { id: string; name: string; permissions: string[] }[]; assign: Record<string, string> };
+  }
+
+  /** A member with "team" lets someone who asked to join in as a Viewer: they see the console but don't vote. */
+  addViewer(by: string | null, address: unknown) {
+    this.requireReady();
+    this.requirePermission(by, "team");
+    const a = requireAddress(address, "Signing key");
+    if (this.isMember(a)) throw new GatekeeperError("Already a voting member", 409);
+    const e = this.org.enrollments.find((x) => x.address === a);
+    if (!e) throw new GatekeeperError("No access request from that key", 404);
+    this.rolesFile().assign[a] = "viewer";
+    this.org.labels.members[a] = e.name;
+    this.org.enrollments = this.org.enrollments.filter((x) => x.address !== a);
+    this.logEvent({ type: "role-changed", address: a, role: "viewer", by: lower(by!) });
+    this.save();
+    this.emit("change");
+  }
+
+  removeViewer(by: string | null, address: unknown) {
+    this.requireReady();
+    this.requirePermission(by, "team");
+    const a = requireAddress(address, "Viewer");
+    const r = this.rolesFile();
+    if (r.assign[a] !== "viewer" || this.isMember(a)) throw new GatekeeperError("That person isn't a Viewer", 404);
+    delete r.assign[a];
+    for (const [t, x] of this.consoleSessions) if (x.address === a) this.consoleSessions.delete(t);
+    this.logEvent({ type: "role-changed", address: a, role: null, by: lower(by!) });
+    this.save();
+    this.emit("change");
+  }
+
+  /** For the console: the structure, every role, who has which and what each person can do. */
+  rolesView() {
+    const assign = this.org.roles?.assign ?? {};
+    const members = (this.policy?.members ?? []).map(lower);
+    const viewers = Object.keys(assign).filter((a) => assign[a] === "viewer" && !this.isMember(a));
+    const people = [...members, ...viewers];
+    return {
+      structure: this.structure(),
+      onchain: !!this.team(),
+      defs: this.roleDefs(),
+      of: Object.fromEntries(people.map((a) => [a, this.roleOf(a)])) as Record<string, string | null>,
+      can: Object.fromEntries(people.map((a) => [a, ALL_PERMISSIONS.filter((x) => this.can(a, x))])) as Record<string, Permission[]>,
+      viewers: viewers.map((a) => ({ address: a, name: this.org.labels.members[a] ?? null })),
+    };
+  }
+
   // ================================================================ setup
 
   /** Deploy this org's Dharma, with the first member's browser key as its only member. */
@@ -885,6 +1032,7 @@ export class Gatekeeper extends EventEmitter {
       this.org.wallet = { address: wallet, chain: WALLET_CHAIN };
       this.org.dharma = { address: lower(d.address), chainId: await this.deps.client.getChainId(), deployedAt: this.now().toISOString(), txRef: d.txRef };
       this.org.labels.members[member] = memberName;
+      this.org.roles = {}; // role names and Viewers belong to the old org
       this.logEvent({ type: "setup", dharma: lower(d.address), wallet, firstMember: member, timelockSeconds: timelock, coreTimelockSeconds: coreTimelock, implementation: lower(d.implementation), txRef: d.txRef });
       await this.sync(true).catch(() => undefined);
       return { dharma: this.org.dharma, archived };
@@ -943,7 +1091,18 @@ export class Gatekeeper extends EventEmitter {
     if (!this.isMember(signer)) throw new GatekeeperError("This key is not a Dharma member", 403);
     const deadline = BigInt(a.deadline);
     if (deadline < BigInt(Math.floor(this.now().getTime() / 1000))) throw new GatekeeperError("Signature expired", 400);
-    if (![Kind.Tighten, Kind.Propose, Kind.Vote].includes(a.kind as 0 | 1 | 2)) throw new GatekeeperError("Unknown action kind");
+    if (![Kind.Tighten, Kind.Propose, Kind.Vote, Kind.Manage].includes(a.kind as 0 | 1 | 2 | 3)) throw new GatekeeperError("Unknown action kind");
+    // What the signer's role must allow (Dharma checks the same). Votes are every member's, always.
+    if (a.kind === Kind.Manage) {
+      if (!this.team()) throw new GatekeeperError("This organization's Dharma predates team roles. Upgrade it first.", 409);
+      if (!isRoleOp(Number(a.op))) throw new GatekeeperError("Only role changes apply this way", 400);
+      this.requirePermission(signer, "team");
+    } else if (a.kind === Kind.Tighten) {
+      this.requirePermission(signer, opName(Number(a.op)) === "Freeze" ? "freeze" : "agents");
+    } else if (a.kind === Kind.Propose) {
+      if (isRoleOp(Number(a.op))) throw new GatekeeperError("Role changes apply at once; they aren't proposals", 409);
+      this.requirePermission(signer, "propose");
+    }
 
     // Votes sign the proposal's own op + data, so the browser can't be tricked into voting on
     // something other than what it displayed.
@@ -967,6 +1126,13 @@ export class Gatekeeper extends EventEmitter {
       throw new GatekeeperError("Rule changes go to a vote: propose it instead. Only the panic button and lowering a level apply instantly.", 409);
     }
     if (change.op === "SetLevel" && a.kind !== Kind.Vote) this.checkLevelChange(change, a.kind === Kind.Tighten);
+    let roleName: string | null = null;
+    if (change.op === "SetRole" && !this.isMember(change.member)) throw new GatekeeperError("Only voting members have roles. Propose adding them first.", 409);
+    if (change.op === "SetRolePerms" && change.permissions !== DELETE_ROLE && change.role > ROLE_MEMBER) {
+      roleName = requireText(a.label ?? this.roleNames()[change.role], "Role name", 30);
+      const clash = this.roleDefs().find((d) => d.id !== roleKey(change.role) && d.name.toLowerCase() === roleName!.toLowerCase());
+      if (clash) throw new GatekeeperError("A role with that name already exists", 409);
+    }
 
     const nonce = await this.deps.client.readContract({ address: this.dharmaAddress(), abi: DHARMA_ABI, functionName: "nonces", args: [signer] });
     const typed = actionTypedData(this.dharmaAddress(), p.chainId, {
@@ -995,12 +1161,20 @@ export class Gatekeeper extends EventEmitter {
     try {
       if (a.kind === Kind.Tighten) res = await this.send("tighten", [op, data, signer, deadline, a.signature]);
       else if (a.kind === Kind.Propose) res = await this.send("propose", [op, data, signer, deadline, a.signature]);
+      else if (a.kind === Kind.Manage) res = await this.send("manage", [op, data, signer, deadline, a.signature]);
       else res = await this.send("vote", [BigInt(a.proposalId!), !!a.support, signer, deadline, a.signature]);
     } catch (e) {
       const msg = e instanceof ChainError ? e.message : `Chain write failed: ${scrub(e)}`;
       this.logEvent({ type: "dharma-rejected", action: KIND_NAMES[a.kind], op: change.op, change: description, by: lower(signer), detail: msg });
       this.save();
       throw new GatekeeperError(msg, e instanceof ChainError && e.reason ? 409 : 502);
+    }
+    // Role names are kept here once Dharma has the role.
+    if (change.op === "SetRolePerms") {
+      const r = this.rolesFile();
+      const key = roleKey(change.role);
+      r.defs = r.defs.filter((d) => d.id !== key);
+      if (roleName) r.defs.push({ id: key, name: roleName, permissions: [] });
     }
     // The transaction landed. From here on, read failures (e.g. RPC rate limits) must not make it
     // look like it didn't: report success, and let the background sync catch up.
@@ -1194,7 +1368,7 @@ export class Gatekeeper extends EventEmitter {
     const inv = (this.org.invites ?? []).find((i) => i.code === code);
     if (!inv || !isSetUp(this.org)) throw new GatekeeperError("This invite link isn't valid anymore.", 404);
     const a = requireAddress(address, "Signing key");
-    const status = this.isMember(a) ? "member" : this.org.enrollments.some((e) => e.address === a) ? "pending" : "none";
+    const status = this.isMember(a) ? "member" : this.roleOf(a) === "viewer" ? "viewer" : this.org.enrollments.some((e) => e.address === a) ? "pending" : "none";
     return { org: this.org.name, status };
   }
 
@@ -1704,6 +1878,18 @@ export class Gatekeeper extends EventEmitter {
     this.state.proposals.push({ ...base, request, decision, facts, payloadHash: hash, status: "pending" });
     this.save();
     return { verdict: "pending", proposalId: base.id };
+  }
+
+  /** What happens to a held action if no member answers: shown on its card and in the island. */
+  ifUnanswered(p: Readonly<Proposal>): string | null {
+    if (p.status !== "pending") return null;
+    const sandbox = p.request.tool === "http" && !p.payload && p.facts.some((f) => f.label === "From" && f.value.startsWith("sandbox run"));
+    if (sandbox) return `Refused after ${waitText(this.holdMs / 1000)}. An approval after that lets the agent's next try through.`;
+    if (p.payload) {
+      const held = p.payload.kind === "transfer" ? this.escrowFor(p.agentId, p.payload.amountUsd) : null;
+      return held ? `Nothing is paid. Once approved, it's held in escrow for ${waitText(held.waitSeconds)} and any member can cancel.` : "Nothing is paid until a member approves.";
+    }
+    return "Nothing runs until a member approves. The agent is told to wait.";
   }
 
   /** Wait (up to `ms`) for a held request's card to be decided. */
@@ -3066,6 +3252,7 @@ export class Gatekeeper extends EventEmitter {
     const pol = this.requireReady();
     const signer = requireAddress(d.signer, "signer");
     if (!this.isMember(signer)) throw new GatekeeperError("This key is not a Dharma member", 403);
+    this.requirePermission(signer, "approve");
     const deadline = BigInt(d.deadline);
     if (deadline < BigInt(Math.floor(this.now().getTime() / 1000))) throw new GatekeeperError("Signature expired", 400);
     const typed = paymentDecisionTypedData(this.dharmaAddress(), pol.chainId, {
@@ -3228,11 +3415,12 @@ export class Gatekeeper extends EventEmitter {
         windowSeconds: this.settings().swarmWindowSeconds,
       },
       settings: { values: this.settings(), defaults: this.settingDefaults(), gvisorAvailable: !!this.deps.gvisorAvailable },
+      roles: this.rolesView(),
       inbox: this.state.inbox.slice(-100).reverse().map((m) => {
         const t = this.state.tests.find((x) => x.messageId === m.id);
         return { ...m, test: t ? { id: t.id, status: t.status, template: t.template } : null };
       }),
-      proposals: this.state.proposals.slice(-300).reverse().map((p) => ({ ...p, approvalsNeeded: this.approvalsNeeded(p) })),
+      proposals: this.state.proposals.slice(-300).reverse().map((p) => ({ ...p, approvalsNeeded: this.approvalsNeeded(p), ifUnanswered: this.ifUnanswered(p) })),
       sandbox: this.sandboxView(),
       connectors: this.connectorDefs().map((c) => ({
         name: c.name, url: c.url, hasKey: !!c.key, error: this.connectorErrors.get(c.name) ?? null,
