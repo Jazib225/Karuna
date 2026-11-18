@@ -1009,3 +1009,34 @@ html, body, * { scrollbar-width: none; }
 .setting-edit input { width: 72px; }
 .setting-edit small { flex-basis: 100%; }
 .invite-create { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+
+/* Picker: a dropdown in the console's own style (the browser's <select> list can't be styled). */
+.picker { position: relative; flex: 0 0 auto; min-width: 150px; }
+.row-form > .picker { flex: 0 1 170px; }
+.picker-btn {
+  width: 100%; height: 44px; padding: 0 12px 0 14px; display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  border-radius: var(--r-md); border: 1px solid var(--n200); background: var(--canvas); color: var(--ink);
+  font: inherit; font-size: 14px; cursor: pointer; text-align: left;
+  transition: border-color .2s var(--ease), box-shadow .2s var(--ease), background-color .2s var(--ease);
+}
+.picker-btn:hover { border-color: var(--n300); }
+.picker-btn:focus-visible, .picker.open .picker-btn { outline: none; border-color: var(--n400); background: var(--surface); box-shadow: var(--ring); }
+.picker-btn svg { color: var(--n500); flex: none; transition: transform .2s var(--ease); }
+.picker.open .picker-btn svg { transform: rotate(180deg); }
+.picker-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-menu {
+  position: absolute; z-index: 40; top: calc(100% + 6px); left: 0; min-width: 100%; width: max-content; max-width: 320px;
+  margin: 0; padding: 6px; list-style: none; background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-md); box-shadow: var(--shadow-lift); animation: picker-in .14s var(--ease);
+}
+@keyframes picker-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.picker-opt {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 8px 10px;
+  border-radius: var(--r-sm); cursor: pointer; color: var(--ink); font-size: 14px;
+}
+.picker-opt.active { background: var(--n100); }
+.picker-opt.sel .picker-opt-label { font-weight: 600; }
+.picker-opt svg { color: var(--ink); flex: none; }
+.picker-opt-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.picker-opt-hint { font-family: var(--font-mono); font-size: 11.5px; color: var(--n500); }
+@media (prefers-reduced-motion: reduce) { .picker-menu { animation: none; } .picker-btn svg { transition: none; } }

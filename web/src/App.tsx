@@ -15,6 +15,7 @@ import { inviteCode, joinStatus, lookupInvite, sendJoin, sentJoins, type SentJoi
 import { IN_APP, getIslandEnabled, setDesktopSigner, setIslandEnabled } from "./desktop.ts";
 import { setThemePref, useThemePref, type ThemePref } from "./theme.ts";
 import { eventName, NAMED_KEYS } from "./eventNames.ts";
+import { Picker } from "./picker.tsx";
 
 // The menu: everyday work first, then settings. Older page names (pop-ups, saved state) still resolve.
 type Page = "overview" | "activity" | "agents" | "safety" | "proposals" | "team" | "rules" | "appearance";
@@ -2488,10 +2489,8 @@ function DrafterKeyField({ ctx }: { ctx: Ctx }) {
     <div className="key-ask">
       <span className="small">Drafting needs a free key from <a className="link-u" href={`https://${P.where}`} target="_blank" rel="noreferrer">{P.where}</a>. Only Karuna uses it, never an agent.</span>
       <div className="row-form">
-        <select className="select-sm" aria-label="Drafter provider" value={provider} onChange={(e) => setProvider(e.target.value as keyof typeof DRAFTER_PROVIDERS)}>
-          <option value="groq">Groq</option>
-          <option value="gemini">Gemini</option>
-        </select>
+        <Picker label="Drafter provider" value={provider} onChange={setProvider}
+          options={(Object.keys(DRAFTER_PROVIDERS) as (keyof typeof DRAFTER_PROVIDERS)[]).map((k) => ({ value: k, label: DRAFTER_PROVIDERS[k].label, hint: DRAFTER_PROVIDERS[k].where }))} />
         <input type="password" autoComplete="off" className="mono grow" aria-label="Drafter key" value={value} onChange={(e) => setValue(e.target.value)} placeholder="Paste the key" />
         <button type="button" className="btn btn-dark btn-sm" disabled={busy || !value.trim()}
           onClick={() => run(async () => { await api("/keys", { name: `${provider}-drafter`, envVar: P.env, value: value.trim(), purpose: "drafter", provider }); setValue(""); }, `${P.label} key saved for drafting`)}>
