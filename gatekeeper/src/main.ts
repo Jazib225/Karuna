@@ -20,7 +20,7 @@ import { EgressProxy } from "./proxy.ts";
 import { remoteListener } from "./remote.ts";
 import { PIPE_PATH, pipeServer } from "./pipe.ts";
 import { hostname } from "node:os";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 const here = dirname(fileURLToPath(import.meta.url));
 loadEnv({ path: resolve(here, "../../.env"), quiet: true });
@@ -64,6 +64,8 @@ const gk = new Gatekeeper({
   // Agents run in Karuna sandboxes; an agent token used anywhere else is refused unless voted.
   requireSandbox: (process.env.KARUNA_REQUIRE_SANDBOX ?? "1") !== "0",
   requireIsolation: process.env.KARUNA_REQUIRE_ISOLATION === "gvisor" ? "gvisor" : "docker",
+  // The console offers "Require gVisor" only where gVisor is installed (the same check `karuna run` makes).
+  gvisorAvailable: /"runsc"/.test(spawnSync("docker", ["info", "--format", "{{json .Runtimes}}"], { encoding: "utf8", timeout: 10_000, windowsHide: true }).stdout ?? ""),
   // Agents Karuna builds and runs: each run is a normal `karuna run` of the hosted runner, with a
   // token issued for that run only. Docker must be running on this machine.
   launcher: ({ agentId, token, runId, onOutput, onExit }) => {
@@ -93,7 +95,7 @@ const gk = new Gatekeeper({
 });
 gk.holdMs = Number(process.env.KARUNA_HOLD_SECONDS ?? 120) * 1000;
 const ca = new SandboxCA(dataDir);
-const egress = new EgressProxy(gk, ca, { agentApiPort: agentPort, holdMs: Number(process.env.KARUNA_HOLD_SECONDS ?? 120) * 1000 });
+const egress = new EgressProxy(gk, ca, { agentApiPort: agentPort }); // waits gk.holdMs: the Approval hold setting
 const consoleToken = store.loadOrCreateConsoleToken();
 
 const agentServer = agentApi(gk, { proxy: egress, caPem: ca.certPem, secrets });

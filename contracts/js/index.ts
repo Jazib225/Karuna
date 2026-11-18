@@ -221,6 +221,11 @@ export function describeScope(scope: string, target: string, n: { agent?: (id: s
       return "running outside the sandbox";
     case "escrow":
       return `escrow: payments wait ${waitText(Number(target))} before release, and any member can cancel them`;
+    case "setting": {
+      const s = sub && isSettingName(sub) ? SETTINGS[sub] : null;
+      const v = s ? parseSetting(sub as SettingName, target) : null;
+      return s && v !== null ? `${s.label}: ${s.text(v)}` : `setting ${sub ?? ""}`;
+    }
     default:
       return `${scope}${target ? ` → ${target}` : ""}`;
   }
@@ -236,6 +241,11 @@ export function describeChange(c: Change, l: Labels = {}): string {
       if (!c.scope) return `Re-enable default rule ${c.id}`;
       if (c.scope === "escrow") {
         return `Hold payments of ${usd(c.maxUsd ?? 0)} or more in escrow for ${waitText(Number(c.target))}${c.agent ? ` for ${ag(c.agent)}` : ""}; any member can cancel before release (${c.id})`;
+      }
+      if (c.scope.startsWith("setting:")) {
+        const name = c.scope.slice("setting:".length);
+        const v = isSettingName(name) ? parseSetting(name, c.target ?? "") : null;
+        return isSettingName(name) && v !== null ? `Set ${SETTINGS[name].label.toLowerCase()} to ${SETTINGS[name].text(v)}` : `Change setting ${name}`;
       }
       const who = c.agent ? ag(c.agent) : "every agent";
       return `${c.outcome === "Allow" ? "Allow" : c.outcome === "Deny" ? "Block" : "Require approval for"} ${describeScope(c.scope, c.target ?? "", { agent: ag, payee: p })} for ${who}${c.outcome === "Allow" && c.maxUsd ? ` up to ${usd(c.maxUsd)}` : ""} (${c.id})`;
@@ -260,6 +270,39 @@ export function describeChange(c: Change, l: Labels = {}): string {
       ? `Remove ${levelLabel(c.level)} payment limits (no limit)`
       : `Set ${levelLabel(c.level)} payment limits to ${usd(c.perPaymentUsd)} per payment, ${usd(c.dailyUsd)} per day`;
   }
+}
+
+// ------------------------------------------------------------------ org settings
+// Kept on Dharma as rules (scope "setting:<name>", the value as the rule's target) and voted like
+// any rule. The newest active rule for a setting wins; with none, the Gatekeeper's default applies.
+
+interface SettingSpec { label: string; min: number; max: number; text: (v: number) => string }
+export const SETTINGS = {
+  drillsPerDay: { label: "Drills per agent per day", min: 0, max: 20, text: (v: number) => (v === 0 ? "off" : `${v} a day`) },
+  drillWindowMinutes: { label: "Drill pass window", min: 5, max: 1440, text: (v: number) => waitText(v * 60) },
+  holdSeconds: { label: "Approval hold", min: 30, max: 3600, text: (v: number) => waitText(v) },
+  swarmAgents: { label: "Swarm Stopper", min: 0, max: 20, text: (v: number) => (v === 0 ? "off" : `${v} agents`) },
+  swarmWindowSeconds: { label: "Swarm Stopper window", min: 10, max: 3600, text: (v: number) => waitText(v) },
+  requireGvisor: { label: "Require gVisor", min: 0, max: 1, text: (v: number) => (v ? "on" : "off") },
+} satisfies Record<string, SettingSpec>;
+export type SettingName = keyof typeof SETTINGS;
+export type SettingValues = Record<SettingName, number>;
+
+export const isSettingName = (n: string): n is SettingName => Object.prototype.hasOwnProperty.call(SETTINGS, n);
+
+/** A setting rule's target as a whole number within the setting's range, or null. */
+export function parseSetting(name: SettingName, target: string): number | null {
+  if (!/^\d+$/.test(target.trim())) return null;
+  const v = Number(target);
+  const s = SETTINGS[name];
+  return v >= s.min && v <= s.max ? v : null;
+}
+
+/** The change that sets one setting: a new rule (Dharma won't re-add an active rule id). */
+export function settingChange(name: SettingName, value: number): Change {
+  if (parseSetting(name, String(value)) === null) throw new Error(`${SETTINGS[name].label} must be a whole number from ${SETTINGS[name].min} to ${SETTINGS[name].max}`);
+  const id = `set-${name.slice(0, 18)}-${Math.random().toString(36).slice(2, 8)}`;
+  return { op: "AddRule", id, outcome: "Approval", scope: `setting:${name}`, target: String(value) };
 }
 
 /** 90 -> "90s", 3600 -> "1h", 86400 -> "24h", 0 -> "no wait". */

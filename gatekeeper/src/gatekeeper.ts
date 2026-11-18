@@ -14,7 +14,7 @@ import {
 } from "@prekaruna/engine";
 import {
   DHARMA_ABI, Kind, LEVEL_UP_STREAK, actionTypedData, decodeChange, describeChange, encodeChange, levelLabel, levelUpEligibility, opName,
-  escrowCancelTypedData, escrowRef, paymentDecisionTypedData, toBytes32, toMicro, waitText,
+  escrowCancelTypedData, escrowRef, paymentDecisionTypedData, toBytes32, toMicro, waitText, isSettingName, parseSetting, type SettingValues,
   type AgentRecord, type Change,
 } from "@prekaruna/dharma";
 import type { EscrowBackend } from "./escrow.ts";
@@ -224,7 +224,8 @@ export interface GatekeeperDeps {
   swarmWindowMs?: number; // …within this window freezes everyone
   secrets?: SecretStore; // the org's API keys; only the egress proxy ever sees values
   requireSandbox?: boolean; // agent tokens only work from inside a Karuna sandbox (unless voted otherwise)
-  requireIsolation?: "gvisor" | "docker"; // refuse runs weaker than this
+  requireIsolation?: "gvisor" | "docker"; // refuse runs weaker than this (default for the Require gVisor setting)
+  gvisorAvailable?: boolean; // gVisor (runsc) is installed for Docker on this machine
   connectors?: ConnectorClients; // MCP clients for the team's connectors (tests pass a fake)
   web?: WebTools; // Karuna's own web_search / web_fetch for chat apps (tests pass a fake fetch)
   chatUrl?: string; // the public address chat apps reach Karuna at (a tunnel to the public port)
@@ -613,6 +614,33 @@ export class Gatekeeper extends EventEmitter {
     this.scheduleBuiltAgents();
     this.watchConnectors();
     await this.releaseDueEscrows();
+  }
+
+  // ================================================================ settings
+
+  /** The org's settings: the newest active `setting:<name>` rule on Dharma for each, else this Gatekeeper's default. */
+  settings(): SettingValues {
+    const out = this.settingDefaults();
+    for (const r of this.policy?.rules ?? []) {
+      if (!r.active || r.builtin || !r.scope.startsWith("setting:")) continue;
+      const name = r.scope.slice("setting:".length);
+      if (!isSettingName(name)) continue;
+      const v = parseSetting(name, r.target);
+      if (v !== null) out[name] = v; // rules are in the order Dharma added them: a later one is newer
+    }
+    return out;
+  }
+
+  /** What applies before the team votes a setting: this Gatekeeper's .env values. */
+  settingDefaults(): SettingValues {
+    return {
+      drillsPerDay: this.deps.shieldTestsPerDay ?? 0,
+      drillWindowMinutes: Math.round((this.deps.shieldWindowMs ?? 30 * 60_000) / 60_000),
+      holdSeconds: Math.round(this.baseHoldMs / 1000),
+      swarmAgents: this.deps.swarmAgents ?? 2,
+      swarmWindowSeconds: Math.round((this.deps.swarmWindowMs ?? 60_000) / 1000),
+      requireGvisor: this.deps.requireIsolation === "gvisor" ? 1 : 0,
+    };
   }
 
   // ================================================================ Gateway (x402 purchases)
@@ -1097,14 +1125,18 @@ export class Gatekeeper extends EventEmitter {
     return `${this.publicUrl}/invite/${code}`;
   }
 
-  /** A new invite link: good for 7 days and up to 10 join requests. Members still vote on each person. */
-  createInvite() {
+  /** A new invite link: good for 7 days and up to 10 join requests unless the member picks other limits. Members still vote on each person. */
+  createInvite(opts: { days?: unknown; uses?: unknown } = {}) {
+    const days = opts.days === undefined ? INVITE_TTL_MS / 86_400_000 : Number(opts.days);
+    const uses = opts.uses === undefined ? INVITE_MAX_USES : Number(opts.uses);
+    if (!Number.isInteger(days) || days < 1 || days > 30) throw new GatekeeperError("An invite link can last 1 to 30 days");
+    if (!Number.isInteger(uses) || uses < 1 || uses > 50) throw new GatekeeperError("An invite link can be used 1 to 50 times");
     this.requireReady();
     if (!this.publicUrl) throw new GatekeeperError("Invite links need Karuna's public address. Set KARUNA_CHAT_URL to your tunnel's https address and restart the Gatekeeper.", 409);
     const now = this.now();
     const active = (this.org.invites ?? []).filter((i) => this.inviteOpen(i));
     if (active.length >= 20) throw new GatekeeperError("You have 20 open invite links. Revoke one first.", 409);
-    const inv: Invite = { code: `inv_${randomBytes(12).toString("base64url")}`, createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + INVITE_TTL_MS).toISOString(), uses: 0, maxUses: INVITE_MAX_USES };
+    const inv: Invite = { code: `inv_${randomBytes(12).toString("base64url")}`, createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + days * 86_400_000).toISOString(), uses: 0, maxUses: uses };
     this.org.invites = [...active, inv];
     this.logEvent({ type: "invite-created", invite: inv.code.slice(0, 8) });
     this.save();
@@ -1215,9 +1247,9 @@ export class Gatekeeper extends EventEmitter {
     // Swarm Stopper: several agents converging on the same new target.
     const target = targetOf(action as { type: string; to?: string; url?: string });
     if (target && this.isNewTarget(target)) {
-      const agents = this.pivots.record(target, agentId, this.now().getTime(), this.deps.swarmWindowMs ?? 60_000);
-      if (agents.length >= (this.deps.swarmAgents ?? 2)) {
-        this.tripSwarm(`${agents.length} agents went after the same new target (${target.replace(/^[a-z]+:/, "")}) within ${Math.round((this.deps.swarmWindowMs ?? 60_000) / 1000)}s`, agents);
+      const agents = this.pivots.record(target, agentId, this.now().getTime(), this.settings().swarmWindowSeconds * 1000);
+      if (this.settings().swarmAgents > 0 && agents.length >= this.settings().swarmAgents) {
+        this.tripSwarm(`${agents.length} agents went after the same new target (${target.replace(/^[a-z]+:/, "")}) within ${this.settings().swarmWindowSeconds}s`, agents);
       }
     }
 
@@ -1476,7 +1508,7 @@ export class Gatekeeper extends EventEmitter {
     if (!pol.agents.some((a) => a.id === agentId)) throw new GatekeeperError("This agent is not active in Dharma yet", 403);
     if (this.isFrozen()) throw new GatekeeperError("All agents are frozen", 423);
     const isolation = meta.isolation === "gvisor" ? "gvisor" : "docker";
-    if (this.deps.requireIsolation === "gvisor" && isolation !== "gvisor") {
+    if (this.settings().requireGvisor === 1 && isolation !== "gvisor") {
       throw new GatekeeperError("This organization requires gVisor isolation. Install gVisor (runsc) for Docker on that machine.", 403);
     }
     const s: SandboxSession = {
@@ -1644,9 +1676,9 @@ export class Gatekeeper extends EventEmitter {
     if (decision.outcome !== "allow") {
       const target = targetOf({ type: "action", url: r.url });
       if (target && this.isNewTarget(target)) {
-        const agents = this.pivots.record(target, agentId, this.now().getTime(), this.deps.swarmWindowMs ?? 60_000);
-        if (agents.length >= (this.deps.swarmAgents ?? 2)) {
-          this.tripSwarm(`${agents.length} sandboxed agents went after the same new host (${target.replace(/^[a-z]+:/, "")}) within ${Math.round((this.deps.swarmWindowMs ?? 60_000) / 1000)}s`, agents);
+        const agents = this.pivots.record(target, agentId, this.now().getTime(), this.settings().swarmWindowSeconds * 1000);
+        if (this.settings().swarmAgents > 0 && agents.length >= this.settings().swarmAgents) {
+          this.tripSwarm(`${agents.length} sandboxed agents went after the same new host (${target.replace(/^[a-z]+:/, "")}) within ${this.settings().swarmWindowSeconds}s`, agents);
         }
       }
     }
@@ -1754,7 +1786,15 @@ export class Gatekeeper extends EventEmitter {
   }
 
   /** How long a held sandbox request waits before the box gets "pending" back. */
-  holdMs = 120_000;
+  private baseHoldMs = 120_000;
+  /** How long a held request waits for a member before it's refused: the Approval hold setting. */
+  get holdMs() {
+    return this.settings().holdSeconds * 1000;
+  }
+  /** This Gatekeeper's default hold (KARUNA_HOLD_SECONDS), used until the team votes a different one. */
+  set holdMs(ms: number) {
+    this.baseHoldMs = ms;
+  }
 
   /** A key value was stored or rotated (the value itself is never logged). */
   noteKeyStored(name: string, envVar: string) {
@@ -2983,7 +3023,8 @@ export class Gatekeeper extends EventEmitter {
   /** Expire tests nobody acted on (passed), and occasionally send new ones at random. */
   shieldHousekeeping() {
     const now = this.now().getTime();
-    const window = this.deps.shieldWindowMs ?? 30 * 60_000;
+    const set = this.settings();
+    const window = set.drillWindowMinutes * 60_000;
     let dirty = false;
     for (const t of this.state.tests) {
       if (t.status === "pending" && now - Date.parse(t.sentAt) > window) {
@@ -2994,7 +3035,7 @@ export class Gatekeeper extends EventEmitter {
         dirty = true;
       }
     }
-    const perDay = this.deps.shieldTestsPerDay ?? 0;
+    const perDay = set.drillsPerDay;
     const elapsed = this.lastShieldTick ? now - this.lastShieldTick : 0;
     this.lastShieldTick = now;
     if (perDay > 0 && elapsed > 0 && this.policy && !this.isFrozen() && this.policy.payees.length) {
@@ -3164,8 +3205,8 @@ export class Gatekeeper extends EventEmitter {
           failedTest: this.state.tests.filter((t) => t.ruleId === r.id).at(-1)?.id ?? null,
         })),
         templates: TEMPLATES,
-        testsPerDay: this.deps.shieldTestsPerDay ?? 0,
-        windowMinutes: Math.round((this.deps.shieldWindowMs ?? 30 * 60_000) / 60_000),
+        testsPerDay: this.settings().drillsPerDay,
+        windowMinutes: this.settings().drillWindowMinutes,
       },
       learned: {
         precedents: this.state.precedents.slice(-40).reverse().map((x) => ({
@@ -3183,9 +3224,10 @@ export class Gatekeeper extends EventEmitter {
         traps: this.state.traps.slice(-20).reverse().map((t) => ({ ...t, agentName: t.agentId ? (L.agent(t.agentId) ?? t.agentId) : null, envFile: trapEnvFile(t) })),
         tainted: Object.entries(this.state.tainted).map(([agentId, v]) => ({ agentId, agentName: L.agent(agentId) ?? agentId, ...v })),
         trips: this.state.swarmTrips.slice(-30).reverse(),
-        agentsToTrip: this.deps.swarmAgents ?? 2,
-        windowSeconds: Math.round((this.deps.swarmWindowMs ?? 60_000) / 1000),
+        agentsToTrip: this.settings().swarmAgents,
+        windowSeconds: this.settings().swarmWindowSeconds,
       },
+      settings: { values: this.settings(), defaults: this.settingDefaults(), gvisorAvailable: !!this.deps.gvisorAvailable },
       inbox: this.state.inbox.slice(-100).reverse().map((m) => {
         const t = this.state.tests.find((x) => x.messageId === m.id);
         return { ...m, test: t ? { id: t.id, status: t.status, template: t.template } : null };

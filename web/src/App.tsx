@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import type { Address } from "viem";
-import { isAddr, isNoLimit, decodeChange, describeChange, describeScope, NO_LIMIT_USD, waitText, type Change } from "@prekaruna/dharma";
+import { isAddr, isNoLimit, decodeChange, describeChange, describeScope, NO_LIMIT_USD, waitText, SETTINGS, settingChange, type Change, type SettingName } from "@prekaruna/dharma";
 import { api, useGatekeeper, type LooseningPreview, type AgentExposure, type Exposure, type AgentView, type AgentDraftView, type Governance, type LogEntry, type Proposal, type Rule, type RunDetail, type RunFileChange, type RunStep, type Schedule, type Snapshot, type WalletInfo } from "./api.ts";
 import { Kind, SignerUnavailable, cancelEscrow, decidePayment, loadSigner, signerKey, submitChange, type Signer } from "./signer.ts";
 import { accountEmail, createAccount, signIn as accountSignIn, signOut as accountSignOut } from "./account.ts";
@@ -899,6 +899,52 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
 
 // ============================================================== overview
 
+/**
+ * One org setting, shown inline in the card it governs: its value is a link that opens a field to
+ * propose a new value. Every change goes to a team vote; a pending vote shows next to the value.
+ */
+function SettingControl({ ctx, name, unit }: { ctx: Ctx; name: SettingName; unit?: "minutes" | "seconds" }) {
+  const spec = SETTINGS[name];
+  const value = ctx.s.settings.values[name];
+  const [draft, setDraft] = useState<string | null>(null);
+  const pending = ctx.s.policy!.proposals.filter((g) => (g.status === "open" || g.status === "queued") && g.change?.op === "AddRule" && g.change.scope === `setting:${name}`);
+  const pendingTag = pending.map((g) => {
+    const v = Number(g.change?.op === "AddRule" ? g.change.target : NaN);
+    return <span className="tag" key={g.id} title="A change the team is voting on">vote pending: {Number.isFinite(v) ? spec.text(v) : "change"}</span>;
+  });
+  const propose = (v: number) => ctx.change(settingChange(name, v)).then((ok) => ok && setDraft(null));
+
+  if (spec.max === 1) {
+    // An on/off setting: one button that proposes the opposite.
+    return (
+      <span className="setting">
+        <b>{spec.text(value)}</b>
+        {!pending.length && <button className="link-btn" disabled={ctx.busy} onClick={() => propose(value ? 0 : 1)}>{value ? "Propose turning off" : "Propose turning on"}</button>}
+        {pendingTag}
+      </span>
+    );
+  }
+  if (draft === null) {
+    return (
+      <span className="setting">
+        <button className="link-btn" title={`Propose a new ${spec.label.toLowerCase()}`} onClick={() => setDraft(String(value))}>{spec.text(value)}</button>
+        {pendingTag}
+      </span>
+    );
+  }
+  const n = Number(draft);
+  const bad = !/^\d+$/.test(draft.trim()) || n < spec.min || n > spec.max;
+  return (
+    <form className="setting setting-edit" onSubmit={(e) => { e.preventDefault(); if (!bad && n !== value) void propose(n); }}>
+      <input className="select-sm mono" inputMode="numeric" autoFocus aria-label={spec.label} value={draft} onChange={(e) => setDraft(e.target.value)} />
+      {unit && <span className="muted">{unit}</span>}
+      <button className="btn btn-dark btn-sm" disabled={ctx.busy || bad || n === value}>Propose</button>
+      <button type="button" className="btn btn-ghost btn-sm" onClick={() => setDraft(null)}>Close</button>
+      {bad && <small className="bad-text">{spec.min} to {spec.max}</small>}
+    </form>
+  );
+}
+
 /** The wallet tile's Gateway line, with Add funds: moves USDC from the org's wallet into Gateway, which paid data (x402) draws on. */
 function GatewayFunds({ ctx, wallet }: { ctx: Ctx; wallet: WalletInfo | null }) {
   const [open, setOpen] = useState(false);
@@ -953,7 +999,7 @@ function Overview({ ctx, wallet, go }: { ctx: Ctx; wallet: WalletInfo | null; go
       <div className="tiles">
         <div className={`tile rise ${pending.length ? "attention" : ""}`} style={st(0)}><div className="k">Waiting for you <Icon name="approvals" size={14} /></div><div className="v heading-gradient">{pending.length}</div><div className="note">{pending.length ? "to approve" : "all clear"}</div></div>
         <div className="tile rise" style={st(1)}><div className="k">Wallet (USDC) <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{wallet ? usd(Number(wallet.usdc)) : "…"}</div><GatewayFunds ctx={ctx} wallet={wallet} /></div>
-        <div className="tile rise" style={st(2)}><div className="k">Actions today <Icon name="activity" size={14} /></div><div className="v heading-gradient">{todays.length}</div><div className="note">{allowedToday} allowed · {blockedToday} blocked · {heldToday} held</div></div>
+        <div className="tile rise" style={st(2)}><div className="k">Actions today <Icon name="activity" size={14} /></div><div className="v heading-gradient">{todays.length}</div><div className="note one-line">{allowedToday} allowed · {blockedToday} blocked · {heldToday} held</div></div>
         <div className="tile rise" style={st(3)}><div className="k">Spent today <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{usd(spent)}</div><div className="note">of {usd(pol.agents.filter((a) => a.active).reduce((n, a) => n + a.capUsd, 0))} allowed</div></div>
       </div>
 
@@ -1064,6 +1110,7 @@ function ActivityPage({ ctx, dharma, log }: { ctx: Ctx; dharma: Address; log: Lo
   return (
     <div className="stack">
       {pending.length === 0 && live.length === 0 && <div className="card"><Empty icon="check">Nothing is waiting for you.</Empty></div>}
+      <p className="muted small settings-line">An agent's held web request waits <SettingControl ctx={ctx} name="holdSeconds" unit="seconds" /> for a member, then it's refused.</p>
       {pending.map((p, i) => <div className="rise" style={st(i)} key={p.id}><ApprovalCard p={p} ctx={ctx} dharma={dharma} /></div>)}
       <EscrowHolds ctx={ctx} />
       <Ballots ctx={ctx} />
@@ -1317,7 +1364,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
     <div className="stack">
       {reveal && <TokenReveal {...reveal} onDone={() => setReveal(null)} />}
       {runsFor && <RunsPanel ctx={ctx} agentId={runsFor} onClose={() => setRunsFor(null)} />}
-      {s.sandbox.sessions.length > 0 && <SandboxRuns ctx={ctx} />}
+      {(s.sandbox.sessions.length > 0 || s.settings.gvisorAvailable || s.settings.values.requireGvisor === 1) && <SandboxRuns ctx={ctx} />}
       {pol.agents.length > 0 && (
         <div className="grid2 agent-grid">
           {pol.agents.map((a, i) => {
@@ -1494,6 +1541,8 @@ function describeRule(c: RuleChange, names: { agent: (id: string) => string; pay
 function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
   const { s, busy } = ctx;
   const pol = s.policy!;
+  // Settings are Dharma rules too, but they're shown and changed in the card they govern.
+  const listedRules = pol.rules.filter((r) => !r.scope.startsWith("setting:"));
   const [meta, setMeta] = useState<Rule[]>([]);
   // The form's choices that aren't rules: a payee, a trusted site, the two-signature limit, escrow.
   const [special, setSpecial] = useState<"" | "payee" | "site" | "threshold" | "escrow">("");
@@ -1578,9 +1627,9 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
   return (
     <div className="stack">
       {part === "list" && <div className="card">
-        <div className="hd window-hd"><h2>Rules on Dharma</h2><span className="sub">{pol.rules.filter((r) => r.active).length} active</span></div>
+        <div className="hd window-hd"><h2>Rules on Dharma</h2><span className="sub">{listedRules.filter((r) => r.active).length} active</span></div>
         <div className="policy">
-          {pol.rules.map((r, i) => (
+          {listedRules.map((r, i) => (
             <div className={`p ${r.active ? "" : "off"}`} key={r.id}>
               <span className="i">{String(i + 1).padStart(2, "0")}</span>
               <span className="nm">
@@ -1902,13 +1951,14 @@ function Team({ ctx }: { ctx: Ctx }) {
 function InviteLinks({ ctx }: { ctx: Ctx }) {
   const { s, run, busy } = ctx;
   const [copied, setCopied] = useState<string | null>(null);
+  const [limits, setLimits] = useState({ days: 7, uses: 10 });
   const invites = s.invites ?? [];
   const copy = (link: string) => {
     navigator.clipboard?.writeText(link);
     setCopied(link);
     setTimeout(() => setCopied((c) => (c === link ? null : c)), 2000);
   };
-  const create = () => run(async () => { const r = await api<{ link: string }>("/invites", {}); copy(r.link); }, "Invite link created and copied");
+  const create = () => run(async () => { const r = await api<{ link: string }>("/invites", limits); copy(r.link); }, "Invite link created and copied");
   const revoke = async (code: string) => {
     if (await askConfirm("Revoke this invite link? Anyone who hasn't used it yet won't be able to. Requests already sent stay under Access requests.", { action: "Revoke", danger: true }))
       run(() => api(`/invites/${code}`, undefined, "DELETE"), "Invite link revoked");
@@ -1917,13 +1967,23 @@ function InviteLinks({ ctx }: { ctx: Ctx }) {
     <div className="card">
       <div className="hd">
         <h2>Invite links</h2>
-        {s.publicUrl && <button className="btn btn-dark btn-sm" disabled={busy} onClick={create}><Icon name="plus" size={14} /> Create invite link</button>}
+        {s.publicUrl && (
+          <span className="invite-create">
+            <select className="select-sm" aria-label="How long the link lasts" value={limits.days} onChange={(e) => setLimits({ ...limits, days: Number(e.target.value) })}>
+              {[1, 7, 30].map((d) => <option key={d} value={d}>{d === 1 ? "1 day" : `${d} days`}</option>)}
+            </select>
+            <select className="select-sm" aria-label="How many people can use the link" value={limits.uses} onChange={(e) => setLimits({ ...limits, uses: Number(e.target.value) })}>
+              {[1, 5, 10, 25, 50].map((u) => <option key={u} value={u}>{u === 1 ? "1 use" : `${u} uses`}</option>)}
+            </select>
+            <button className="btn btn-dark btn-sm" disabled={busy} onClick={create}><Icon name="plus" size={14} /> Create invite link</button>
+          </span>
+        )}
       </div>
       <div className="pad stack-sm">
         {!s.publicUrl ? (
           <p className="muted small">Invite links need Karuna's public address (the tunnel chat apps use). Set <span className="mono">KARUNA_CHAT_URL</span> in <span className="mono">.env</span> and restart the Gatekeeper.</p>
         ) : invites.length === 0 ? (
-          <p className="muted small">Send someone a link: they open Karuna on their computer, choose <b>Ask to Join</b> and paste it. Their request shows up here, and members vote to add them. Links work for 7 days or 10 requests.</p>
+          <p className="muted small">Send someone a link: they open Karuna on their computer, choose <b>Ask to Join</b> and paste it. Their request shows up here, and members vote to add them. Pick how long the link lasts and how many people can use it.</p>
         ) : (
           invites.map((i) => (
             <div className="invite-row" key={i.code}>
@@ -2149,7 +2209,7 @@ function Drills({ ctx }: { ctx: Ctx }) {
   };
   return (
     <div className="card">
-      <div className="hd"><h2>Drills</h2><span className="sub">{s.shield.testsPerDay ? `about ${s.shield.testsPerDay} fake scams per agent a day` : "fake scams sent to agents"}</span></div>
+      <div className="hd"><h2>Drills</h2><span className="sub settings-line">fake scams per agent: <SettingControl ctx={ctx} name="drillsPerDay" /> · ignored for <SettingControl ctx={ctx} name="drillWindowMinutes" unit="minutes" /> counts as passed</span></div>
       <form className="inline-form" onSubmit={runTest}>
         <label className="field"><span>Agent</span>
           <select value={test.agentId} onChange={(e) => setTest({ ...test, agentId: e.target.value })}>
@@ -2238,7 +2298,7 @@ function Traps({ ctx }: { ctx: Ctx }) {
 
   return (
       <div className="card">
-        <div className="hd"><h2>Trap credentials</h2><span className="sub">any agent that uses one, or {sw.agentsToTrip} agents hitting one new target within {sw.windowSeconds}s, freezes every agent</span></div>
+        <div className="hd"><h2>Trap credentials</h2><span className="sub settings-line">any agent that uses one freezes every agent · Swarm Stopper: <SettingControl ctx={ctx} name="swarmAgents" />{sw.agentsToTrip > 0 && <> hitting one new target within <SettingControl ctx={ctx} name="swarmWindowSeconds" unit="seconds" /></>}</span></div>
         <form className="pad row-form" onSubmit={(e) => { e.preventDefault(); run(() => api("/traps", { agentId: target || undefined }), "Trap credentials minted. Plant them where the agent can find them."); }}>
           <select aria-label="Which agent the traps are for" value={target} onChange={(e) => setTarget(e.target.value)}>
             <option value="">For every agent</option>
@@ -3116,7 +3176,7 @@ function SandboxRuns({ ctx }: { ctx: Ctx }) {
   const sb = s.sandbox;
   return (
     <div className="card">
-      <div className="hd"><h2>Running in a sandbox</h2><span className="sub">{sb.sessions.length} live</span></div>
+      <div className="hd"><h2>Running in a sandbox</h2><span className="sub settings-line">{sb.sessions.length} live{(s.settings.gvisorAvailable || s.settings.values.requireGvisor === 1) && <> · Require gVisor: <SettingControl ctx={ctx} name="requireGvisor" /></>}</span></div>
       {sb.sessions.length === 0 ? <Empty icon="agents">No boxes running. Start one with <span className="mono">pnpm karuna run --agent &lt;id&gt; ./folder -- &lt;command&gt;</span>.</Empty> : (
         <div className="table">
           {sb.sessions.map((x) => (

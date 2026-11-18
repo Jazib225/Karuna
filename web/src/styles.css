@@ -283,7 +283,7 @@ a:hover .nudge, button:hover .nudge { translate: 3px 0; }
 
 /* ---------------------------------------------------------------- tiles */
 .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
-@media (max-width: 1100px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 1200px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .tile {
   position: relative; padding: 18px 20px 20px; border-radius: var(--r-lg); background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow-soft);
   display: grid; gap: 10px; align-content: start; min-width: 0;
@@ -997,3 +997,15 @@ html, body, * { scrollbar-width: none; }
 .gateway-add { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .gateway-add input { width: 90px; }
 .gateway-add small { flex-basis: 100%; font-size: 12px; }
+
+/* A tile line that must stay on one line: the font shrinks a little in a narrow tile instead of wrapping. */
+.tile:has(.note.one-line) { container-type: inline-size; }
+.tile .note.one-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-sans); font-size: clamp(11px, 6.4cqi, 12.5px); }
+
+/* Settings shown inline in the card they govern */
+.settings-line { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+.setting { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.setting .tag { font-size: 11px; }
+.setting-edit input { width: 72px; }
+.setting-edit small { flex-basis: 100%; }
+.invite-create { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }

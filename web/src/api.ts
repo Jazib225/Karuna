@@ -1,6 +1,7 @@
 // Console ↔ Gatekeeper. Everything the console shows comes from the Gatekeeper; nothing is
 // simulated or built in. Live updates arrive over server-sent events.
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { SettingValues } from "@prekaruna/dharma";
 
 export type Outcome = "allow" | "deny" | "approval";
 export type Status = "pending" | "executing" | "executed" | "allowed" | "denied" | "failed";
@@ -225,6 +226,8 @@ export interface Snapshot {
     agentsToTrip: number;
     windowSeconds: number;
   };
+  /** Org settings, voted on Dharma; `defaults` is what applies before any vote. */
+  settings: { values: SettingValues; defaults: SettingValues; gvisorAvailable: boolean };
   inbox: (InboxMessage & { test: { id: string; status: ShieldTest["status"]; template: string } | null })[];
   proposals: Proposal[];
   log: { length: number; head: string; verified: boolean; brokenAt: number | null; publicKeyPem: string };

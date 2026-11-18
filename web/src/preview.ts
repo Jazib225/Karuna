@@ -154,6 +154,11 @@ export const previewSnapshot: Snapshot = {
     agentsToTrip: 3,
     windowSeconds: 30,
   },
+  settings: {
+    values: { drillsPerDay: 2, drillWindowMinutes: 30, holdSeconds: 120, swarmAgents: 3, swarmWindowSeconds: 30, requireGvisor: 0 },
+    defaults: { drillsPerDay: 2, drillWindowMinutes: 30, holdSeconds: 120, swarmAgents: 2, swarmWindowSeconds: 60, requireGvisor: 0 },
+    gvisorAvailable: true,
+  },
   inbox: [
     { id: "m4", agentId: "payables", from: "Valley Flour Co.", subject: "Invoice #2291 — November flour", body: "", receivedAt: iso(600), test: null },
     { id: "m3", agentId: "payables", from: "City Power billing", subject: "Updated bank details for your account", body: "", receivedAt: iso(5400), test: { id: "t3", status: "failed", template: "bank-change" } },

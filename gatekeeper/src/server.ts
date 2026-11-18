@@ -289,7 +289,7 @@ export function consoleApi(
       if (method === "POST" && path === "/pause") return send(res, 200, { paused: gk.pause(String(body.by ?? "console")) });
       if (method === "POST" && path === "/resume") return send(res, 200, { paused: gk.resume(String(body.by ?? "console")) });
       // Invite links: make and revoke yours; use someone else's (this Gatekeeper reaches their Karuna).
-      if (method === "POST" && path === "/invites") return send(res, 200, gk.createInvite());
+      if (method === "POST" && path === "/invites") return send(res, 200, gk.createInvite({ days: body.days, uses: body.uses }));
       if (method === "DELETE" && (m = path.match(/^\/invites\/(inv_[\w-]+)$/))) return send(res, 200, (gk.revokeInvite(m[1]), { ok: true }));
       if (method === "POST" && path === "/invites/lookup") return send(res, 200, await remoteInvite(body.link, ""));
       if (method === "POST" && path === "/invites/send") return send(res, 200, await remoteInvite(body.link, "/request", { address: body.address, name: body.name, signature: body.signature }));

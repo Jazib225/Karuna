@@ -12,7 +12,7 @@ import {
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import {
-  Kind, actionTypedData, encodeChange, paymentDecisionTypedData, type Change,
+  Kind, actionTypedData, describeChange, encodeChange, paymentDecisionTypedData, settingChange, type Change,
 } from "@prekaruna/dharma";
 import { Store } from "../src/store.ts";
 import { SecretStore } from "../src/secrets.ts";
@@ -292,9 +292,50 @@ describe("Gateway funds", () => {
   });
 });
 
+describe("settings: voted on Dharma like any rule", () => {
+  it("each setting starts at this Gatekeeper's default; a passed vote changes it, and the newest vote wins", async () => {
+    expect(gk.settings()).toMatchObject({ holdSeconds: 120, swarmAgents: 2, requireGvisor: 0 });
+    expect(describeChange(settingChange("drillsPerDay", 4))).toBe("Set drills per agent per day to 4 a day");
+    expect(describeChange(settingChange("holdSeconds", 300))).toBe("Set approval hold to 5 min");
+    expect(() => settingChange("drillsPerDay", 99)).toThrow(/0 to 20/);
+
+    await propose(alice, settingChange("holdSeconds", 300));
+    expect(gk.holdMs).toBe(120_000); // not until the vote passes
+    await waitTimelock();
+    expect(gk.holdMs).toBe(300_000);
+    expect(gk.snapshot().settings).toMatchObject({ values: { holdSeconds: 300 }, defaults: { holdSeconds: 120 } });
+
+    await propose(alice, settingChange("drillsPerDay", 4));
+    await propose(alice, settingChange("drillsPerDay", 1));
+    await waitTimelock();
+    expect(gk.snapshot().shield.testsPerDay).toBe(1);
+  }, 60_000);
+
+  it("Require gVisor, once voted on, refuses boxes that run on plain Docker", async () => {
+    const { id } = await activateAgent(1);
+    expect(gk.startSession(id, { isolation: "docker" }).agentId).toBe(id);
+    await propose(alice, settingChange("requireGvisor", 1));
+    await waitTimelock();
+    expect(() => gk.startSession(id, { isolation: "docker" })).toThrow(/requires gVisor/);
+    expect(gk.startSession(id, { isolation: "gvisor" }).agentId).toBe(id);
+  }, 60_000);
+});
+
 describe("invite links", () => {
   it("without a public address there are no invite links", () => {
     expect(() => gk.createInvite()).toThrow(/public address/);
+  });
+
+  it("the member picks how long a link lasts and how many times it can be used", async () => {
+    await gk.idle();
+    const owner = makeGatekeeper(dir, { chatUrl: "http://127.0.0.1:1" });
+    await owner.housekeeping();
+    const inv = owner.createInvite({ days: 1, uses: 1 });
+    expect(inv.maxUses).toBe(1);
+    expect(Date.parse(inv.expiresAt) - Date.parse(inv.createdAt)).toBe(86_400_000);
+    expect(owner.createInvite().maxUses).toBe(10); // the defaults: 7 days, 10 uses
+    expect(() => owner.createInvite({ days: 0 })).toThrow(/1 to 30 days/);
+    expect(() => owner.createInvite({ uses: 51 })).toThrow(/1 to 50 times/);
   });
 
   it("someone with a link sends a signed join request from their own Karuna; members still vote them in", async () => {
