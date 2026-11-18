@@ -834,6 +834,9 @@ html, body, * { scrollbar-width: none; }
 
 /* New agent, built agents, and the Runs view */
 .new-agent textarea, .built textarea { width: 100%; }
+.key-ask { display: grid; gap: 8px; padding: 12px 14px; border: 1px dashed var(--n400); border-radius: 10px; }
+.key-ask .grow { flex: 1; min-width: 0; }
+.field small.muted { font-size: 12px; }
 .check-row { display: flex; gap: 8px; align-items: flex-start; font-size: 13.5px; padding: 3px 0; }
 .inline-field { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--n500); }
 .built { display: grid; gap: 8px; }

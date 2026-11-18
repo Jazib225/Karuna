@@ -99,9 +99,9 @@ A custom rule covers any kind of agent action, for every agent or one:
 asks a free model (Gemini's free tier by default) to draft rules, checks each draft against the
 org's real agents and payees, and shows it as the exact rule and sentence that would be voted on.
 The model never proposes anything. Only free models are used, tried in order until one answers:
-Gemini (`gemini-3.8-flash`, then `gemini-3.5-flash-lite`), then Groq (`openai/gpt-oss-20b`). Add free keys
-on the Keys page named `gemini` (aistudio.google.com, service `generativelanguage.googleapis.com`) and/or
-`groq` (console.groq.com, service `api.groq.com`). A sentence that drafted once is saved and comes back
+Gemini (`gemini-3.8-flash`, then `gemini-3.5-flash-lite`), then Groq (`openai/gpt-oss-20b`). When no key is
+saved, both drafters (plain-English rules and New agent) ask for a free Groq (console.groq.com) or Gemini
+(aistudio.google.com) key right there; only the Gatekeeper uses it. A sentence that drafted once is saved and comes back
 instantly with no model call, so a rehearsed demo sentence can't fail. Models: `KARUNA_DRAFT_MODEL`,
 `KARUNA_DRAFT_FALLBACK_MODEL`, `KARUNA_DRAFT_GROQ_MODEL`. Without a key the form works by hand.
 
@@ -308,7 +308,7 @@ For x402 services the wallet also needs a Gateway balance:
 ### Example agents (`agents/examples/`)
 | File | What |
 |---|---|
-| `claude-agent.ts` | Claude Sonnet 5.5 test agent (`http_request`, `read_inbox`), run in a box. Uses the `anthropic` key from the Keys page via its placeholder; at most 10 model calls per run, prints token cost (a few cents) |
+| `claude-agent.ts` | Claude Sonnet 5.5 test agent (`http_request`, `read_inbox`), run in a box. Uses the `anthropic` key (asked for on New agent, voted with the agent) via its placeholder; at most 10 model calls per run, prints token cost (a few cents) |
 | `test-agent.ts` | scripted walkthrough: an allowed GET, a denied GET, a POST held for approval, the inbox |
 | `payables-agent.ts` | pays invoices from its inbox (gullible, or `--careful` to flag scams) |
 | `swarm-agents.ts` | a "helpful" agent that shares credentials it finds (the Tripwire demo) |

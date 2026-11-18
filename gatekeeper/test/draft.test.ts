@@ -91,7 +91,7 @@ describe("rule drafter", () => {
     const { f, calls } = fakeModel({ rules: [{ ...base, kind: "shell", outcome: "deny", target: "rm" }], note: "" });
     await draftRules("x", ctx, { gemini: null, groq: "q" }, f, 0);
     expect(calls.map((c) => c.url)).toEqual(["https://api.groq.com/openai/v1/chat/completions"]);
-    await expect(draftRules("x", ctx, { gemini: null, groq: null }, f, 0)).rejects.toThrow(/add a free key and choose "Rule drafter"/);
+    await expect(draftRules("x", ctx, { gemini: null, groq: null }, f, 0)).rejects.toThrow(/No drafter key yet.*Groq.*Gemini/);
   });
 
   it("when every provider fails, the error says so and points to the form", async () => {

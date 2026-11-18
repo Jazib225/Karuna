@@ -3,7 +3,8 @@
 // A connector is added by a vote (a capability rule `connector:<name>` whose target is the server's
 // URL). Karuna connects to it, lists its tools and offers them to chat apps through its own MCP
 // endpoint as `<name>__<tool>`; every call is decided by the team's rules first. A key named like
-// the connector (Keys page) is sent as its bearer token; the chat app never holds it.
+// the connector (its sign-in key, saved from the Connectors card) is sent as its bearer token; the chat
+// app never holds it.
 //
 // Tool definitions come from outside the org, so Karuna remembers each tool as first seen after
 // the team approved the connector. If a connector later changes a tool's description, inputs or
