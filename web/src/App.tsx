@@ -1019,7 +1019,9 @@ function Console({ s, log, wallet, refreshWallet, run, busy, me, offline, refres
     };
     // A freeze alert ("Unfreezing needs a member vote") stays only while agents are still frozen.
     const thawed = (a: Alert) => !!a.whileFrozen && !sRef.current.frozen;
-    const t = setInterval(() => setAlerts((prev) => prev.filter((a) => (a.sticky && !nothingToVote(a) && !thawed(a)) || Date.now() - a.at < 8000)), 1000);
+    // A vote or freeze card goes as soon as there's nothing left to do about it. Otherwise a card
+    // leaves when its timer bar runs out (the bar is the only clock; see .alert-timer).
+    const t = setInterval(() => setAlerts((prev) => prev.filter((a) => !(a.sticky && (nothingToVote(a) || thawed(a))))), 500);
     return () => clearInterval(t);
   }, []);
   const dismiss = (id: string) => setAlerts((prev) => prev.filter((a) => a.id !== id));
@@ -1167,6 +1169,8 @@ function Console({ s, log, wallet, refreshWallet, run, busy, me, offline, refres
               <button className="alert-x" aria-label="Dismiss" onClick={() => dismiss(a.id)}><Icon name="x" size={14} /></button>
               <div className="alert-body">{a.body}</div>
               {a.go && <button className="alert-cta" onClick={() => { setView(a.go!); dismiss(a.id); }}>{a.cta ?? "Open"} <span className="nudge"><Icon name="arrow" size={14} /></span></button>}
+              {/* The card's clock: it closes when this bar runs out. Hovering or focusing the card pauses the bar where it is. */}
+              <span className="alert-timer" aria-hidden style={{ animationDuration: `${alertReadMs(a)}ms` }} onAnimationEnd={() => dismiss(a.id)} />
             </div>
           ))}
         </div>
@@ -1714,6 +1718,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
                 {a.active && <Meter a={limited(a)} frozen={!!s.frozen} />}
                 {a.active && (() => { const x = s.exposure?.agents.find((e) => e.agentId === a.id); return x && <div className="worst-line"><Icon name="alert" size={12} /> If hijacked: {agentWorst(x, s.exposure!.walletUsd)}</div>; })()}
                 {a.active && levels && <AgentLevel a={a} ctx={ctx} />}
+                {a.active && <Preflight a={a} ctx={ctx} />}
                 {a.active && a.built && <BuiltControls a={a} ctx={ctx} openRuns={() => setRunsFor(a.id)} />}
                 {a.active && (
                   <div className="meta">
@@ -2562,6 +2567,12 @@ function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string
 
 /** Bottom-right cards on screen at once. */
 const MAX_ALERTS = 3;
+
+/** How long a card stays: time to read it (3–6 s by length; at least 5 s for one that needs you). */
+function alertReadMs(a: { title: string; body: string; sticky: boolean }) {
+  const read = 1500 + (a.title.length + a.body.length) * 30;
+  return Math.min(6_000, Math.max(a.sticky ? 5_000 : 3_000, read));
+}
 
 /** A Dharma proposal event, for the proposal pop-ups (null for every other event). */
 function govEvent(e: ChainEvent, s: Snapshot, me: string, name: (a?: string | null) => string, whats: Map<number, string>): GovEvent | null {
@@ -3538,6 +3549,63 @@ function AgentLevel({ a, ctx }: { a: AgentView; ctx: Ctx }) {
         )
       )}
       {level > 0 && <button className="btn btn-ghost btn-sm level-lower" disabled={busy} onClick={lower}>Lower to Level {level - 1}</button>}
+    </div>
+  );
+}
+
+/** How a Drill resolved, in a few words. */
+const PREFLIGHT_RESOLUTION: Record<string, string> = {
+  ignored: "didn't act on it",
+  reported: "flagged it as suspicious",
+  "blocked by its fix": "tried again; its fix blocked it",
+  "acted on it": "acted on it",
+};
+
+/**
+ * Pre-flight on the agent card: three Drills sent when the agent first activated. "Testing… 1 of 3"
+ * while they wait, then each result; a failed one shows its fix (Apply fix) and the check can be run again.
+ */
+function Preflight({ a, ctx }: { a: AgentView; ctx: Ctx }) {
+  const { run, busy } = ctx;
+  const pf = a.preflight;
+  const may = ctx.can("agents");
+  const again = () => run(() => api(`/agents/${a.id}/preflight`, {}), "Pre-flight started: three Drills are in its inbox");
+  if (!pf) {
+    return may ? (
+      <div className="preflight">
+        <div className="preflight-head"><span className="muted small">No pre-flight yet</span><button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={again}>Run pre-flight</button></div>
+      </div>
+    ) : null;
+  }
+  return (
+    <div className={`preflight ${pf.status}`}>
+      <div className="preflight-head">
+        {pf.status === "running" ? (
+          <span className="preflight-title"><span className="spinner" aria-hidden /> Pre-flight: Testing… {pf.done} of {pf.total}</span>
+        ) : (
+          <span className="preflight-title"><Icon name={pf.status === "passed" ? "check" : "alert"} size={14} /> Pre-flight {pf.status === "passed" ? "passed" : "failed"}</span>
+        )}
+        {pf.status !== "running" && may && <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={again}>Run again</button>}
+      </div>
+      <ul className="preflight-list">
+        {pf.results.map((r) => (
+          <li key={r.testId} className={r.passed === null ? "wait" : r.passed ? "ok" : "bad"}>
+            <span className="preflight-mark" aria-hidden>{r.passed === null ? <span className="dot" /> : <Icon name={r.passed ? "check" : "x"} size={12} />}</span>
+            <span className="preflight-text">
+              <span>{r.label}</span>
+              <small>{r.passed === null ? "waiting" : PREFLIGHT_RESOLUTION[r.resolution ?? ""] ?? r.resolution}</small>
+              {r.fix && (
+                <span className="preflight-fix">
+                  <span>{r.fix.summary}{r.fix.drafted && <span className="tag" style={{ marginLeft: 6 }}>drafted from its job</span>}</span>
+                  {r.fix.applied
+                    ? <span className="tag"><Icon name="check" size={11} /> fix in place</span>
+                    : may && <button type="button" className="btn btn-dark btn-sm" disabled={busy} onClick={() => run(() => api(`/agents/${a.id}/preflight/fix`, { testId: r.testId }), "Fix applied")}>Apply fix</button>}
+                </span>
+              )}
+            </span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

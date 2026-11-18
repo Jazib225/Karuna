@@ -83,6 +83,8 @@ const gk = new Gatekeeper({
   escrow: new ViemEscrow(createWalletClient({ chain, account: relayer, transport: http(RPC) }), client, usdc),
   undo: runnerUndo(ROOT),
   requireSandbox: true,
+  preflightWindowMs: Number(process.env.KARUNA_PREFLIGHT_MINUTES ?? 5) * 60_000,
+  preflight: process.env.KARUNA_PREFLIGHT !== "0",
 });
 await gk.setup({ orgName: "Local Org", memberName: "You", memberAddress: member, walletAddress: org.address });
 

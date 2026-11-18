@@ -85,6 +85,7 @@ const GATED: [method: string, path: RegExp, perm: Permission][] = [
   ["POST", /^\/agents\/(draft|build|prepare)$/, "agents"],
   ["PATCH", /^\/agents\/[\w-]+\/built$/, "agents"],
   ["POST", /^\/agents\/[\w-]+\/(run|rotate-token)$/, "agents"],
+  ["POST", /^\/agents\/[\w-]+\/preflight(\/fix)?$/, "agents"],
   ["POST", /^\/runs\/[\w-]+\/(stop|undo)$/, "agents"],
   ["POST", /^\/inbox$/, "agents"],
   ["POST", /^\/traps(\/[\w-]+\/plant)?$/, "agents"],
@@ -335,6 +336,9 @@ export function consoleApi(
       if (method === "POST" && path === "/agents/build") return send(res, 200, gk.buildAgent(body));
       if (method === "PATCH" && (m = path.match(/^\/agents\/([\w-]+)\/built$/))) return send(res, 200, gk.updateBuiltAgent(m[1], body));
       if (method === "POST" && (m = path.match(/^\/agents\/([\w-]+)\/run$/))) return send(res, 200, gk.runBuiltAgent(m[1], "Run now"));
+      // Pre-flight: three Drills for one agent (Run again), and "Apply fix" for one that failed.
+      if (method === "POST" && (m = path.match(/^\/agents\/([\w-]+)\/preflight$/))) return send(res, 200, gk.preflight(m[1]));
+      if (method === "POST" && (m = path.match(/^\/agents\/([\w-]+)\/preflight\/fix$/))) return send(res, 200, await gk.applyPreflightFix(m[1], body.testId));
       if (method === "POST" && (m = path.match(/^\/runs\/([\w-]+)\/stop$/))) return send(res, 200, gk.stopRun(m[1]));
       if (method === "POST" && (m = path.match(/^\/runs\/([\w-]+)\/undo$/))) return send(res, 200, await gk.undoRunChanges(m[1], body));
       if (method === "POST" && (m = path.match(/^\/proposals\/([\w-]+)\/escrow-cancel$/))) return send(res, 200, await gk.cancelEscrow(m[1], body));

@@ -109,6 +109,24 @@ export interface AgentView {
   eligibility?: { eligible: boolean; target: number | null; needed: number; have: number } | null;
   /** An agent Karuna builds and runs (instructions and schedule live in the Gatekeeper). */
   built?: { instructions: string; schedule: Schedule; scheduleText: string; paused: boolean; lastRunAt: string | null } | null;
+  /** Pre-flight: three Drills sent when the agent first activated (or on Run again), and their results. */
+  preflight?: PreflightView | null;
+}
+
+export interface PreflightView {
+  id: string;
+  startedAt: string;
+  status: "running" | "passed" | "failed";
+  done: number;
+  total: number;
+  results: {
+    testId: string; template: string; label: string;
+    /** null while the Drill is still waiting. */
+    passed: boolean | null;
+    resolution: string | null;
+    via: string | null;
+    fix: { summary: string; category: string; drafted: boolean; keepFrozen: boolean; applied: boolean } | null;
+  }[];
 }
 
 export interface Schedule { kind: "manual" | "every" | "daily" | "inbox"; minutes?: number; at?: string }

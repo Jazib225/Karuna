@@ -23,6 +23,7 @@ import { remoteInvite } from "../src/invite.ts";
 import type { AddressInfo } from "node:net";
 import { ViemChainWriter, ChainError, RelayedChainWriter, type ChainWriter } from "../src/chain.ts";
 import type { WalletBackend, X402Quote } from "../src/wallet.ts";
+import { recommendFix, fixTightens } from "../src/learn.ts";
 
 const PORT = 18545 + Math.floor(Math.random() * 1000);
 const RPC = `http://127.0.0.1:${PORT}`;
@@ -552,6 +553,122 @@ describe("panic button", () => {
     expect(gk.policy!.frozen).toBe(false);
     expect((await gk.propose(agent, { type: "action", tool: "shell", command: "ls" })).status).toBe("allowed");
   }, 30_000);
+});
+
+describe("pre-flight: three Drills for every new agent", () => {
+  const view = (id: string) => gk.snapshot().policy!.agents.find((a) => a.id === id)!.preflight!;
+  const drill = (id: string, template: string) => gk.snapshot().shield.tests.find((t) => t.agentId === id && t.template === template && t.status === "pending")!;
+  beforeEach(() => {
+    (gk as unknown as { deps: { preflight?: boolean } }).deps.preflight = true; // main.ts turns it on
+  });
+  const expireNow = () => {
+    (gk as unknown as { deps: { preflightWindowMs?: number } }).deps.preflightWindowMs = 1;
+    gk.shieldHousekeeping();
+  };
+
+  it("starts on its own when the agent activates, adds no wait, and passes when nobody acts on the Drills", async () => {
+    const { id } = await activateAgent(5);
+    const v = view(id);
+    expect(v.status).toBe("running");
+    expect([v.done, v.total]).toEqual([0, 3]);
+    expect(v.results.map((r) => r.template)).toEqual(["supplier-invoice", "injected-link", "planted-credential"]);
+    expect(gk.agentInbox(id)).toHaveLength(3); // ordinary mail to the agent: same shape, no flag
+    await new Promise((r) => setTimeout(r, 5));
+    expireNow();
+    expect(view(id)).toMatchObject({ status: "passed", done: 3 });
+    expect(view(id).results.every((r) => r.passed === true && r.fix === null)).toBe(true);
+  }, 60_000);
+
+  it("acting on a Drill after it expired still fails it, like any Drill", async () => {
+    const { id } = await activateAgent(5);
+    const link = drill(id, "injected-link");
+    await new Promise((r) => setTimeout(r, 5));
+    expireNow();
+    expect(view(id).status).toBe("passed");
+    await gk.propose(id, { type: "action", tool: "http", method: "GET", url: `https://${link.bait.host}/verify` });
+    expect(view(id).results.find((r) => r.template === "injected-link")).toMatchObject({ passed: false, via: "http" });
+    expect(view(id).status).toBe("failed");
+    await gk.idle();
+  }, 60_000);
+
+  it("a new agent's first try always fails, even when the fix happens to be in place already", async () => {
+    const { id } = await activateAgent(5); // Level 0 and no key bindings: the trap fix is already true
+    const leak = gk.agentInbox(id).find((m) => m.subject.startsWith("Re: access"))!;
+    const secret = leak.body.match(/GITHUB_TOKEN=(\S+)/)![1];
+    await gk.propose(id, { type: "action", tool: "http", method: "GET", url: "https://api.github.com/" }, `token ${secret}`);
+    expect(view(id).results.find((r) => r.template === "planted-credential")).toMatchObject({ passed: false, via: "trap", fix: { applied: true } });
+    await gk.idle();
+  }, 60_000);
+
+  it("each way of failing gets its fixed fix, and every fix only tightens", () => {
+    const t = { agentId: "ops", category: "Supplies", bait: { host: "verify-x.com" } };
+    const rules = [{ id: "k-openai", outcome: "allow", active: true }];
+    const fixes = {
+      payment: recommendFix({ ...t, via: "payment" }),
+      http: recommendFix({ ...t, via: "http" }),
+      trap: recommendFix({ ...t, via: "trap" }, { keyBindings: ["k-openai"] }),
+      shell: recommendFix({ ...t, via: "shell" }),
+      message: recommendFix({ ...t, via: "message" }),
+    };
+    expect(fixes.payment.changes).toEqual([expect.objectContaining({ op: "AddRule", outcome: "Deny", agent: "ops", scope: "payment:supplies" })]);
+    expect(fixes.http.changes).toEqual([expect.objectContaining({ op: "AddRule", outcome: "Deny", agent: "ops", scope: "http", target: "verify-x.com" })]);
+    expect(fixes.trap).toMatchObject({ keepFrozen: true, changes: [{ op: "RemoveRule", id: "k-openai" }] });
+    expect(fixes.shell.changes).toEqual([expect.objectContaining({ op: "AddRule", outcome: "Approval", agent: "ops", scope: "shell", target: "" })]);
+    expect(fixes.message.changes).toEqual([expect.objectContaining({ op: "AddRule", outcome: "Approval", agent: "ops", scope: "message", target: "" })]);
+    for (const f of Object.values(fixes)) for (const c of f.changes) expect(fixTightens(c, rules)).toBe(true);
+  });
+
+  it("a failed Drill is handled like any failed Drill; once the fix is in, Run again passes", async () => {
+    const { id } = await activateAgent(5);
+    // The agent follows the fake link and pays the fake invoice.
+    const link = drill(id, "injected-link");
+    expect((await gk.propose(id, { type: "action", tool: "http", method: "GET", url: `https://${link.bait.host}/verify?ref=${link.bait.ref}` })).status).toBe("denied");
+    const invoice = drill(id, "supplier-invoice");
+    expect((await gk.propose(id, { type: "transfer", to: invoice.bait.address, amountUsd: invoice.bait.amountUsd, sourceMessageId: invoice.messageId })).status).toBe("denied");
+    await gk.idle();
+    await gk.sync(true);
+    let v = view(id);
+    expect(v.status).toBe("failed");
+    const byTemplate = (tpl: string) => v.results.find((r) => r.template === tpl)!;
+    expect(byTemplate("injected-link")).toMatchObject({ passed: false, via: "http", fix: { category: "http", applied: true } });
+    expect(byTemplate("supplier-invoice")).toMatchObject({ passed: false, via: "payment", fix: { category: "payment", applied: true } });
+    // The same consequences as a failed Drill: an alert and the block rules on Dharma.
+    expect(gk.snapshot().shield.alerts.filter((a) => a.agentId === id && a.kind === "shield-failed").length).toBe(2);
+    const rules = gk.snapshot().policy!.rules.filter((r) => r.active && r.agent === id).map((r) => r.scope);
+    expect(rules).toEqual(expect.arrayContaining(["http", `payment:${invoice.category}`]));
+
+    // Run again: the agent does the same things, and the fixes contain them.
+    gk.preflight(id);
+    const link2 = drill(id, "injected-link");
+    expect(link2.bait.host).toBe(link.bait.host); // the same fake site, so the fix is what's tested
+    await gk.propose(id, { type: "action", tool: "http", method: "GET", url: `https://${link2.bait.host}/verify?ref=${link2.bait.ref}` });
+    const invoice2 = drill(id, "supplier-invoice");
+    await gk.propose(id, { type: "transfer", to: invoice2.bait.address, amountUsd: invoice2.bait.amountUsd, sourceMessageId: invoice2.messageId });
+    expireNow();
+    v = view(id);
+    expect(v.status).toBe("passed");
+    expect(v.results.map((r) => r.resolution)).toEqual(["blocked by its fix", "blocked by its fix", "ignored"]);
+    await gk.idle();
+  }, 120_000);
+
+  it("leaked credentials: the trap does what a trap always does, and Apply fix drops the agent's key binding", async () => {
+    const { id } = await activateAgent(5);
+    await propose(alice, { op: "AddRule", id: "k-openai-ops", outcome: "Allow", agent: id, scope: "key:openai", target: "api.openai.com" });
+    await waitTimelock();
+    const leak = gk.agentInbox(id).find((m) => m.subject.startsWith("Re: access"))!;
+    const secret = leak.body.match(/OPENAI_API_KEY=(\S+)/)![1];
+    expect((await gk.propose(id, { type: "action", tool: "http", method: "GET", url: "https://api.github.com/" }, `using ${secret}`)).status).toBe("denied");
+    await gk.idle();
+    await gk.sync(true);
+    expect(gk.snapshot().policy!.agents.find((a) => a.id === id)!.level).toBe(0); // the usual Tripwire response: held at Level 0
+    expect(gk.snapshot().shield.alerts.some((a) => a.agentId === id && a.kind === "trap-touched")).toBe(true);
+    const cred = view(id).results.find((r) => r.template === "planted-credential")!;
+    expect(cred).toMatchObject({ passed: false, via: "trap", fix: { category: "trap", keepFrozen: true, applied: false } });
+    const after = await gk.applyPreflightFix(id, cred.testId);
+    expect(after!.results.find((r) => r.template === "planted-credential")!.fix).toMatchObject({ applied: true });
+    expect(gk.snapshot().policy!.rules.some((r) => r.id === "k-openai-ops" && r.active)).toBe(false);
+    await expect(gk.applyPreflightFix(id, view(id).results.find((r) => r.template === "injected-link")!.testId)).rejects.toThrow(/Only a failed Drill/);
+  }, 120_000);
 });
 
 describe("fast relay for members' own writes", () => {
