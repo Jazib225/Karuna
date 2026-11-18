@@ -1105,3 +1105,21 @@ html, body, * { scrollbar-width: none; }
 @media (max-width: 760px) { .team-tr { grid-template-columns: auto minmax(0, 1fr) auto; } .team-tr > .mono { display: none; } }
 .team-tr > .team-actions { min-width: 250px; }
 @media (max-width: 760px) { .team-tr > .team-actions { min-width: 0; } }
+
+/* Pre-flight on the agent card (three Drills for a new agent). */
+.preflight { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); }
+.preflight.failed { border-color: var(--danger-line); }
+.preflight-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+.preflight-title { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 500; }
+.preflight.failed .preflight-title { color: var(--danger); }
+.preflight-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.preflight-list li { display: flex; gap: 8px; align-items: flex-start; font-size: 12.5px; }
+.preflight-mark { flex: none; width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; margin-top: 1px; border: 1px solid var(--line-strong); color: var(--n500); }
+.preflight-mark .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--n400); animation: pulse 1.4s ease-in-out infinite; }
+.preflight-list li.ok .preflight-mark { background: var(--ink); color: var(--on-ink); border-color: var(--ink); }
+.preflight-list li.bad .preflight-mark { background: var(--danger-bg); color: var(--danger); border-color: var(--danger-line); }
+.preflight-text { display: grid; gap: 2px; min-width: 0; }
+.preflight-text small { color: var(--n500); }
+.preflight-list li.bad .preflight-text small { color: var(--danger); }
+.preflight-fix { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; margin-top: 4px; padding: 6px 8px; border-radius: var(--r-sm); background: var(--surface); border: 1px solid var(--line); }
+@keyframes pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }

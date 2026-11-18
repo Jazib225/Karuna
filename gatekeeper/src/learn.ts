@@ -193,3 +193,84 @@ export function isLoosening(change: Change): boolean {
   if (!LOOSENING_OPS.has(change.op)) return false;
   return !(change.op === "AddRule" && change.outcome === "Deny");
 }
+
+// ------------------------------------------------------------------ Pre-flight fixes
+
+/** How an agent acted on a Drill, which decides the fix. */
+export type FixCategory = "payment" | "http" | "trap" | "shell" | "message";
+
+export interface Fix {
+  category: FixCategory;
+  /** One line for the agent card ("Block supplies payments for Ops bot"). */
+  summary: string;
+  /** Changes that only tighten, so Karuna applies them at once (no vote). */
+  changes: Change[];
+  /** The agent stays held where Tripwire put it (Level 0, or frozen): the fix never lifts that. */
+  keepFrozen?: boolean;
+  /** Written by a drafting model from the agent's job and the failure, not the table. */
+  drafted?: boolean;
+}
+
+/** A fixed rule id per agent + fix (fits bytes32): pf-<kind>-<8 hex>. */
+export const preflightFixId = (kind: string, ...parts: string[]) => `pf-${kind}-${h8(...parts)}`;
+
+/**
+ * The fix for a failed Drill, from a fixed table. Every change tightens (a block or an approval
+ * rule, or dropping an allow), so it applies at once and can never let anything new through.
+ *   payment → block this agent's payments in the Drill's category (unknown payees are already refused)
+ *   http    → block the fake site (http:<host>) for this agent
+ *   trap    → the agent stays held (Tripwire's Level 0); drop the key bindings it could use
+ *   shell   → every shell command this agent runs needs a person's approval
+ *   message → every message this agent sends another agent needs a person's approval
+ */
+export function recommendFix(
+  test: { agentId: string; category: string; via?: FixCategory; bait: { host?: string } },
+  opts: { agentName?: string; keyBindings?: string[] } = {},
+): Fix {
+  const a = test.agentId;
+  const who = opts.agentName ?? a;
+  const via = test.via ?? "payment";
+  switch (via) {
+    case "http": {
+      const host = (test.bait.host ?? "").toLowerCase();
+      return {
+        category: via, summary: `Block ${host || "that site"} for ${who}`,
+        changes: [{ op: "AddRule", id: preflightFixId("http", a, host), outcome: "Deny", agent: a, scope: "http", target: host }],
+      };
+    }
+    case "trap": {
+      const keys = opts.keyBindings ?? [];
+      return {
+        category: via, keepFrozen: true,
+        summary: keys.length ? `Keep ${who} held at Level 0 and remove its key binding${keys.length > 1 ? "s" : ""}` : `Keep ${who} held at Level 0 (it has no key bindings to remove)`,
+        changes: keys.map((id) => ({ op: "RemoveRule" as const, id })),
+      };
+    }
+    case "shell":
+      return {
+        category: via, summary: `Shell commands from ${who} need a person's approval`,
+        changes: [{ op: "AddRule", id: preflightFixId("sh", a), outcome: "Approval", agent: a, scope: "shell", target: "" }],
+      };
+    case "message":
+      return {
+        category: via, summary: `Messages from ${who} to other agents need a person's approval`,
+        changes: [{ op: "AddRule", id: preflightFixId("msg", a), outcome: "Approval", agent: a, scope: "message", target: "" }],
+      };
+    default: {
+      const cat = test.category.toLowerCase();
+      // The same rule a failed payment Drill writes (shield.ts autoRule), so applying it twice is a no-op.
+      const c = cat.replace(/[^a-z0-9]+/g, "-").slice(0, 12);
+      return {
+        category: "payment", summary: `Block ${cat} payments for ${who} (payments to unknown payees are already refused)`,
+        changes: [{ op: "AddRule", id: `sh-${c}-${createHash("sha256").update(a).digest("hex").slice(0, 8)}`, outcome: "Deny", agent: a, scope: `payment:${cat}`, target: "", maxUsd: 0 }],
+      };
+    }
+  }
+}
+
+/** True when a fix change only tightens: a block or approval rule, or dropping a rule that allows. */
+export function fixTightens(c: Change, rules: { id: string; outcome: string; active: boolean }[]): boolean {
+  if (c.op === "AddRule") return c.outcome === "Deny" || c.outcome === "Approval";
+  if (c.op === "RemoveRule") return rules.some((r) => r.id === c.id && r.active && r.outcome === "allow");
+  return false;
+}
