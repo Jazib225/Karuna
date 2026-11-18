@@ -13,6 +13,7 @@ import { publicApi } from "./chat.ts";
 import { Accounts } from "./accounts.ts";
 import { CircleChainWriter, RelayedChainWriter, ViemChainWriter, publicClient, scrub } from "./chain.ts";
 import { ViemEscrow } from "./escrow.ts";
+import { runnerUndo } from "./undo.ts";
 import { SandboxCA } from "./ca.ts";
 import { SecretStore } from "./secrets.ts";
 import { EgressProxy } from "./proxy.ts";
@@ -88,26 +89,7 @@ const gk = new Gatekeeper({
     return () => p.kill();
   },
   // Undo a run's file changes from its snapshot on this machine (runs started here, by `karuna run`).
-  undo: ({ runId, path }) => new Promise((done) => {
-    const root = resolve(here, "../..");
-    const win = process.platform === "win32";
-    const args = ["tsx", resolve(root, "runner/src/cli.ts"), "undo", "--run", runId, ...(path ? ["--path", path] : [])];
-    const p = spawn(win ? "npx.cmd" : "npx", win ? args.map((a) => (/\s/.test(a) ? `"${a}"` : a)) : args, { shell: win, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-    let out = "";
-    let err = "";
-    p.stdout!.on("data", (b: Buffer) => (out += b.toString("utf8")));
-    p.stderr!.on("data", (b: Buffer) => (err += b.toString("utf8")));
-    p.on("error", (e) => done({ restored: [], skipped: [], error: e.message }));
-    p.on("exit", () => {
-      const last = err.split(/\r?\n/).map((l) => l.replace(/^karuna · /, "").trim()).filter(Boolean).at(-1);
-      try {
-        const r = JSON.parse(out.trim().split(/\r?\n/).at(-1) ?? "");
-        done({ restored: r.restored ?? [], skipped: r.skipped ?? [], ...(last && !(r.restored ?? []).length ? { error: last } : {}) });
-      } catch {
-        done({ restored: [], skipped: [], error: last ?? "karuna undo failed" });
-      }
-    });
-  }),
+  undo: runnerUndo(resolve(here, "../..")),
 });
 gk.holdMs = Number(process.env.KARUNA_HOLD_SECONDS ?? 120) * 1000;
 const ca = new SandboxCA(dataDir);

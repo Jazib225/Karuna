@@ -4,6 +4,7 @@
 // Test-only: POST http://127.0.0.1:9799/approve/<proposalId> signs an approval as the test member.
 import { createServer } from "node:http";
 import { mkdtempSync } from "node:fs";
+import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { privateKeyToAccount } from "viem/accounts";
@@ -17,6 +18,7 @@ import { SecretStore } from "../src/secrets.ts";
 import { EgressProxy } from "../src/proxy.ts";
 import { remoteListener } from "../src/remote.ts";
 import { PIPE_PATH, pipeServer } from "../src/pipe.ts";
+import { runnerUndo } from "../src/undo.ts";
 import type { WalletBackend } from "../src/wallet.ts";
 import type { OnchainPolicy } from "../src/chain.ts";
 
@@ -45,6 +47,7 @@ const fakeWallet = {
 const gk = new Gatekeeper({
   store, wallet: fakeWallet, client: {} as never, writerFor: () => ({}) as never, secrets, requireSandbox: true,
   swarmAgents: 2, swarmWindowMs: 60_000,
+  undo: runnerUndo(resolve(import.meta.dirname, "../..")),
 });
 const rule = (id: string, outcome: "allow" | "deny" | "approval", scope: string, target: string, agent?: string) =>
   ({ id, outcome, core: false, builtin: false, active: true, scope, target, maxUsd: 0, agent });
@@ -57,6 +60,8 @@ gk.policy = {
   rules: [
     rule("key-demo", "allow", "key:demo", "httpbin.org"),
     rule("no-delay", "deny", "http", "httpbin.org/delay"),
+    // HARNESS_MOUNT: a host folder the tester agent may mount writable (its changes can be undone).
+    ...(process.env.HARNESS_MOUNT ? [rule("mount-harness", "allow", "mount", process.env.HARNESS_MOUNT, "tester")] : []),
   ],
   proposals: [], chainTime: Math.floor(Date.now() / 1000),
 } as unknown as OnchainPolicy;
@@ -86,6 +91,18 @@ createServer(async (req, res) => {
   if (req.url === "/state") {
     const s = gk.snapshot();
     return void res.end(JSON.stringify({ sandbox: s.sandbox, frozen: s.frozen, tainted: s.swarm.tainted, proposals: (s.proposals as { id: string; status: string; decision: { ruleId: string }; request: { url?: string; method?: string } }[]).slice(0, 15).map((p) => ({ id: p.id, status: p.status, rule: p.decision.ruleId, req: `${p.request.method ?? ""} ${p.request.url ?? ""}` })) }));
+  }
+  if (req.url === "/runs") return void res.end(JSON.stringify(gk.runsView()));
+  const run = (req.url ?? "").match(/^\/run\/([\w-]+)$/);
+  if (run) return void res.end(JSON.stringify(gk.runView(run[1])));
+  // Undo a run's file changes (all, or ?path=<path inside the mount>), as the console does.
+  const undo = (req.url ?? "").match(/^\/undo\/([\w-]+)(?:\?path=(.+))?$/);
+  if (req.method === "POST" && undo) {
+    try {
+      return void res.end(JSON.stringify(await gk.undoRunChanges(undo[1], undo[2] ? { path: decodeURIComponent(undo[2]) } : {})));
+    } catch (e) {
+      return void res.writeHead(409).end(JSON.stringify({ error: (e as Error).message }));
+    }
   }
   if (req.method === "POST" && req.url === "/freeze") {
     (gk.policy as { frozen: boolean }).frozen = true;
