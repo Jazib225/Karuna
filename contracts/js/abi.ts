@@ -134,44 +134,6 @@ export const DHARMA_ABI = [
   },
   {
     "type": "function",
-    "name": "agentCap",
-    "inputs": [
-      {
-        "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "agentLevel",
-    "inputs": [
-      {
-        "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint8",
-        "internalType": "uint8"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "agents",
     "inputs": [],
     "outputs": [
@@ -406,6 +368,25 @@ export const DHARMA_ABI = [
   {
     "type": "function",
     "name": "isMember",
+    "inputs": [
+      {
+        "name": "a",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "isPayee",
     "inputs": [
       {
         "name": "a",
@@ -1761,7 +1742,52 @@ export const DHARMA_ABI = [
   },
   {
     "type": "error",
+    "name": "AlreadyFrozen",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "AlreadyInitialized",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AlreadyVoted",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BadAgent",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BadCoreWait",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BadDomain",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BadImplementation",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BadLevel",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BadLevelLimits",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BadMember",
     "inputs": []
   },
   {
@@ -1771,7 +1797,17 @@ export const DHARMA_ABI = [
   },
   {
     "type": "error",
+    "name": "BadRule",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "BadSignature",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "CannotRemove",
     "inputs": []
   },
   {
@@ -1797,12 +1833,52 @@ export const DHARMA_ABI = [
   },
   {
     "type": "error",
+    "name": "LengthMismatch",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "LogCannotShrink",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "MembersMustPropose",
     "inputs": []
   },
   {
     "type": "error",
     "name": "NoPermission",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NoSuchAgent",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NoSuchDomain",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NoSuchPayee",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NoSuchProposal",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NoSuchRule",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotFrozen",
     "inputs": []
   },
   {
@@ -1827,7 +1903,27 @@ export const DHARMA_ABI = [
   },
   {
     "type": "error",
+    "name": "RuleExists",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "UseTighten",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "VotingClosed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "WaitTooLong",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ZeroAddress",
     "inputs": []
   }
 ] as const;
@@ -1917,6 +2013,19 @@ export const ESCROW_ABI = [
         "name": "",
         "type": "bytes32",
         "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MIN_HOLD",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ],
     "stateMutability": "view"

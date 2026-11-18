@@ -5,7 +5,7 @@
 // Out (Gatekeeper → app):
 //   decision            { id, action_type, summary, result: "allow" | "deny" }
 //   approval_requested  { id, action_type, payload, payload_hash, reversible, agent_reason, why, if_unanswered, expires_at }
-//   approval_resolved   { id, result: "approved" | "denied" | "failed" }
+//   approval_resolved   { id, result: "approved" | "denied" | "failed" | "expired" }
 //   agent_paused        { by, at }      agent_resumed {}
 //   error               { id?, error }  (a response we ignored, and why)
 // In (app → Gatekeeper):
@@ -44,8 +44,19 @@ function summary(p: Readonly<Proposal>): string {
 function payloadOf(p: Readonly<Proposal>): Record<string, unknown> {
   if (p.payload) return { ...p.payload };
   const a = p.action as { method?: string; url?: string; body?: string; command?: string; path?: string };
-  return Object.fromEntries(Object.entries({ tool: p.request.tool, method: a.method, url: a.url, body: a.body, command: a.command, path: a.path }).filter(([, v]) => v !== undefined));
+  return Object.fromEntries(
+    Object.entries({ tool: p.request.tool, method: a.method, url: a.url, body: a.body, command: a.command, path: a.path })
+      .filter(([, v]) => v !== undefined)
+      .map(([k, v]) => [k, shown(v)]),
+  );
 }
+
+/**
+ * The desktop app drops event lines over 256 KB, so a huge held body would never reach the island
+ * and its card would never appear. Show the start of it; the hash still covers the whole request.
+ */
+const SHOWN_MAX = 32 * 1024;
+const shown = (v: unknown) => (typeof v === "string" && v.length > SHOWN_MAX ? `${v.slice(0, SHOWN_MAX)}… (${v.length - SHOWN_MAX} more characters)` : v);
 
 export function pipeServer(gk: Gatekeeper): Server {
   const clients = new Set<Socket>();
@@ -88,7 +99,7 @@ export function pipeServer(gk: Gatekeeper): Server {
       } else if (!seen.has(p.id)) {
         seen.add(p.id);
         if (p.status !== "pending") {
-          send({ type: "decision", id: p.id, action_type: actionType(p), summary: summary(p), result: ["denied", "failed"].includes(p.status) ? "deny" : "allow", agent: p.agentId });
+          send({ type: "decision", id: p.id, action_type: actionType(p), summary: summary(p), result: ["denied", "failed", "expired"].includes(p.status) ? "deny" : "allow", agent: p.agentId });
         }
       }
     }
@@ -97,7 +108,7 @@ export function pipeServer(gk: Gatekeeper): Server {
       if (p && p.status === "pending") continue;
       pending.delete(id);
       const st = p?.status;
-      send({ type: "approval_resolved", id, result: st === "denied" ? "denied" : st === "failed" ? "failed" : "approved" });
+      send({ type: "approval_resolved", id, result: st === "denied" ? "denied" : st === "failed" ? "failed" : st === "expired" ? "expired" : "approved" });
     }
     if (seen.size > 5000) for (const id of [...seen].slice(0, 2500)) seen.delete(id);
   });
@@ -143,6 +154,9 @@ export function pipeServer(gk: Gatekeeper): Server {
         deadline: String(msg.deadline ?? "0"),
         signature: String(msg.signature ?? "") as `0x${string}`,
       });
+      // Counted, but it needs another member too: tell this client, or its card waits forever.
+      const after = gk.recentProposals().find((x) => x.id === id);
+      if (after?.status === "pending") send({ type: "approval_progress", id, approvals: after.approvals.length, needed: gk.approvalsNeeded(after) }, c);
     } catch (e) {
       send({ type: "error", id, error: e instanceof Error ? e.message : String(e) }, c);
     }

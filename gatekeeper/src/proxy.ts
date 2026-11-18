@@ -69,7 +69,14 @@ export class EgressProxy {
       const port = Number(portStr) || 443;
       // Terminate TLS here with a certificate from the org's sandbox CA (the only CA the box trusts).
       const terminateTls = (stream: Duplex) => {
-        const tls = new TLSSocket(stream, { isServer: true, secureContext: this.ca.contextFor(host), ALPNProtocols: ["http/1.1"] }) as TLSSocket & { karunaTarget?: Target };
+        // A host the CA can't issue for (e.g. "1.2.3", not a valid IP) closes this tunnel, never the Gatekeeper.
+        let secureContext;
+        try {
+          secureContext = this.ca.contextFor(host);
+        } catch {
+          return void socket.destroy();
+        }
+        const tls = new TLSSocket(stream, { isServer: true, secureContext, ALPNProtocols: ["http/1.1"] }) as TLSSocket & { karunaTarget?: Target };
         tls.karunaTarget = { protocol: "https:", host, port };
         tls.on("error", () => socket.destroy());
         inner.emit("connection", tls);
@@ -136,7 +143,10 @@ export class EgressProxy {
       if (v.verdict === "pending") {
         // The Approval hold setting, unless this proxy was given a fixed hold (test harnesses).
         const outcome = await this.gk.waitForDecision(v.proposalId, this.opts.holdMs ?? this.gk.holdMs);
-        if (outcome === "pending") return send(res, 403, { error: "Waiting for a person to approve this in Karuna", status: "pending", id: v.proposalId });
+        if (outcome === "pending") {
+          this.gk.expireHeldRequests();
+          return send(res, 403, { error: "No one approved this in time. Karuna refused it.", status: "expired", id: v.proposalId });
+        }
         if (outcome !== "allowed" || !this.gk.takeGrant(v.proposalId)) return send(res, 403, { error: "Blocked by Karuna", id: v.proposalId });
       }
       await this.forward(token, method, u, headers, body, res);

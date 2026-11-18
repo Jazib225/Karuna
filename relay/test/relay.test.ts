@@ -88,6 +88,8 @@ describe("relay", () => {
     expect(relay.mode()).toBe("quicknode");
     relay.ingest(decodeDharmaLogs([frozenLog("0x00000000000000000000000000000000000000aa")], new Set([ORG]), "rpc"));
     expect(relay.mode()).toBe("rpc"); // the Stream missed an event
+    relay.ingest(decodeDharmaLogs([frozenLog("0x00000000000000000000000000000000000000bb")], new Set([ORG]), "quicknode"));
+    expect(relay.mode()).toBe("quicknode"); // back once the Stream delivers again
     const noStream = new Relay({ dharma: () => ORG, client: {} as never });
     expect(noStream.mode()).toBe("rpc");
   });

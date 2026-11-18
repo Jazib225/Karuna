@@ -137,8 +137,11 @@ if (old && old.dharma === dharma && !forceBackfill) {
       await qn(`/streams/${old.id}`, { method: "DELETE" });
       console.log(`Deleted the old stream ${old.id}.`);
     } catch (e) {
-      console.log(`Couldn't delete the old stream ${old.id} (${(e as Error).message}); delete it in the QuickNode dashboard, then run this again.`);
-      process.exit(1);
+      if ((e as { status?: number }).status === 404) console.log(`The old stream ${old.id} is already gone.`);
+      else {
+        console.log(`Couldn't delete the old stream ${old.id} (${(e as Error).message}); delete it in the QuickNode dashboard, then run this again.`);
+        process.exit(1);
+      }
     }
   }
   const res = await create(deployBlock);

@@ -270,7 +270,7 @@ export function recommendFix(
 
 /** True when a fix change only tightens: a block or approval rule, or dropping a rule that allows. */
 export function fixTightens(c: Change, rules: { id: string; outcome: string; active: boolean }[]): boolean {
-  if (c.op === "AddRule") return c.outcome === "Deny" || c.outcome === "Approval";
+  if (c.op === "AddRule") return c.outcome === "Deny" || (c.outcome === "Approval" && !!c.agent); // one agent's approval rule (Dharma v5)
   if (c.op === "RemoveRule") return rules.some((r) => r.id === c.id && r.active && r.outcome === "allow");
   return false;
 }

@@ -40,7 +40,8 @@ for (const f of files(root)) {
     for (const [what, re] of PATTERNS) if (re.test(line)) hits.push(`${relative(root, f)}:${i + 1}  ${what}`);
   });
 }
-const envHits = Object.keys(process.env).filter((k) => ENV_DANGER.test(k));
+// npm_package_* is package.json metadata the package manager sets (e.g. npm_package_private=true), never a key.
+const envHits = Object.keys(process.env).filter((k) => ENV_DANGER.test(k) && !/^npm_package_/i.test(k));
 
 console.log(`Scanned ${scanned} agent files and ${Object.keys(process.env).length} environment variables.`);
 if (hits.length) console.log(`Code findings:\n  ${hits.join("\n  ")}`);
