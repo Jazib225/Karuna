@@ -5,7 +5,7 @@
 // Out (Gatekeeper → app):
 //   decision            { id, action_type, summary, result: "allow" | "deny" }
 //   approval_requested  { id, action_type, payload, payload_hash, reversible, agent_reason, why, if_unanswered, expires_at }
-//   approval_resolved   { id, result: "approved" | "denied" | "failed" }
+//   approval_resolved   { id, result: "approved" | "denied" | "failed" | "expired" }
 //   agent_paused        { by, at }      agent_resumed {}
 //   error               { id?, error }  (a response we ignored, and why)
 // In (app → Gatekeeper):
@@ -88,7 +88,7 @@ export function pipeServer(gk: Gatekeeper): Server {
       } else if (!seen.has(p.id)) {
         seen.add(p.id);
         if (p.status !== "pending") {
-          send({ type: "decision", id: p.id, action_type: actionType(p), summary: summary(p), result: ["denied", "failed"].includes(p.status) ? "deny" : "allow", agent: p.agentId });
+          send({ type: "decision", id: p.id, action_type: actionType(p), summary: summary(p), result: ["denied", "failed", "expired"].includes(p.status) ? "deny" : "allow", agent: p.agentId });
         }
       }
     }
@@ -97,7 +97,7 @@ export function pipeServer(gk: Gatekeeper): Server {
       if (p && p.status === "pending") continue;
       pending.delete(id);
       const st = p?.status;
-      send({ type: "approval_resolved", id, result: st === "denied" ? "denied" : st === "failed" ? "failed" : "approved" });
+      send({ type: "approval_resolved", id, result: st === "denied" ? "denied" : st === "failed" ? "failed" : st === "expired" ? "expired" : "approved" });
     }
     if (seen.size > 5000) for (const id of [...seen].slice(0, 2500)) seen.delete(id);
   });

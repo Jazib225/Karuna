@@ -5,7 +5,7 @@ import { consoleSessionTypedData, type Permission, type RoleDef, type SettingVal
 import type { Address } from "viem";
 
 export type Outcome = "allow" | "deny" | "approval";
-export type Status = "pending" | "executing" | "executed" | "allowed" | "denied" | "failed";
+export type Status = "pending" | "executing" | "executed" | "allowed" | "denied" | "failed" | "expired";
 
 export interface Fact { label: string; value: string; tone?: "warn" | "ok" }
 
@@ -108,7 +108,7 @@ export interface AgentView {
   record?: AgentRecord | null;
   eligibility?: { eligible: boolean; target: number | null; needed: number; have: number } | null;
   /** An agent Karuna builds and runs (instructions and schedule live in the Gatekeeper). */
-  built?: { instructions: string; schedule: Schedule; scheduleText: string; paused: boolean; lastRunAt: string | null } | null;
+  built?: { instructions: string; schedule: Schedule; scheduleText: string; paused: boolean; lastRunAt: string | null; provider?: "anthropic" | "groq" } | null;
 }
 
 export interface Schedule { kind: "manual" | "every" | "daily" | "inbox"; minutes?: number; at?: string }
@@ -238,6 +238,8 @@ export interface Snapshot {
     can: Record<string, Permission[]>; viewers: { address: string; name: string | null }[];
   };
   inbox: (InboxMessage & { test: { id: string; status: ShieldTest["status"]; template: string } | null })[];
+  /** Today's allowed and denied decisions, including allowed requests that never get a card. */
+  today?: { allowed: number; denied: number };
   proposals: Proposal[];
   log: { length: number; head: string; verified: boolean; brokenAt: number | null; publicKeyPem: string };
   sandbox: SandboxView;

@@ -136,7 +136,10 @@ export class EgressProxy {
       if (v.verdict === "pending") {
         // The Approval hold setting, unless this proxy was given a fixed hold (test harnesses).
         const outcome = await this.gk.waitForDecision(v.proposalId, this.opts.holdMs ?? this.gk.holdMs);
-        if (outcome === "pending") return send(res, 403, { error: "Waiting for a person to approve this in Karuna", status: "pending", id: v.proposalId });
+        if (outcome === "pending") {
+          this.gk.expireHeldRequests();
+          return send(res, 403, { error: "No one approved this in time. Karuna refused it.", status: "expired", id: v.proposalId });
+        }
         if (outcome !== "allowed" || !this.gk.takeGrant(v.proposalId)) return send(res, 403, { error: "Blocked by Karuna", id: v.proposalId });
       }
       await this.forward(token, method, u, headers, body, res);

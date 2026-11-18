@@ -357,7 +357,10 @@ export function consoleApi(
       if (method === "POST" && path === "/keys") {
         if (!secrets) return send(res, 501, { error: "No key store" });
         try {
-          const k = secrets.put(String(body.name ?? "").trim().toLowerCase(), String(body.envVar ?? "").trim(), String(body.value ?? ""), new Date(), body.purpose === "drafter" ? { purpose: "drafter", provider: String(body.provider ?? "") } : {});
+          // copyFrom: reuse the Groq or Gemini key saved for drafting (the console never sees its value).
+          const from = body.copyFrom === "groq" || body.copyFrom === "gemini" ? secrets.drafterKey(body.copyFrom) : null;
+          if (body.copyFrom !== undefined && !from) return send(res, 400, { error: "No drafting key to reuse. Paste the key instead." });
+          const k = secrets.put(String(body.name ?? "").trim().toLowerCase(), String(body.envVar ?? "").trim(), from ?? String(body.value ?? ""), new Date(), body.purpose === "drafter" ? { purpose: "drafter", provider: String(body.provider ?? "") } : {});
           gk.noteKeyStored(k.name, k.envVar);
           return send(res, 200, k);
         } catch (e) {

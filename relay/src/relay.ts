@@ -30,7 +30,6 @@ export interface RelayOptions {
   /** Agents' records, rebuilt from Dharma's events (trust levels). */
   records?: RecordBook;
   notifyRecords?: (records: Record<string, AgentRecord>, source: string) => Promise<void>;
-  quietMs?: number; // show "rpc" for this long after the safety net caught a missed event
   lagBlocks?: number; // with a Stream, the safety net trails the chain by this many blocks
   pollMs?: number;
 }
@@ -57,30 +56,33 @@ export class Relay extends EventEmitter {
     super();
   }
 
-  private lastRpcCatchAt = 0;
+  /** The RPC safety net caught an event the Stream never delivered, and the Stream hasn't delivered since. */
+  private streamMissed = false;
 
   /**
-   * Where events come from. With a Stream configured it's QuickNode — unless the RPC safety net
-   * recently caught an event QuickNode never delivered, which means the Stream is unhealthy.
+   * Where events come from. With a Stream configured it's QuickNode, unless the RPC safety net
+   * caught an event QuickNode never delivered: then it's Arc RPC until the Stream delivers again.
    * (Dharma events are rare, so "no delivery lately" alone says nothing about health.)
    */
   mode(): "quicknode" | "rpc" | "none" {
-    if (this.opts.securityToken && Date.now() - this.lastRpcCatchAt > (this.opts.quietMs ?? 120_000)) return "quicknode";
+    if (this.opts.securityToken && !this.streamMissed) return "quicknode";
     return this.opts.client ? "rpc" : "none";
   }
 
   /** De-duplicate (QuickNode and RPC may both see an event), keep, broadcast, nudge the Gatekeeper. */
   ingest(events: DharmaEvent[]) {
+    if (events.some((e) => e.source === "quicknode")) this.streamMissed = false; // the Stream delivers, even a repeat
     const fresh = events.filter((e) => !this.seen.has(e.id));
     for (const e of fresh) {
       this.seen.add(e.id);
       this.seenOrder.push(e.id);
       if (this.seenOrder.length > 5000) this.seen.delete(this.seenOrder.shift()!);
       this.recent.unshift(e);
-      if (e.source === "quicknode") this.stats.quickNodeEvents++;
-      else {
+      if (e.source === "quicknode") {
+        this.stats.quickNodeEvents++;
+      } else {
         this.stats.rpcEvents++;
-        if (this.opts.securityToken) this.lastRpcCatchAt = Date.now(); // QuickNode missed this one
+        if (this.opts.securityToken) this.streamMissed = true; // QuickNode missed this one
       }
     }
     this.recent.splice(100);
@@ -159,6 +161,7 @@ export class Relay extends EventEmitter {
 
     this.stats.deliveries++;
     this.stats.lastQuickNodeAt = Date.now();
+    this.streamMissed = false; // the Stream is reaching us again
     let parsed: unknown;
     try {
       parsed = JSON.parse(payload);

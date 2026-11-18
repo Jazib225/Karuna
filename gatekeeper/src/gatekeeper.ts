@@ -61,7 +61,7 @@ export type AgentAction =
       body?: string;
     };
 
-export type ProposalStatus = "pending" | "executing" | "executed" | "allowed" | "denied" | "failed";
+export type ProposalStatus = "pending" | "executing" | "executed" | "allowed" | "denied" | "failed" | "expired";
 
 export interface Fact {
   label: string;
@@ -149,6 +149,8 @@ interface State {
   paused?: { at: string; by: string } | null; // local pause: instant on/off, never onchain (unlike Freeze)
   /** Running totals per agent, published onchain with each log anchor (ActionsRecorded). */
   record?: Record<string, { completed: number; denied: number }>;
+  /** Today's allowed and denied decisions (local date), including allowed requests that never get a card. */
+  today?: { date: string; allowed: number; denied: number };
   /** Agents' records as the relay rebuilt them from the QuickNode Stream (Dharma's own events). */
   chainRecords?: { at: string; source: string; records: Record<string, AgentRecord> } | null;
   /** The wallet watchdog: every USDC transfer that left the org's wallet, and what it matched. */
@@ -339,6 +341,8 @@ export interface BuiltAgent {
   lastRunAt?: string;
   inboxWaiting?: boolean;
   model?: string;
+  /** The model it runs on: Claude (default) or Groq's free tier. */
+  provider?: "anthropic" | "groq";
 }
 
 const MAX_RUNS = 200;
@@ -498,8 +502,21 @@ export class Gatekeeper extends EventEmitter {
     if (request.agent && decision.ruleId !== "human-approved") {
       if (decision.outcome === "allow") this.countRecord(request.agent, "completed");
       else if (decision.outcome === "deny") this.countRecord(request.agent, "denied");
+      if (decision.outcome === "allow" || decision.outcome === "deny") this.countToday(decision.outcome === "allow" ? "allowed" : "denied");
     }
     return e;
+  }
+
+  private countToday(what: "allowed" | "denied") {
+    const date = this.now().toDateString();
+    if (this.state.today?.date !== date) this.state.today = { date, allowed: 0, denied: 0 };
+    this.state.today[what]++;
+  }
+
+  /** Today's allowed / denied decision counts, for the console's Actions today tile. */
+  todayCounts() {
+    const t = this.state.today;
+    return t && t.date === this.now().toDateString() ? { allowed: t.allowed, denied: t.denied } : { allowed: 0, denied: 0 };
   }
 
   private countRecord(agentId: string, what: "completed" | "denied") {
@@ -612,6 +629,7 @@ export class Gatekeeper extends EventEmitter {
 
   /** Refresh policy, execute proposals whose timelock passed, anchor the log when due. */
   async housekeeping() {
+    this.expireHeldRequests(); // first: it needs no chain, so a slow RPC never leaves a card past its time
     await this.sync();
     await this.executeReady();
     await this.anchorIfDue();
@@ -1880,11 +1898,30 @@ export class Gatekeeper extends EventEmitter {
     return { verdict: "pending", proposalId: base.id };
   }
 
+  /** A held request out of a sandbox that no member answered within the Approval hold. */
+  private isSandboxHold(p: Readonly<Proposal>) {
+    return p.request.tool === "http" && !p.payload && p.facts.some((f) => f.label === "From" && f.value.startsWith("sandbox run"));
+  }
+
+  /** Mark held sandbox requests nobody answered in time as expired: the agent was already refused. */
+  expireHeldRequests() {
+    const cutoff = this.now().getTime() - this.holdMs;
+    let changed = false;
+    for (const p of this.state.proposals) {
+      if (p.status !== "pending" || !this.isSandboxHold(p) || Date.parse(p.createdAt) > cutoff) continue;
+      p.status = "expired";
+      p.resolvedAt = this.now().toISOString();
+      this.countRecord(p.agentId, "denied");
+      this.logEvent({ type: "approval-expired", proposalId: p.id, agent: p.agentId });
+      changed = true;
+    }
+    if (changed) this.save();
+  }
+
   /** What happens to a held action if no member answers: shown on its card and in the island. */
   ifUnanswered(p: Readonly<Proposal>): string | null {
     if (p.status !== "pending") return null;
-    const sandbox = p.request.tool === "http" && !p.payload && p.facts.some((f) => f.label === "From" && f.value.startsWith("sandbox run"));
-    if (sandbox) return `Refused after ${waitText(this.holdMs / 1000)}. An approval after that lets the agent's next try through.`;
+    if (this.isSandboxHold(p)) return `Refused if no one answers within ${waitText(this.holdMs / 1000)}.`;
     if (p.payload) {
       const held = p.payload.kind === "transfer" ? this.escrowFor(p.agentId, p.payload.amountUsd) : null;
       return held ? `Nothing is paid. Once approved, it's held in escrow for ${waitText(held.waitSeconds)} and any member can cancel.` : "Nothing is paid until a member approves.";
@@ -2009,7 +2046,7 @@ export class Gatekeeper extends EventEmitter {
   agentView(agentId: string, proposalId: string): AgentResponse | null {
     const p = this.state.proposals.find((x) => x.id === proposalId && x.agentId === agentId);
     if (!p) return null;
-    const status: AgentResponse["status"] = p.status === "executed" ? "done" : p.status === "executing" ? "pending" : p.status;
+    const status: AgentResponse["status"] = p.status === "executed" ? "done" : p.status === "executing" ? "pending" : p.status === "expired" ? "denied" : p.status;
     return status === "done" ? { id: p.id, status, result: p.result } : { id: p.id, status };
   }
 
@@ -2861,11 +2898,11 @@ export class Gatekeeper extends EventEmitter {
   }
 
   /** Create a built agent locally (its existence, payees and rules go to Dharma from the console). */
-  buildAgent(input: { name?: unknown; instructions?: unknown; schedule?: unknown }) {
+  buildAgent(input: { name?: unknown; instructions?: unknown; schedule?: unknown; provider?: unknown }) {
     const instructions = requireText(input.instructions, "Instructions", 6000);
     const schedule = parseSchedule(input.schedule);
     const { id } = this.prepareAgent(input.name); // its token is never kept: each run gets a fresh one
-    (this.state.builtAgents ??= {})[id] = { instructions, schedule, paused: false, createdAt: this.now().toISOString() };
+    (this.state.builtAgents ??= {})[id] = { instructions, schedule, paused: false, createdAt: this.now().toISOString(), ...(input.provider === "groq" ? { provider: "groq" as const } : {}) };
     this.logEvent({ type: "agent-built", agent: id, schedule: scheduleText(schedule) });
     this.save();
     return { id };
@@ -2889,7 +2926,7 @@ export class Gatekeeper extends EventEmitter {
     const b = this.state.builtAgents?.[s.agentId];
     if (!b) throw new GatekeeperError("Not an agent Karuna runs", 404);
     const run = this.runOf(token);
-    return { agentId: s.agentId, name: this.org.labels.agents[s.agentId] ?? s.agentId, instructions: b.instructions, trigger: run?.trigger ?? "Run now", runId: run?.id ?? null, model: b.model ?? null };
+    return { agentId: s.agentId, name: this.org.labels.agents[s.agentId] ?? s.agentId, instructions: b.instructions, trigger: run?.trigger ?? "Run now", runId: run?.id ?? null, model: b.model ?? null, provider: b.provider ?? "anthropic" };
   }
 
   /** Start a built agent now (Run now, its schedule, or a message in its inbox). */
@@ -3351,7 +3388,7 @@ export class Gatekeeper extends EventEmitter {
               level, record, localRecord: this.state.record?.[a.id] ?? { completed: 0, denied: 0 },
               built: (() => {
                 const b = this.state.builtAgents?.[a.id];
-                return b ? { instructions: b.instructions, schedule: b.schedule, scheduleText: scheduleText(b.schedule), paused: b.paused, lastRunAt: b.lastRunAt ?? null } : null;
+                return b ? { instructions: b.instructions, schedule: b.schedule, scheduleText: scheduleText(b.schedule), paused: b.paused, lastRunAt: b.lastRunAt ?? null, provider: b.provider ?? "anthropic" } : null;
               })(),
               eligibility: level === null ? null : levelUpEligibility(record, level),
             };
@@ -3420,6 +3457,7 @@ export class Gatekeeper extends EventEmitter {
         const t = this.state.tests.find((x) => x.messageId === m.id);
         return { ...m, test: t ? { id: t.id, status: t.status, template: t.template } : null };
       }),
+      today: this.todayCounts(),
       proposals: this.state.proposals.slice(-300).reverse().map((p) => ({ ...p, approvalsNeeded: this.approvalsNeeded(p), ifUnanswered: this.ifUnanswered(p) })),
       sandbox: this.sandboxView(),
       connectors: this.connectorDefs().map((c) => ({

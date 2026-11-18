@@ -1273,12 +1273,18 @@ function Overview({ ctx, wallet, go }: { ctx: Ctx; wallet: WalletInfo | null; go
   const today = new Date().toDateString();
   const todays = s.proposals.filter((p) => new Date(p.createdAt).toDateString() === today);
   const count = (f: (p: Proposal) => boolean) => todays.filter(f).length;
-  const allowedToday = count((p) => p.status === "allowed" || p.status === "executed" || p.status === "executing");
-  const blockedToday = count((p) => p.status === "denied" || p.status === "failed");
+  // Every allowed or denied decision today (most allowed requests never get a card), plus held
+  // requests a member answered or that ran out of time.
+  const answered = (f: (p: Proposal) => boolean) => count((p) => p.decision.outcome === "approval" && f(p));
+  const allowedToday = s.today ? s.today.allowed + answered((p) => p.status === "allowed" || p.status === "executed" || p.status === "executing")
+    : count((p) => p.status === "allowed" || p.status === "executed" || p.status === "executing");
+  const blockedToday = s.today ? s.today.denied + answered((p) => p.status === "denied" || p.status === "failed" || p.status === "expired")
+    : count((p) => p.status === "denied" || p.status === "failed" || p.status === "expired");
   const heldToday = count((p) => p.status === "pending");
+  const actionsToday = allowedToday + blockedToday + heldToday;
   // What Karuna stopped before it ran, over the last 7 days, and the money waiting in escrow now.
   const week = s.proposals.filter((p) => Date.now() - Date.parse(p.createdAt) < 7 * 86_400_000);
-  const stoppedWeek = week.filter((p) => p.status === "denied").length;
+  const stoppedWeek = week.filter((p) => p.status === "denied" || p.status === "expired").length;
   const inEscrow = s.proposals.filter((p) => p.escrow?.status === "held" || p.escrow?.status === "opening").reduce((n, p) => n + (p.payload?.amountUsd ?? 0), 0);
   const [startHidden, setStartHidden] = useState(() => isDismissed("get-started"));
   const steps = [
@@ -1292,7 +1298,7 @@ function Overview({ ctx, wallet, go }: { ctx: Ctx; wallet: WalletInfo | null; go
         <div className={`tile rise ${pending.length ? "attention" : ""}`} style={st(0)}><div className="k">Waiting for you <Icon name="approvals" size={14} /></div><div className="v heading-gradient">{pending.length}</div><div className="note">{pending.length ? "to approve" : "all clear"}</div></div>
         <div className="tile rise" style={st(1)}><div className="k">Wallet (USDC) <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{wallet ? usd(Number(wallet.usdc)) : "…"}</div><GatewayFunds ctx={ctx} wallet={wallet} /></div>
         <div className="tile rise" style={st(2)}><div className="k" title="Actions Karuna blocked before they ran, in the last 7 days">Stopped this week <Icon name="shield" size={14} /></div><div className="v heading-gradient">{stoppedWeek}</div><div className="note one-line">of {week.length} actions{inEscrow > 0 ? ` · $${Math.round(inEscrow).toLocaleString()} in escrow` : ""}</div></div>
-        <div className="tile rise" style={st(3)}><div className="k">Actions today <Icon name="activity" size={14} /></div><div className="v heading-gradient">{todays.length}</div><div className="note one-line">{allowedToday} allowed · {blockedToday} blocked · {heldToday} held</div></div>
+        <div className="tile rise" style={st(3)}><div className="k">Actions today <Icon name="activity" size={14} /></div><div className="v heading-gradient">{actionsToday}</div><div className="note one-line">{allowedToday} allowed · {blockedToday} blocked · {heldToday} held</div></div>
         <div className="tile rise" style={st(4)}><div className="k">Spent today <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{usd(spent)}</div><div className="note">of {usd(pol.agents.filter((a) => a.active).reduce((n, a) => n + a.capUsd, 0))} allowed</div></div>
       </div>
 
@@ -1377,7 +1383,7 @@ function Rows({ ctx, items }: { ctx: Ctx; items: Proposal[] }) {
         const o = p.decision.outcome;
         const held = p.escrow && (p.escrow.status === "held" || p.escrow.status === "opening");
         const label = p.escrow?.status === "cancelled" ? "cancelled" : held ? "in escrow" : p.status === "executed" ? "paid" : p.status === "failed" ? "failed" : o === "approval" ? (p.status === "pending" ? "require approval" : p.status) : o;
-        const cls = p.escrow?.status === "cancelled" || p.status === "failed" || p.status === "denied" ? "deny" : held ? "approval" : p.status === "executed" ? "allow" : o;
+        const cls = p.escrow?.status === "cancelled" || p.status === "failed" || p.status === "denied" || p.status === "expired" ? "deny" : held ? "approval" : p.status === "executed" ? "allow" : o;
         return (
           <div className={`item ${Date.now() - Date.parse(p.createdAt) < 4000 ? "fresh" : ""}`} key={p.id}>
             <span className="caret">›</span>
@@ -3154,9 +3160,12 @@ function ScheduleFields({ value, onChange }: { value: Schedule; onChange: (s: Sc
   );
 }
 
-/** The key built agents run on (agents/hosted/run.ts reads its placeholder). */
+/** The keys built agents run on (agents/hosted/run.ts reads their placeholders). */
 const CLAUDE_KEY = "anthropic";
 const CLAUDE_HOST = "api.anthropic.com";
+const GROQ_KEY = "groq";
+const GROQ_HOST = "api.groq.com";
+type AgentModel = "groq" | "anthropic";
 
 /** Describe a job; Karuna drafts the agent; members review and propose it; Karuna runs it. */
 function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
@@ -3167,7 +3176,12 @@ function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
   const [d, setD] = useState<AgentDraftView | null>(null);
   const [keep, setKeep] = useState<Record<number, boolean>>({});
   const [claude, setClaude] = useState("");
+  const [model, setModel] = useState<AgentModel>("groq");
   const claudeKey = s.sandbox.keys.find((k) => k.name === CLAUDE_KEY);
+  const groqKey = s.sandbox.keys.find((k) => k.name === GROQ_KEY && !k.purpose);
+  // The free Groq key saved for drafting can run the agent too: Karuna copies it, nobody re-pastes it.
+  const groqDrafter = s.sandbox.keys.some((k) => k.purpose === "drafter" && k.provider === "groq");
+  const [keyName, keyHost, haveKey] = model === "groq" ? [GROQ_KEY, GROQ_HOST, !!groqKey || groqDrafter] : [CLAUDE_KEY, CLAUDE_HOST, !!claudeKey];
   const open = (scope: string) => s.policy!.proposals.some((g) => (g.status === "open" || g.status === "queued") && g.change?.op === "AddRule" && g.change.scope === scope);
   const draft = async () => {
     setDrafting(true);
@@ -3186,16 +3200,18 @@ function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
     run(async () => {
       if (!d) return;
       const dharma = s.org.dharma!.address as Address;
-      if (!claudeKey) await api("/keys", { name: CLAUDE_KEY, envVar: "ANTHROPIC_API_KEY", value: claude.trim() });
-      const { id } = await api<{ id: string }>("/agents/build", { name: d.name, instructions: d.instructions, schedule: d.schedule });
+      if (model === "anthropic" && !claudeKey) await api("/keys", { name: CLAUDE_KEY, envVar: "ANTHROPIC_API_KEY", value: claude.trim() });
+      if (model === "groq" && !groqKey) await api("/keys", { name: GROQ_KEY, envVar: "GROQ_API_KEY", ...(groqDrafter ? { copyFrom: "groq" } : { value: claude.trim() }) });
+      const bound = model === "groq" ? groqKey : claudeKey;
+      const { id } = await api<{ id: string }>("/agents/build", { name: d.name, instructions: d.instructions, schedule: d.schedule, provider: model });
       await submitChange(me, dharma, { kind: Kind.Propose, change: { op: "SetAgent", id, capUsd: 0 }, label: d.name });
       // Its limits apply to it alone.
       for (const [i, r] of d.rules.entries()) if (keep[i]) await submitChange(me, dharma, { kind: Kind.Propose, change: { ...r.change, agent: id } });
-      // The Claude key it runs on: the key may only go to Anthropic, and this agent may call it.
-      if (!claudeKey?.boundTo.includes(CLAUDE_HOST) && !open(`key:${CLAUDE_KEY}`)) {
-        await submitChange(me, dharma, { kind: Kind.Propose, change: { op: "AddRule", id: ruleId(`k-${CLAUDE_KEY}`), outcome: "Allow", scope: `key:${CLAUDE_KEY}`, target: CLAUDE_HOST } });
+      // The model key it runs on: the key may only go to the model's host, and this agent may call it.
+      if (!bound?.boundTo.includes(keyHost) && !open(`key:${keyName}`)) {
+        await submitChange(me, dharma, { kind: Kind.Propose, change: { op: "AddRule", id: ruleId(`k-${keyName}`), outcome: "Allow", scope: `key:${keyName}`, target: keyHost } });
       }
-      await submitChange(me, dharma, { kind: Kind.Propose, change: { op: "AddRule", id: ruleId(`m-${id}`), outcome: "Allow", agent: id, scope: "http:POST", target: CLAUDE_HOST } });
+      await submitChange(me, dharma, { kind: Kind.Propose, change: { op: "AddRule", id: ruleId(`m-${id}`), outcome: "Allow", agent: id, scope: "http:POST", target: keyHost } });
       setD(null);
       setJob("");
       setClaude("");
@@ -3226,16 +3242,23 @@ function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
               </div>
             )}
             {(d.note || d.rulesNote) && <p className="muted small">{[d.note, d.rulesNote].filter(Boolean).join(" ")}</p>}
-            {!claudeKey && (
-              <label className="field"><span>Claude key (voted with it)</span>
-                <input type="password" autoComplete="off" className="mono" value={claude} onChange={(e) => setClaude(e.target.value)} placeholder="sk-ant-… from console.anthropic.com" />
-                <small className="muted">The agent only sees a placeholder. Karuna swaps in the key on requests to {CLAUDE_HOST} and nowhere else.</small>
+            <label className="field"><span>Runs on</span>
+              <select value={model} onChange={(e) => { setModel(e.target.value as AgentModel); setClaude(""); }}>
+                <option value="groq">Groq · gpt-oss-20b (free tier)</option>
+                <option value="anthropic">Claude (paid)</option>
+              </select>
+              {model === "groq" && haveKey && <small className="muted">Uses your saved Groq key. Its reasoning shows in each run.</small>}
+            </label>
+            {!haveKey && (
+              <label className="field"><span>{model === "groq" ? "Groq key (voted with it)" : "Claude key (voted with it)"}</span>
+                <input type="password" autoComplete="off" className="mono" value={claude} onChange={(e) => setClaude(e.target.value)} placeholder={model === "groq" ? "gsk_… free from console.groq.com" : "sk-ant-… from console.anthropic.com"} />
+                <small className="muted">The agent only sees a placeholder. Karuna swaps in the key on requests to {keyHost} and nowhere else.</small>
               </label>
             )}
             <p className="muted small">It starts at Level 0: small payments only, everything else waits for a member until it earns more.</p>
             <div className="row-form">
               <button className="btn btn-ghost" onClick={() => setD(null)}>Back</button>
-              <button className="btn btn-dark" disabled={busy || !d.name.trim() || !d.instructions.trim() || (!claudeKey && !claude.trim())} onClick={propose}><Icon name="pen" size={14} /> Propose agent</button>
+              <button className="btn btn-dark" disabled={busy || !d.name.trim() || !d.instructions.trim() || (!haveKey && !claude.trim())} onClick={propose}><Icon name="pen" size={14} /> Propose agent</button>
             </div>
           </>
         )}
@@ -3361,11 +3384,11 @@ function RunTimeline({ ctx, id }: { ctx: Ctx; id: string }) {
             )}
             {st.kind === "raw-model" && <div className="step-body"><div className="step-title">Model call · {st.provider}</div><p className="muted small">Not decoded ({st.status}).</p></div>}
             {st.kind === "action" && (() => {
-              const now = st.now === "allowed" || st.now === "executed" ? "approved" : st.now === "denied" ? "denied" : st.outcome;
+              const now = st.now === "allowed" || st.now === "executed" ? "approved" : st.now === "denied" || st.now === "expired" ? st.now : st.outcome;
               return (
                 <div className="step-body">
                   <div className="step-title">
-                    <Badge v={now === "denied" ? "deny" : now === "waiting" ? "approval" : "allow"}>{now === "waiting" ? "waiting" : now === "approved" ? "approved" : now}</Badge>
+                    <Badge v={now === "denied" || now === "expired" ? "deny" : now === "waiting" ? "approval" : "allow"}>{now === "waiting" ? "waiting" : now === "approved" ? "approved" : now}</Badge>
                     <span className="mono small">{st.summary}</span>
                   </div>
                   {st.reason && now !== "allowed" && <p className="muted small">{st.reason}</p>}

@@ -82,6 +82,8 @@ darkMedia.addEventListener("change", applyAppearance);
 let connected = false;
 let paused = false;
 let hovering = false;
+/** The approval the user already looked at and hovered away from: it stays in the pill, not open. */
+let dismissed: string | null = null;
 let visible = false;
 let dragging = false;
 let transient: { state: State; until: number } | null = null;
@@ -444,18 +446,29 @@ function render() {
     floater.style.top = `${mode.y}px`;
   }
 
-  // Open: hovering, or an approval waiting (never auto-retracts while pending), or dragging.
-  const open = hovering || st === "pending" || dragging;
+  // Open: hovering, dragging, or a new approval waiting. Once the user hovers away from that
+  // approval it retracts to the pill (which still says it's waiting); hovering opens it again.
+  const fresh = st === "pending" && queue[0].id !== dismissed;
+  const open = hovering || fresh || dragging;
   notch.classList.toggle("open", open && !floating);
   const showCard = open && !dragging && (st === "pending" || hovering);
-  card.hidden = !showCard;
+  clearTimeout(hideTimer);
   if (showCard) {
+    card.hidden = false;
     cardBody.replaceChildren(st === "pending" ? approvalCard(queue[0]) : feedView());
     placeCard();
-    requestAnimationFrame(() => card.classList.add("show"));
+    requestAnimationFrame(() => {
+      card.classList.add("show");
+      reportRects();
+    });
     tickExpiry();
-  } else {
+  } else if (!card.hidden) {
+    // Fade and lift out with the pill, then take it out of the layout.
     card.classList.remove("show");
+    hideTimer = window.setTimeout(() => {
+      card.hidden = true;
+      reportRects();
+    }, CARD_OUT_MS);
   }
   reportRects();
 }
@@ -481,6 +494,27 @@ function placeCard() {
   card.style.left = `${Math.round(x)}px`;
   card.style.top = `${Math.round(y)}px`;
 }
+
+let hideTimer = 0;
+const CARD_OUT_MS = 340; // the card's fade-out (island.css .card transition)
+
+/** Drop approvals whose hold ran out: the Gatekeeper already refused them. */
+function dropExpired() {
+  const now = Date.now();
+  const before = queue.length;
+  for (let i = queue.length - 1; i >= 0; i--) {
+    const at = queue[i].expires_at ? Date.parse(queue[i].expires_at!) : NaN;
+    if (!Number.isNaN(at) && at + 1500 < now) {
+      cardStatus.delete(queue[i].id);
+      queue.splice(i, 1);
+    }
+  }
+  if (queue.length !== before) {
+    flash("denied", 1600);
+    render();
+  }
+}
+setInterval(dropExpired, 1000);
 
 let expiryTimer = 0;
 function tickExpiry() {
@@ -522,7 +556,7 @@ function reportRects() {
   } else {
     add(floater.getBoundingClientRect(), 4);
   }
-  if (!card.hidden) add(card.getBoundingClientRect(), 6);
+  if (!card.hidden && card.classList.contains("show")) add(card.getBoundingClientRect(), 6);
   const key = JSON.stringify(rects.map((r) => [r.x, r.y, r.w, r.h].map(Math.round)));
   if (key === lastRects) return;
   lastRects = key;
@@ -545,6 +579,7 @@ function setHover(inside: boolean) {
   }
   retractTimer = window.setTimeout(() => {
     hovering = false;
+    if (queue.length) dismissed = queue[0].id;
     render();
   }, RETRACT_MS);
 }
