@@ -216,7 +216,7 @@ describe("the plugin's hook script, run the way Claude Code runs it", () => {
 describe("each tool call is decided before it runs", () => {
   it("Level 0: reads run, a shell command waits for a member and runs once approved, secrets are blocked", async () => {
     const { agentId } = await connectComputer(0);
-    expect(gk.hookCall(agentId, call("Read", { file_path: `${CWD}/src/app.ts` }))).toEqual({ decision: "allow" });
+    expect(gk.hookCall(agentId, call("Read", { file_path: `${CWD}/src/app.ts` }))).toMatchObject({ decision: "allow" });
     expect(gk.hookCall(agentId, call("Read", { file_path: `${CWD}/.env` }))).toMatchObject({ decision: "deny" });
     const held = gk.hookCall(agentId, call("Bash", { command: "npm test" }));
     expect(held.decision).toBe("pending");
@@ -227,10 +227,21 @@ describe("each tool call is decided before it runs", () => {
     expect(gk.snapshot().proposals.find((p) => p.id === held.proposalId)!.facts.map((f) => f.label)).toEqual(["From", "Tool", "Action"]);
   }, 60_000);
 
+  it("Level 0: saving a file waits for a member, and the card shows what it would write", async () => {
+    const { agentId } = await connectComputer(0);
+    const save = gk.hookCall(agentId, call("Write", { file_path: "issues.md", content: "# Issues\n1. Fix the build" }));
+    expect(save).toMatchObject({ decision: "pending", summary: "write issues.md" });
+    const card = gk.snapshot().proposals.find((p) => p.id === save.proposalId)!;
+    expect(card.facts.find((f) => f.label === "Content")?.value).toBe("# Issues\n1. Fix the build");
+    const waiting = gk.waitForDecision(save.proposalId!, 5_000);
+    await approve(save.proposalId!);
+    expect(await waiting).toBe("allowed");
+  }, 60_000);
+
   it("Level 1: project edits and commands run; git push still asks", async () => {
     const { agentId } = await connectComputer(1);
-    expect(gk.hookCall(agentId, call("Edit", { file_path: `${CWD}/src/app.ts` }))).toEqual({ decision: "allow" });
-    expect(gk.hookCall(agentId, call("Bash", { command: "npm test" }))).toEqual({ decision: "allow" });
+    expect(gk.hookCall(agentId, call("Edit", { file_path: `${CWD}/src/app.ts` }))).toMatchObject({ decision: "allow" });
+    expect(gk.hookCall(agentId, call("Bash", { command: "npm test" }))).toMatchObject({ decision: "allow" });
     expect(gk.hookCall(agentId, call("Bash", { command: "git push origin main" })).decision).toBe("pending");
     expect(gk.hookCall(agentId, call("Write", { file_path: "/Users/adi/.zshrc" })).decision).toBe("pending");
   }, 90_000);
@@ -247,8 +258,8 @@ describe("each tool call is decided before it runs", () => {
 
   it("Karuna's own tools and Claude's bookkeeping pass straight through; the computer shows as seen", async () => {
     const { agentId } = await connectComputer(0);
-    expect(gk.hookCall(agentId, call("TodoWrite", {}))).toEqual({ decision: "allow" });
-    expect(gk.hookCall(agentId, call("mcp__plugin_karuna_karuna__pay", {}))).toEqual({ decision: "allow" });
+    expect(gk.hookCall(agentId, call("TodoWrite", {}))).toMatchObject({ decision: "allow" });
+    expect(gk.hookCall(agentId, call("mcp__plugin_karuna_karuna__pay", {}))).toMatchObject({ decision: "allow" });
     expect(gk.snapshot().devices.find((d) => d.agentId === agentId)?.lastSeenAt).toBeTruthy();
   }, 60_000);
 });

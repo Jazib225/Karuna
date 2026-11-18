@@ -67,6 +67,28 @@ function inWorkspace(p: string) {
   return full;
 }
 
+/** How long a save waits for a person before the run gives up on it. */
+const WRITE_WAIT_MS = Number(process.env.KARUNA_WRITE_WAIT_SECONDS ?? 600) * 1000;
+
+async function checkWrite(path: string, content: string): Promise<"allowed" | "denied" | "pending"> {
+  const r = await fetch(new URL("/v1/hook", GK), {
+    method: "POST",
+    headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ tool: "Write", input: { file_path: path, content }, cwd: WORKSPACE }),
+  });
+  const j = (await r.json().catch(() => ({}))) as { decision?: string; proposalId?: string; error?: string };
+  if (!r.ok) throw new Error(j.error ?? `Karuna returned ${r.status}`);
+  if (j.decision === "allow") return "allowed";
+  if (j.decision !== "pending" || !j.proposalId) return "denied";
+  say("tool", `write_file → waiting for a person to approve saving ${path} in Karuna`);
+  const until = Date.now() + WRITE_WAIT_MS;
+  while (Date.now() < until) {
+    const w = await get<{ status: "allowed" | "denied" | "pending" }>(`/v1/hook/${j.proposalId}/wait?ms=20000`);
+    if (w.status !== "pending") return w.status;
+  }
+  return "pending";
+}
+
 let payees: { name: string; address: string; category: string }[] = [];
 async function run(name: string, input: Record<string, unknown>): Promise<string> {
   switch (name) {
@@ -97,9 +119,14 @@ async function run(name: string, input: Record<string, unknown>): Promise<string
     case "read_file":
       return readFileSync(inWorkspace(String(input.path)), "utf8").slice(0, 8000);
     case "write_file": {
+      // Saving goes through Karuna like any agent's file write: at low trust levels a person
+      // approves or denies it (the card shows what would be written); this run waits for them.
       const f = inWorkspace(String(input.path));
+      const content = String(input.content ?? "");
+      const verdict = await checkWrite(String(input.path), content);
+      if (verdict !== "allowed") return verdict === "denied" ? "Karuna blocked this." : "Not saved: nobody approved it in time.";
       mkdirSync(dirname(f), { recursive: true });
-      writeFileSync(f, String(input.content ?? ""));
+      writeFileSync(f, content);
       return "Written.";
     }
   }

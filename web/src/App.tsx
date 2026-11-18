@@ -10,6 +10,7 @@ import { keccak256, stringToHex } from "viem";
 import { PREVIEW, previewLog, previewRun, previewSigner, previewSnapshot, previewWallet } from "./preview.ts";
 import { Badge, Icon, type IconName } from "./icons.tsx";
 import { askConfirm } from "./confirm.tsx";
+import { ProposalToaster, type GovEvent, type ProposalToast } from "./proposalToasts.ts";
 import { inviteCode, joinStatus, lookupInvite, sendJoin, sentJoins, type SentJoin } from "./invites.ts";
 import { IN_APP, getIslandEnabled, setDesktopSigner, setIslandEnabled } from "./desktop.ts";
 import { setThemePref, useThemePref, type ThemePref } from "./theme.ts";
@@ -655,7 +656,9 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
       const now = c.op === "Freeze" || lowering;
       return run(
         () => submitChange(me, dharma, { kind: now ? Kind.Tighten : Kind.Propose, change: c, label }),
-        lowering ? "Level lowered — recorded on Dharma" : now ? "All agents frozen — recorded on Dharma" : `Proposed — goes to Votes: needs ${pol.required} vote${pol.required > 1 ? "s" : ""}, then ${pol.timelock}s`,
+        // A proposal's confirmation comes from the chain, bottom right (one card, two with a wait);
+        // the centre message is only for when live events are off.
+        lowering ? "Level lowered — recorded on Dharma" : now ? "All agents frozen — recorded on Dharma" : liveRef.current ? undefined : `Proposed — goes to Votes: needs ${pol.required} vote${pol.required > 1 ? "s" : ""}, then ${pol.timelock}s`,
       );
     },
     vote: (g, support) => run(() => submitChange(me, dharma, { kind: Kind.Vote, change: g.change as Change, proposalId: g.id, support }), support ? "Vote recorded" : "Voted against"),
@@ -665,11 +668,42 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const sRef = useRef(s);
   sRef.current = s;
+  // Proposals: one card per proposal (two when there's a wait), never one per chain event.
+  const toaster = useRef(new ProposalToaster());
+  const govWhat = useRef(new Map<number, string>());
+  const show = (cards: Omit<Alert, "at">[]) => {
+    if (!cards.length) return;
+    const now = Date.now();
+    // At most 3 on screen; a newer card about the same proposal replaces the older one.
+    setAlerts((prev) => [...cards.map((a) => ({ ...a, at: now })), ...prev.filter((p) => !cards.some((c) => c.id === p.id || (c.proposalId !== undefined && c.proposalId === p.proposalId)))].slice(0, MAX_ALERTS));
+  };
+  const toCard = (t: ProposalToast, source: Alert["source"]): Omit<Alert, "at"> => ({
+    id: t.key, title: t.title, body: t.body, tone: t.tone, sticky: t.sticky, source,
+    ...(t.vote ? { go: "dharma" as View, cta: "Vote" } : {}), ...(t.proposalId !== undefined ? { proposalId: t.proposalId } : {}),
+  });
   const live = useRelay((events) => {
     void refresh();
     const now = Date.now();
-    setAlerts((prev) => [...events.map((e) => toAlert(e, sRef.current, name)).filter((a): a is Omit<Alert, "at"> => !!a).map((a) => ({ ...a, at: now })), ...prev].slice(0, 6));
+    const cards: Omit<Alert, "at">[] = [];
+    for (const e of events) {
+      const g = govEvent(e, sRef.current, me.address, name, govWhat.current);
+      if (g) cards.push(...toaster.current.push(g, now).map((t) => toCard(t, e.source)));
+      else {
+        const a = toAlert(e, sRef.current, name);
+        if (a) cards.push(a);
+      }
+    }
+    show(cards);
   });
+  const liveRef = useRef(false);
+  liveRef.current = live.mode === "quicknode" || live.mode === "rpc";
+  useEffect(() => {
+    const t = setInterval(() => {
+      const p = sRef.current.policy;
+      if (p) show(toaster.current.flush(Date.now(), { required: p.required, timelock: p.timelock, instant: p.members.length === 1 }).map((t) => toCard(t, "rpc")));
+    }, 500);
+    return () => clearInterval(t);
+  }, []);
   useEffect(() => {
     // A "vote on this" alert stays only while there's still a vote for this member to cast.
     const nothingToVote = (a: Alert) => {
@@ -705,7 +739,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
           };
         }),
         ...prev,
-      ].slice(0, 6));
+      ].slice(0, MAX_ALERTS));
     }
   }, [s.shield.alerts]);
 
@@ -1823,30 +1857,6 @@ function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string
       return { ...base, tone: "bad", sticky: true, whileFrozen: true, title: "All agents frozen", body: `${name(String(a.by))} hit the panic button. Recorded on Dharma.` };
     case "AgentsUnfrozen":
       return { ...base, tone: "ok", sticky: false, title: "Agents unfrozen", body: "The vote passed and the timelock ended." };
-    case "ProposalCreated": {
-      // The event carries the change itself, so describe it even before the proposal list refreshes.
-      let what = gov(a.id)?.description;
-      if (!what) {
-        try {
-          what = describeChange(decodeChange(Number(a.op), a.data as `0x${string}`), {
-            member: (x) => pol?.members.find((m) => m.address === x)?.name ?? undefined,
-            agent: (id) => pol?.agents.find((g) => g.id === id)?.name,
-            payee: (x) => pol?.payees.find((p) => p.account === x)?.name ?? undefined,
-          });
-        } catch {
-          what = "a policy change";
-        }
-      }
-      return { ...base, tone: "info", sticky: true, go: "dharma", cta: "Vote", title: `New Dharma proposal #${a.id}`, body: `${name(String(a.proposer))}: ${what}`, proposalId: Number(a.id) };
-    }
-    case "VoteCast":
-      return { ...base, tone: "info", sticky: false, title: `Vote on #${a.id}`, body: `${name(String(a.voter))} voted ${a.support ? "yes" : "no"} (${a.yes} yes · ${a.no} no)` };
-    case "ProposalQueued":
-      return { ...base, tone: "ok", sticky: false, go: "dharma", title: `Proposal #${a.id} passed`, body: "Takes effect after the timelock." };
-    case "ProposalExecuted":
-      return { ...base, tone: "ok", sticky: false, title: `Proposal #${a.id} is in effect`, body: gov(a.id)?.description ?? "Policy updated." };
-    case "ProposalDefeated":
-      return { ...base, tone: "info", sticky: false, title: `Proposal #${a.id} defeated`, body: gov(a.id)?.description ?? "" };
     case "RuleAdded":
       return { ...base, tone: "info", sticky: false, title: "Rule added", body: `${String(a.id)} — in effect now` };
     case "TestFailed":
@@ -1866,6 +1876,35 @@ function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string
     default:
       return null; // anchors, payee/domain changes etc. update the screen without a pop-up
   }
+}
+
+/** Bottom-right cards on screen at once. */
+const MAX_ALERTS = 3;
+
+/** A Dharma proposal event, for the proposal pop-ups (null for every other event). */
+function govEvent(e: ChainEvent, s: Snapshot, me: string, name: (a?: string | null) => string, whats: Map<number, string>): GovEvent | null {
+  const a = e.args;
+  const kind = ({ ProposalCreated: "created", VoteCast: "vote", ProposalQueued: "queued", ProposalExecuted: "executed", ProposalDefeated: "defeated" } as const)[e.event as "ProposalCreated"];
+  if (!kind) return null;
+  const id = Number(a.id);
+  const pol = s.policy;
+  let what = pol?.proposals.find((g) => g.id === id)?.description ?? whats.get(id);
+  if (!what && kind === "created") {
+    // The event carries the change itself, so describe it before the proposal list refreshes.
+    try {
+      what = describeChange(decodeChange(Number(a.op), a.data as `0x${string}`), {
+        member: (x) => pol?.members.find((m) => m.address === x)?.name ?? undefined,
+        agent: (aid) => pol?.agents.find((g) => g.id === aid)?.name,
+        payee: (x) => pol?.payees.find((p) => p.account === x)?.name ?? undefined,
+      });
+    } catch {
+      /* described as "a policy change" below */
+    }
+  }
+  what ??= "A policy change";
+  whats.set(id, what);
+  const who = String((kind === "created" ? a.proposer : a.voter) ?? "").toLowerCase();
+  return { kind, id, what, mine: who === me.toLowerCase(), by: kind === "created" ? name(who) : undefined };
 }
 
 function LiveBadge({ mode }: { mode: LiveMode }) {
