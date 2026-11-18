@@ -218,6 +218,15 @@ export function consoleApi(
       const body = method === "GET" || method === "DELETE" ? {} : await readBody(req);
       let m: RegExpMatchArray | null;
 
+      // Add funds to Gateway (from the org's Circle wallet). Balances are re-read right after.
+      if (method === "POST" && path === "/wallet/gateway-deposit") {
+        const addr = gk.org.wallet?.address;
+        const have = addr ? Number((await wallet.balances(addr)).usdc) : undefined;
+        const r = await gk.depositToGateway(body.amount, have);
+        walletCache = null;
+        return send(res, 200, r);
+      }
+
       if (method === "GET" && (m = path.match(/^\/dharma\/nonce\/(0x[0-9a-fA-F]{40})$/))) return send(res, 200, { nonce: String(await gk.nonceOf(m[1])) });
       if (method === "POST" && path === "/chain-event") {
         // The relay saw a Dharma event (QuickNode Stream or direct RPC): re-read policy now.

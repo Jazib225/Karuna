@@ -747,6 +747,35 @@ export class Gatekeeper extends EventEmitter {
     return { folder, name };
   }
 
+  private depositing = false;
+
+  /**
+   * Add funds to Gateway: move USDC from the org's Circle wallet into its Gateway balance, which
+   * x402 nanopayments spend. The money stays the org's (the wallet watchdog expects deposits to
+   * Gateway), so it needs no vote; it's recorded in the signed log.
+   */
+  async depositToGateway(amount: unknown, available?: number) {
+    this.requireReady();
+    const from = this.org.wallet?.address;
+    if (!from) throw new GatekeeperError("This organization has no wallet yet", 409);
+    if (!this.deps.wallet.depositToGateway) throw new GatekeeperError("This wallet can't deposit to Gateway", 501);
+    const usd = Math.round(Number(amount) * 1e6) / 1e6;
+    if (!Number.isFinite(usd) || usd < 0.01) throw new GatekeeperError("Enter at least $0.01", 400);
+    if (available !== undefined && usd > available) throw new GatekeeperError(`The wallet has $${available.toFixed(2)}; enter that or less`, 400);
+    if (this.depositing) throw new GatekeeperError("A deposit is already on its way", 409);
+    this.depositing = true;
+    try {
+      const r = await this.deps.wallet.depositToGateway(from, usd);
+      this.logEvent({ type: "gateway-deposit", wallet: from, amountUsd: usd, txRef: r.txRef });
+      this.save();
+      return { amountUsd: usd, txRef: r.txRef };
+    } catch (e) {
+      throw new GatekeeperError(`Couldn't add funds to Gateway: ${scrub(e)}`, 502);
+    } finally {
+      this.depositing = false;
+    }
+  }
+
   renameOrg(name: unknown) {
     this.org.name = requireText(name, "Organization name");
     this.save();
