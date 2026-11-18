@@ -84,7 +84,7 @@ export function agentApi(gk: Gatekeeper, sandbox?: SandboxDeps): Server {
         const s = gk.startSession(agentId, { host: body.host, isolation: body.isolation, desktop: body.desktop, remote: body.remote, runId: body.runId });
         const proxyPort = await sandbox.proxy.open(s.token);
         return send(res, 200, {
-          session: s.token, id: s.id, agentId, proxyPort, caPem: sandbox.caPem,
+          session: s.token, id: s.id, runId: s.runId, agentId, proxyPort, caPem: sandbox.caPem,
           env: sandbox.secrets.placeholderEnv(),
           writableMounts: (Array.isArray(body.mounts) ? body.mounts : []).filter((m: unknown) => typeof m === "string" && gk.mayMountWritable(agentId, m)),
         });
@@ -99,6 +99,12 @@ export function agentApi(gk: Gatekeeper, sandbox?: SandboxDeps): Server {
         if (!who.session) return send(res, 400, { error: "Send output with the run's session token" });
         const out = await readBody(req);
         return send(res, 200, gk.noteOutput(token, out.lines));
+      }
+      // What the run changed in its writable mounts (snapshotted first): after the box exits, from the
+      // session (or the agent's own token for one of its runs, if the session already ended).
+      if (req.method === "POST" && url.pathname === "/v1/sessions/changes") {
+        const body = await readBody(req);
+        return send(res, 200, gk.recordRunChanges(who.session ? { token } : { agentId }, body));
       }
       // A built agent's box asks what to do this run.
       if (req.method === "GET" && url.pathname === "/v1/job") {
@@ -204,6 +210,8 @@ export function consoleApi(
         if (!addr) return send(res, 200, null);
         if (!walletCache || Date.now() - walletCache.at > 10_000) {
           walletCache = { at: Date.now(), value: { address: addr, ...(await wallet.balances(addr)) } };
+          const n = Number((walletCache.value as { usdc: string }).usdc);
+          if (Number.isFinite(n)) gk.walletUsd = n;
         }
         return send(res, 200, walletCache.value);
       }
@@ -246,6 +254,8 @@ export function consoleApi(
       if (method === "PATCH" && (m = path.match(/^\/agents\/([\w-]+)\/built$/))) return send(res, 200, gk.updateBuiltAgent(m[1], body));
       if (method === "POST" && (m = path.match(/^\/agents\/([\w-]+)\/run$/))) return send(res, 200, gk.runBuiltAgent(m[1], "Run now"));
       if (method === "POST" && (m = path.match(/^\/runs\/([\w-]+)\/stop$/))) return send(res, 200, gk.stopRun(m[1]));
+      if (method === "POST" && (m = path.match(/^\/runs\/([\w-]+)\/undo$/))) return send(res, 200, await gk.undoRunChanges(m[1], body));
+      if (method === "POST" && (m = path.match(/^\/proposals\/([\w-]+)\/escrow-cancel$/))) return send(res, 200, await gk.cancelEscrow(m[1], body));
       if (accounts && method === "POST" && path === "/auth/salt") return send(res, 200, accounts.salt(body.email));
       if (accounts && method === "POST" && path === "/auth/create") return send(res, 200, accounts.create(body));
       if (accounts && method === "POST" && path === "/auth/sign-in") return send(res, 200, accounts.signIn(body));

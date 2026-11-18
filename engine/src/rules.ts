@@ -468,7 +468,7 @@ export function customRule(r: OnchainRule): Rule {
         if (req.tool !== "tool") return false;
         return !target || globRe(target).test((req.toolName ?? "").toLowerCase());
       }
-      // key:<name>, mount, unsandboxed: capability grants the Gatekeeper reads, never request rules.
+      // key:<name>, mount, unsandboxed, connector:<name>, escrow: settings the Gatekeeper reads, never request rules.
       return false;
     },
   };

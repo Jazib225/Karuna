@@ -6,7 +6,7 @@
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import type { Address, Hex } from "viem";
 import {
-  ARC_TESTNET_CHAIN_ID, Kind, actionTypedData, encodeChange, paymentDecisionTypedData, type Change,
+  ARC_TESTNET_CHAIN_ID, Kind, actionTypedData, encodeChange, escrowCancelTypedData, paymentDecisionTypedData, type Change,
 } from "@prekaruna/dharma";
 import { api } from "./api.ts";
 
@@ -91,6 +91,12 @@ export async function signDecision(me: Signer, dharma: Address, proposalId: stri
 /** Sign and submit an approve/deny for one payment, bound to the payload hash on the card. */
 export async function decidePayment(me: Signer, dharma: Address, proposalId: string, payloadHash: string, approve: boolean) {
   return api<{ status: string; error?: string }>(`/proposals/${proposalId}/decide`, await signDecision(me, dharma, proposalId, payloadHash, approve));
+}
+
+/** Sign a cancel for one escrowed payment; the Gatekeeper relays it and the Escrow checks you're a member. */
+export async function cancelEscrow(me: Signer, escrow: Address, holdId: string, paymentId: string) {
+  const signature = await me.signTypedData(escrowCancelTypedData(escrow, ARC_TESTNET_CHAIN_ID, { id: BigInt(holdId) }));
+  return api<{ status: string; txRef: string }>(`/proposals/${paymentId}/escrow-cancel`, { signer: me.address, signature });
 }
 
 export { Kind };

@@ -66,6 +66,7 @@ const gkAccount = privateKeyToAccount(GK_KEY);
 let gk: Gatekeeper;
 let member: PrivateKeyAccount;
 let launched: { agentId: string; token: string; runId: string; exit: (code: number) => void }[];
+let undos: { runId: string; path?: string }[];
 
 async function sign(kind: number, c: Change): Promise<SignedAction> {
   const { op, data } = encodeChange(c);
@@ -86,6 +87,7 @@ async function passTimelock() {
 beforeEach(async () => {
   if (gk) await gk.idle();
   launched = [];
+  undos = [];
   member = privateKeyToAccount(generatePrivateKey());
   const writer = new ViemChainWriter(createWalletClient({ chain, account: gkAccount, transport: http(RPC) }), client);
   gk = new Gatekeeper({
@@ -93,6 +95,11 @@ beforeEach(async () => {
     launcher: ({ agentId, token, runId, onExit }) => {
       launched.push({ agentId, token, runId, exit: onExit });
       return () => onExit(137);
+    },
+    undo: async (r) => {
+      undos.push(r);
+      const all = [{ mount: "/home/dev/books", path: "ledger.csv" }, { mount: "/home/dev/books", path: "new.txt" }];
+      return { restored: r.path ? all.filter((x) => r.path!.endsWith(x.path)) : all, skipped: [] };
     },
   });
   await gk.setup({ orgName: "Runs Org", memberName: "Owner", memberAddress: member.address, walletAddress: gkAccount.address });
@@ -190,5 +197,35 @@ describe("developers' sandboxed agents get a run too", () => {
     expect(run).toMatchObject({ trigger: "karuna run on laptop", status: "running", built: false, actions: 1, reasoningVisible: false });
     gk.endSession(s.token);
     expect(gk.runsView("dev-bot")[0].status).toBe("done");
+  }, 60_000);
+});
+
+describe("undo a run's file changes", () => {
+  it("the runner reports what changed; the console undoes one file, then the rest", async () => {
+    await gk.submitAction(await sign(Kind.Propose, { op: "SetAgent", id: "dev-bot", capUsd: 0 }));
+    await passTimelock();
+    const s = gk.startSession("dev-bot", { host: "laptop", isolation: "docker" });
+    gk.recordRunChanges({ token: s.token }, { changes: [
+      { mount: "/home/dev/books", path: "ledger.csv", kind: "modified", diff: "-a +b", binary: false },
+      { mount: "/home/dev/books", path: "new.txt", kind: "added", diff: "+hi", binary: false },
+      { mount: "/home/dev/books", path: "../escape", kind: "added", diff: null, binary: false },
+    ] });
+    const runId = gk.runsView("dev-bot")[0].id;
+    await expect(gk.undoRunChanges(runId)).rejects.toThrow(/Stop the run/);
+    gk.endSession(s.token);
+    expect(gk.runsView("dev-bot")[0]).toMatchObject({ changes: 2, undone: 0 });
+    // Another agent can't report changes for this run.
+    expect(() => gk.recordRunChanges({ agentId: "someone-else" }, { runId, changes: [] })).toThrow(/No such run/);
+
+    await gk.undoRunChanges(runId, { path: "ledger.csv" });
+    expect(undos.at(-1)).toEqual({ runId, path: "/home/dev/books/ledger.csv" });
+    expect(gk.runView(runId).fileChanges.find((c) => c.path === "ledger.csv")?.undoneAt).toBeTruthy();
+    await expect(gk.undoRunChanges(runId, { path: "ledger.csv" })).rejects.toThrow(/Already undone/);
+
+    await gk.undoRunChanges(runId);
+    expect(undos.at(-1)).toEqual({ runId });
+    expect(gk.runsView("dev-bot")[0]).toMatchObject({ changes: 2, undone: 2 });
+    await expect(gk.undoRunChanges(runId)).rejects.toThrow(/Already undone/);
+    expect(gk.logTail(20).some((e) => e.event?.type === "run-undone")).toBe(true);
   }, 60_000);
 });

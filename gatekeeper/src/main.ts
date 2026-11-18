@@ -12,6 +12,8 @@ import { agentApi, consoleApi } from "./server.ts";
 import { publicApi } from "./chat.ts";
 import { Accounts } from "./accounts.ts";
 import { CircleChainWriter, RelayedChainWriter, ViemChainWriter, publicClient, scrub } from "./chain.ts";
+import { ViemEscrow } from "./escrow.ts";
+import { runnerUndo } from "./undo.ts";
 import { SandboxCA } from "./ca.ts";
 import { SecretStore } from "./secrets.ts";
 import { EgressProxy } from "./proxy.ts";
@@ -36,9 +38,10 @@ const client = publicClient(process.env.ARC_RPC_URL);
 // Dharma writes in about a second instead of through the Circle wallet. It can't change anything
 // members didn't sign; Dharma checks their signatures. Without it, every write uses the Circle wallet.
 const relayKey = process.env.KARUNA_RELAYER_KEY?.trim();
-const relay = relayKey && /^0x[0-9a-fA-F]{64}$/.test(relayKey)
-  ? new ViemChainWriter(createWalletClient({ account: privateKeyToAccount(relayKey as Hex), chain: arcTestnet, transport: http(process.env.ARC_RPC_URL || undefined, { retryCount: 3 }) }), client)
+const relayWallet = relayKey && /^0x[0-9a-fA-F]{64}$/.test(relayKey)
+  ? createWalletClient({ account: privateKeyToAccount(relayKey as Hex), chain: arcTestnet, transport: http(process.env.ARC_RPC_URL || undefined, { retryCount: 3 }) })
   : null;
+const relay = relayWallet ? new ViemChainWriter(relayWallet, client) : null;
 const gk = new Gatekeeper({
   store,
   wallet,
@@ -47,6 +50,8 @@ const gk = new Gatekeeper({
     const circle = new CircleChainWriter(address, client);
     return relay ? new RelayedChainWriter(circle, relay, (e) => console.error(`gatekeeper · relayer failed, used the Circle wallet: ${scrub(e)}`)) : circle;
   },
+  // The same relayer opens and releases escrow holds for large payments (and relays members' cancels).
+  ...(relayWallet ? { escrow: new ViemEscrow(relayWallet, client) } : {}),
   timelockSeconds: Number(process.env.KARUNA_TIMELOCK_SECONDS ?? 60),
   chatUrl: process.env.KARUNA_CHAT_URL || undefined,
   coreTimelockSeconds: Number(process.env.KARUNA_CORE_TIMELOCK_SECONDS ?? 86_400),
@@ -83,6 +88,8 @@ const gk = new Gatekeeper({
     });
     return () => p.kill();
   },
+  // Undo a run's file changes from its snapshot on this machine (runs started here, by `karuna run`).
+  undo: runnerUndo(resolve(here, "../..")),
 });
 gk.holdMs = Number(process.env.KARUNA_HOLD_SECONDS ?? 120) * 1000;
 const ca = new SandboxCA(dataDir);

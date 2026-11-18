@@ -38,6 +38,13 @@ the folders you mount, no real keys (placeholders the proxy swaps), wiped when i
   --ca <file>           the org's sandbox CA, for a Gatekeeper on another machine (https://)
   --memory <2g>  --cpus <2>
 
+Undo an agent's file changes (writable mounts are copied before each run and kept 14 days)
+  karuna changes --run <runId>
+                        what the run added, modified or deleted, as JSON
+  karuna undo --run <runId> [--path <file>] [--force]
+                        put the whole run back, or one file (its full host path); a file that
+                        changed again after the run is refused unless --force
+
 Examples
   karuna run --agent invoice-bot ./invoice-bot -- python main.py
   karuna run --agent supplies --mount ./reports:/data ./agents -- npx tsx examples/supplies-agent.ts
@@ -107,5 +114,31 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
   const local = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(gk.hostname);
   if (gk.protocol === "http:" && !local) throw new Error("A Gatekeeper on another machine must be reached over https:// (its remote port)");
   if (gk.protocol === "https:" && !out.ca) throw new Error("--ca <karuna-ca.pem> is required for an https:// Gatekeeper (download it from the console)");
+  return out;
+}
+
+export interface UndoArgs {
+  run: string;
+  path?: string;
+  force: boolean;
+}
+
+/** `karuna changes --run <id>` and `karuna undo --run <id> [--path <file>] [--force]`. */
+export function parseUndoArgs(cmd: "changes" | "undo", argv: string[]): UndoArgs {
+  const out: UndoArgs = { run: "", force: false };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    const next = () => {
+      const v = argv[++i];
+      if (v === undefined) throw new Error(`${a} needs a value`);
+      return v;
+    };
+    if (a === "--run") out.run = next();
+    else if (cmd === "undo" && a === "--path") out.path = next();
+    else if (cmd === "undo" && a === "--force") out.force = true;
+    else throw new Error(`Unknown option for karuna ${cmd}: ${a}`);
+  }
+  if (!out.run) throw new Error("--run <runId> is required");
+  if (!/^[\w.-]{1,80}$/.test(out.run) || /^\.+$/.test(out.run)) throw new Error("--run: not a run id");
   return out;
 }

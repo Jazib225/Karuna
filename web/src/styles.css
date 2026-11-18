@@ -837,6 +837,9 @@ html, body, * { scrollbar-width: none; }
 
 /* New agent, built agents, and the Runs view */
 .new-agent textarea, .built textarea { width: 100%; }
+.key-ask { display: grid; gap: 8px; padding: 12px 14px; border: 1px dashed var(--n400); border-radius: 10px; }
+.key-ask .grow { flex: 1; min-width: 0; }
+.field small.muted { font-size: 12px; }
 .check-row { display: flex; gap: 8px; align-items: flex-start; font-size: 13.5px; padding: 3px 0; }
 .inline-field { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--n500); }
 .built { display: grid; gap: 8px; }
@@ -976,3 +979,27 @@ html, body, * { scrollbar-width: none; }
 .funds-flow small { font-family: var(--font-mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .1em; }
 .funds-flow b { color: var(--ink); font-size: 15px; font-variant-numeric: tabular-nums; }
 .input-prefix { position: absolute; left: 12px; top: 50%; translate: 0 -50%; color: var(--n500); font-family: var(--font-mono); font-size: 14px; pointer-events: none; }
+
+/* worst case */
+.worst .kv b.mono { font-size: 12px; text-align: right; overflow-wrap: anywhere; }
+.worst-line { display: flex; gap: 6px; align-items: baseline; font-size: 12.5px; color: var(--n600); line-height: 1.45; margin: 2px 0 8px; }
+.preview-warn { border-color: var(--danger-line); }
+.worst-delta { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; }
+.worst-delta .up { color: var(--danger); }
+.worst-delta .down { color: var(--n600); }
+
+/* a run's file changes */
+.run-files { display: grid; gap: 6px; margin: 4px 0 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); }
+.run-files-hd { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.run-file summary { display: flex; gap: 10px; align-items: center; cursor: pointer; padding: 4px 0; }
+.run-file summary .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.run-file.undone summary .mono { text-decoration: line-through; color: var(--n500); }
+.file-kind { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line-strong); color: var(--n600); }
+.file-kind.deleted { border-color: var(--danger-line); color: var(--danger); }
+.snippet.diff span { display: block; white-space: pre-wrap; }
+.snippet.diff .add { background: var(--n100); font-weight: 600; }
+.snippet.diff .del { color: var(--danger); background: var(--danger-bg); }
+
+/* payments in escrow */
+.escrow-tr { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; }
+@media (max-width: 640px) { .escrow-tr { grid-template-columns: 1fr auto; } .escrow-tr .small { grid-column: 1 / -1; grid-row: 2; } }

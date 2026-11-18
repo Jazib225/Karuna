@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import type { Address } from "viem";
 import { isAddr, isNoLimit, decodeChange, describeChange, describeScope, NO_LIMIT_USD, waitText, type Change } from "@prekaruna/dharma";
-import { api, useGatekeeper, type LooseningPreview, type AgentView, type AgentDraftView, type Governance, type LogEntry, type Proposal, type Rule, type RunDetail, type RunStep, type Schedule, type Snapshot, type WalletInfo } from "./api.ts";
-import { Kind, SignerUnavailable, decidePayment, loadSigner, signerKey, submitChange, type Signer } from "./signer.ts";
+import { api, useGatekeeper, type LooseningPreview, type AgentExposure, type Exposure, type AgentView, type AgentDraftView, type Governance, type LogEntry, type Proposal, type Rule, type RunDetail, type RunFileChange, type RunStep, type Schedule, type Snapshot, type WalletInfo } from "./api.ts";
+import { Kind, SignerUnavailable, cancelEscrow, decidePayment, loadSigner, signerKey, submitChange, type Signer } from "./signer.ts";
 import { accountEmail, createAccount, signIn as accountSignIn, signOut as accountSignOut } from "./account.ts";
 import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
 import { Palette, type Command } from "./palette.tsx";
@@ -755,7 +755,6 @@ function Console({ s, log, wallet, refreshWallet, run, busy, me, offline, refres
     ...(ballots.length ? [{ id: "vote", label: `Vote on ${ballots.length} open change${ballots.length > 1 ? "s" : ""}`, hint: "Votes", icon: "votes" as IconName, run: () => setView("votes") }] : []),
     { id: "new-rule", label: "Add a rule", hint: "Proposals", icon: "plus", keywords: "policy block allow approval english", run: () => setView("proposals") },
     { id: "new-agent", label: "Add an agent", hint: "Agents", icon: "plus", keywords: "token", run: () => setView("agents") },
-    { id: "new-key", label: "Add an API key", hint: "Keys", icon: "key", keywords: "secret anthropic gemini openai", run: () => setView("keys") },
     { id: "waits", label: "Change the waits", hint: "Proposals", icon: "clock", keywords: "timelock core", run: () => setView("proposals") },
     ...(["system", "light", "dark"] as const).map((t) => ({ id: `theme-${t}`, label: `Theme: ${t === "system" ? "System" : t === "light" ? "Light" : "Dark"}`, hint: "Appearance", icon: "sun" as IconName, keywords: "dark light mode appearance", run: () => setThemePref(t) })),
     ...(IN_APP ? [{ id: "island", label: getIslandEnabled() ? "Turn the island off" : "Turn the island on", hint: "Appearance", icon: "sun" as IconName, keywords: "notch lotus", run: () => setIslandEnabled(!getIslandEnabled()) }] : []),
@@ -889,7 +888,7 @@ function Console({ s, log, wallet, refreshWallet, run, busy, me, offline, refres
           {view === "agents" && <Agents ctx={ctx} />}
           {view === "safety" && <Safety ctx={ctx} />}
           {view === "proposals" && <div className="stack"><Policy ctx={ctx} part="propose" /><Waits ctx={ctx} /><Learned ctx={ctx} /></div>}
-          {view === "rules" && <div className="stack"><Policy ctx={ctx} part="list" /><Payees ctx={ctx} /></div>}
+          {view === "rules" && <div className="stack"><Policy ctx={ctx} part="list" /><Payees ctx={ctx} /><TrustedSites ctx={ctx} /></div>}
           {view === "team" && <Team ctx={ctx} />}
           {view === "appearance" && <Appearance />}
         </div>
@@ -988,6 +987,8 @@ function Overview({ ctx, wallet, refreshWallet, go }: { ctx: Ctx; wallet: Wallet
         <div className="tile rise" style={st(3)}><div className="k">Spent today <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{usd(spent)}</div><div className="note">of {usd(pol.agents.filter((a) => a.active).reduce((n, a) => n + a.capUsd, 0))} allowed</div></div>
       </div>
 
+      {s.exposure && <WorstCase x={s.exposure} names={Object.fromEntries(pol.agents.map((a) => [a.id, a.name]))} />}
+
       {steps.some((x) => !x.done) && !startHidden && (
         <div className="card rise" style={st(1)}>
           <div className="hd">
@@ -1065,8 +1066,9 @@ function Rows({ ctx, items }: { ctx: Ctx; items: Proposal[] }) {
     <div className="gk">
       {items.map((p) => {
         const o = p.decision.outcome;
-        const label = p.status === "executed" ? "paid" : p.status === "failed" ? "failed" : o === "approval" ? (p.status === "pending" ? "require approval" : p.status) : o;
-        const cls = p.status === "failed" || p.status === "denied" ? "deny" : p.status === "executed" ? "allow" : o;
+        const held = p.escrow && (p.escrow.status === "held" || p.escrow.status === "opening");
+        const label = p.escrow?.status === "cancelled" ? "cancelled" : held ? "in escrow" : p.status === "executed" ? "paid" : p.status === "failed" ? "failed" : o === "approval" ? (p.status === "pending" ? "require approval" : p.status) : o;
+        const cls = p.escrow?.status === "cancelled" || p.status === "failed" || p.status === "denied" ? "deny" : held ? "approval" : p.status === "executed" ? "allow" : o;
         return (
           <div className={`item ${Date.now() - Date.parse(p.createdAt) < 4000 ? "fresh" : ""}`} key={p.id}>
             <span className="caret">›</span>
@@ -1093,9 +1095,40 @@ function ActivityPage({ ctx, dharma, log }: { ctx: Ctx; dharma: Address; log: Lo
     <div className="stack">
       {pending.length === 0 && live.length === 0 && <div className="card"><Empty icon="check">Nothing is waiting for you.</Empty></div>}
       {pending.map((p, i) => <div className="rise" style={st(i)} key={p.id}><ApprovalCard p={p} ctx={ctx} dharma={dharma} /></div>)}
+      <EscrowHolds ctx={ctx} />
       <Ballots ctx={ctx} />
       <UpgradeCard ctx={ctx} />
       <Activity ctx={ctx} log={log} />
+    </div>
+  );
+}
+
+/** Payments waiting in escrow: any one member can cancel before release, and the USDC comes back. */
+function EscrowHolds({ ctx }: { ctx: Ctx }) {
+  const { s, me, run, busy } = ctx;
+  const held = s.proposals.filter((p) => p.escrow && (p.escrow.status === "held" || p.escrow.status === "opening"));
+  if (!held.length) return null;
+  const agentName = (id: string) => s.policy!.agents.find((a) => a.id === id)?.name ?? id;
+  const payee = (a?: string) => (a ? s.policy!.payees.find((x) => x.account === a.toLowerCase())?.name ?? short(a) : "—");
+  return (
+    <div className="card">
+      <div className="hd"><h2>In escrow</h2><span className="sub">any member can cancel before release; the USDC returns to the wallet</span></div>
+      <div className="table">
+        {held.map((p) => {
+          const e = p.escrow!;
+          return (
+            <div className="tr escrow-tr" key={p.id}>
+              <span className="b">{usd(p.payload?.amountUsd ?? p.request.amountUsd ?? 0)} to {payee(p.request.to)}</span>
+              <span className="small muted">{agentName(p.agentId)} · {e.blocked ?? (e.status === "opening" ? "placing in escrow…" : `releases ${new Date(e.releaseAt).toLocaleString()}`)}</span>
+              <button className="btn btn-deny btn-sm" disabled={busy || e.status !== "held" || !e.holdId}
+                onClick={async () => (await askConfirm(`Cancel this ${usd(p.payload?.amountUsd ?? 0)} payment? The USDC goes back to the org's wallet and the payee gets nothing.`, { action: "Cancel payment", back: "Keep it", danger: true }))
+                  && run(() => cancelEscrow(me, e.address as Address, e.holdId!, p.id), "Cancelled; the USDC is back in the wallet")}>
+                Cancel
+              </button>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -1196,6 +1229,7 @@ function Ballots({ ctx }: { ctx: Ctx }) {
                 </span>
               )}
             </div>
+            {g.exposureDelta && g.exposureDelta.length > 0 && <WorstDelta lines={g.exposureDelta} />}
             {g.preview && <PreviewBox p={g.preview} ctx={ctx} />}
           </div>
         );
@@ -1328,6 +1362,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
                   </span>
                 </div>
                 {a.active && <Meter a={limited(a)} frozen={!!s.frozen} />}
+                {a.active && (() => { const x = s.exposure?.agents.find((e) => e.agentId === a.id); return x && <div className="worst-line"><Icon name="alert" size={12} /> If hijacked: {agentWorst(x, s.exposure!.walletUsd)}</div>; })()}
                 {a.active && levels && <AgentLevel a={a} ctx={ctx} />}
                 {a.active && a.built && <BuiltControls a={a} ctx={ctx} openRuns={() => setRunsFor(a.id)} />}
                 {a.active && (
@@ -1372,13 +1407,34 @@ function Agents({ ctx }: { ctx: Ctx }) {
       <ChatSetup ctx={ctx} />
       <Computers ctx={ctx} />
       <Connectors ctx={ctx} />
-      <Keys ctx={ctx} />
       {s.sandbox.remote && <RemoteRuns ctx={ctx} />}
     </div>
   );
 }
 
 // ============================================================== payees
+
+/** Rules page: the sites agents may reach (read; Level 2+ may write). */
+function TrustedSites({ ctx }: { ctx: Ctx }) {
+  const { s, busy } = ctx;
+  const pol = s.policy!;
+  return (
+    <div className="card">
+      <div className="hd"><h2>Trusted sites</h2><span className="sub">{pol.domains.length ? pol.domains.length : "none yet, so agents can't reach the web"}</span></div>
+      {pol.domains.length > 0 && (
+        <div className="table">
+          {pol.domains.map((d) => (
+            <div className="tr site-tr" key={d}>
+              <span className="intro-mark"><Icon name="external" size={14} /></span>
+              <span className="b mono">{d}</span>
+              <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => ctx.change({ op: "RemoveDomain", domain: d })}>Remove</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function Payees({ ctx }: { ctx: Ctx }) {
   const { s, busy } = ctx;
@@ -1404,6 +1460,9 @@ function Payees({ ctx }: { ctx: Ctx }) {
 }
 
 // ============================================================== policy
+
+const WAIT_UNITS = { minutes: 60, hours: 3600, days: 86400 } as const;
+type WaitUnit = keyof typeof WAIT_UNITS;
 
 /** The key the Gatekeeper uses to draft rules from English (KARUNA_DRAFT_KEY on the Gatekeeper). */
 const DRAFTER_KEY = "gemini";
@@ -1466,7 +1525,9 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
   const { s, busy } = ctx;
   const pol = s.policy!;
   const [meta, setMeta] = useState<Rule[]>([]);
-  const [payee, setPayee] = useState<{ on: boolean; name: string; account: string }>({ on: false, name: "", account: "" });
+  // The form's choices that aren't rules: a payee, a trusted site, the two-signature limit, escrow.
+  const [special, setSpecial] = useState<"" | "payee" | "site" | "threshold" | "escrow">("");
+  const [extra, setExtra] = useState({ name: "", account: "", domain: "", usd: "", wait: "24", unit: "hours" as WaitUnit });
   const [rule, setRule] = useState<RuleForm>(EMPTY_RULE);
   const [english, setEnglish] = useState("");
   const [drafting, setDrafting] = useState(false);
@@ -1499,17 +1560,49 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
   }, []);
   const desc = (id: string) => meta.find((m) => m.id === id)?.description;
 
-  const payeeOk = payee.name.trim() !== "" && isAddr(payee.account) && rule.category.trim() !== "";
+  const site = extra.domain.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/[/?#].*$/, "");
+  const amount = Number(extra.usd);
+  const waitSec = Math.round(Number(extra.wait) * WAIT_UNITS[extra.unit]);
+  const specialChange = ((): { change: Change; label?: string; text: string } | { error: string } | null => {
+    switch (special) {
+      case "payee":
+        if (!extra.name.trim() || !isAddr(extra.account) || !rule.category.trim()) return { error: "Enter a name, a 0x… payout address and a category" };
+        return { change: { op: "SetPayee", account: extra.account as Address, category: rule.category.trim().toLowerCase() }, label: extra.name.trim(), text: `add payee ${extra.name.trim()} (${short(extra.account)}), category ${rule.category.trim().toLowerCase()}` };
+      case "site":
+        if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(site)) return { error: "Enter a site, like api.github.com" };
+        return { change: { op: "AddDomain", domain: site }, text: `trust ${site}: agents may read from it, and Level 2 and up may also write to it` };
+      case "threshold":
+        if (!(amount > 0)) return { error: "Enter an amount in USD" };
+        return { change: { op: "SetThreshold", usd: amount }, text: `payments of ${usd(amount)} or more need two members to sign (now ${usd(pol.thresholdUsd)})` };
+      case "escrow":
+        if (!(amount > 0) || !(waitSec > 0)) return { error: "Enter an amount in USD and how long to hold it" };
+        return {
+          change: { op: "AddRule", id: ruleId("escrow"), outcome: "Approval", scope: "escrow", target: String(waitSec), maxUsd: amount },
+          text: `payments of ${usd(amount)} or more wait ${waitText(waitSec)} in escrow, and any member can cancel them`,
+        };
+      default:
+        return null;
+    }
+  })();
   const addRule = (e: FormEvent) => {
     e.preventDefault();
-    if (payee.on) {
-      if (!payeeOk) return;
-      ctx.change({ op: "SetPayee", account: payee.account as Address, category: rule.category.trim().toLowerCase() }, payee.name.trim())
-        .then((ok) => ok && (setPayee({ on: true, name: "", account: "" }), setRule({ ...rule, category: "" })));
+    if (specialChange) {
+      if ("error" in specialChange) return;
+      // Once it's proposed, clear only what was submitted (read the latest state: the member may
+      // already be filling in the next one).
+      const sent = special;
+      ctx.change(specialChange.change, specialChange.label).then((ok) => {
+        if (!ok) return;
+        if (sent === "payee") {
+          setExtra((x) => ({ ...x, name: "", account: "" }));
+          setRule((r) => ({ ...r, category: "" }));
+        } else if (sent === "site") setExtra((x) => ({ ...x, domain: "" }));
+        else setExtra((x) => ({ ...x, usd: "" }));
+      });
       return;
     }
     if ("error" in built) return;
-    ctx.change(built.change).then((ok) => ok && setRule({ ...EMPTY_RULE, kind: rule.kind }));
+    ctx.change(built.change).then((ok) => ok && setRule((r) => ({ ...EMPTY_RULE, kind: r.kind })));
   };
 
   return (
@@ -1522,7 +1615,7 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
               <span className="i">{String(i + 1).padStart(2, "0")}</span>
               <span className="nm">
                 <span>{r.id}{r.core && <span className="lock" title="Core boundary: can never be removed"><Icon name="lock" size={10} /> core</span>}</span>
-                <span className="desc">{r.builtin ? desc(r.id) ?? r.scope : `${describeScope(r.scope, r.target, names)} · ${r.agent ? names.agent(r.agent) : "every agent"}`}</span>
+                <span className="desc">{r.builtin ? desc(r.id) ?? r.scope : `${r.scope === "escrow" ? `payments of ${usd(r.maxUsd)} or more wait ${waitText(Number(r.target))} in escrow, and any member can cancel them` : describeScope(r.scope, r.target, names)} · ${r.agent ? names.agent(r.agent) : "every agent"}`}</span>
               </span>
               <span className="rule-actions">
                 {r.active ? <Badge v={r.outcome} /> : <span className="badge badge-quiet">removed</span>}
@@ -1548,6 +1641,7 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
       <div className="card rule-english">
         <div className="hd"><h2>Describe a rule in plain English</h2></div>
         <div className="rule-english-body">
+          <DrafterKeyField ctx={ctx} />
           <textarea
             rows={3}
             value={english}
@@ -1583,7 +1677,7 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
       </div>
 
       <form className="card inline-form rule-form" onSubmit={addRule}>
-        {!payee.on && <label className="field"><span>Outcome</span>
+        {!special && <label className="field"><span>Outcome</span>
           <select value={rule.outcome} onChange={(e) => setRule({ ...rule, outcome: e.target.value as RuleForm["outcome"] })}>
             <option value="Deny">Block</option>
             <option value="Approval">Require approval</option>
@@ -1591,12 +1685,16 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
           </select>
         </label>}
         <label className="field"><span>Action</span>
-          <select value={payee.on ? "payee" : rule.kind} onChange={(e) => {
+          <select value={special || rule.kind} onChange={(e) => {
             const v = e.target.value;
-            setPayee({ ...payee, on: v === "payee" });
-            setRule({ ...EMPTY_RULE, outcome: rule.outcome, agent: rule.agent, kind: v === "payee" ? rule.kind : (v as RuleKind) });
+            const isSpecial = v === "payee" || v === "site" || v === "threshold" || v === "escrow";
+            setSpecial(isSpecial ? v : "");
+            setRule({ ...EMPTY_RULE, outcome: rule.outcome, agent: rule.agent, kind: isSpecial ? rule.kind : (v as RuleKind) });
           }}>
             <option value="payee">New payee</option>
+            <option value="site">Trusted site</option>
+            <option value="threshold">Two-signature limit</option>
+            <option value="escrow">Escrow for large payments</option>
             <option value="payment">Payments</option>
             <option value="http">Web requests</option>
             <option value="shell">Shell commands</option>
@@ -1604,17 +1702,28 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
             <option value="message">Messages to other agents</option>
           </select>
         </label>
-        {payee.on ? <>
-          <label className="field"><span>Name (private)</span><input value={payee.name} onChange={(e) => setPayee({ ...payee, name: e.target.value })} placeholder="Supplier or service" /></label>
-          <label className="field grow"><span>Payout address</span><input className="mono" value={payee.account} onChange={(e) => setPayee({ ...payee, account: e.target.value.trim() })} placeholder="0x…" /></label>
+        {special === "payee" && <>
+          <label className="field"><span>Name (private)</span><input value={extra.name} onChange={(e) => setExtra({ ...extra, name: e.target.value })} placeholder="Supplier or service" /></label>
+          <label className="field grow"><span>Payout address</span><input className="mono" value={extra.account} onChange={(e) => setExtra({ ...extra, account: e.target.value.trim() })} placeholder="0x…" /></label>
           <label className="field"><span>Category</span><input value={rule.category} onChange={(e) => setRule({ ...rule, category: e.target.value })} placeholder="e.g. data, utilities" /></label>
-        </> : <label className="field"><span>Agent</span>
+        </>}
+        {special === "site" && <label className="field grow"><span>Site</span><input className="mono" value={extra.domain} onChange={(e) => setExtra({ ...extra, domain: e.target.value })} placeholder="api.github.com" /></label>}
+        {(special === "threshold" || special === "escrow") && <label className="field"><span>{special === "threshold" ? "From (USD)" : "Payments from (USD)"}</span><input inputMode="decimal" value={extra.usd} onChange={(e) => setExtra({ ...extra, usd: e.target.value })} placeholder={special === "threshold" ? String(pol.thresholdUsd) : "e.g. 100"} /></label>}
+        {special === "escrow" && <>
+          <label className="field"><span>Hold for</span><input className="mono" inputMode="decimal" value={extra.wait} onChange={(e) => setExtra({ ...extra, wait: e.target.value })} /></label>
+          <label className="field"><span>Unit</span>
+            <select value={extra.unit} onChange={(e) => setExtra({ ...extra, unit: e.target.value as WaitUnit })}>
+              {Object.keys(WAIT_UNITS).map((u) => <option key={u} value={u}>{u}</option>)}
+            </select>
+          </label>
+        </>}
+        {!special && <label className="field"><span>Agent</span>
           <select value={rule.agent} onChange={(e) => setRule({ ...rule, agent: e.target.value })}>
             <option value="">Every agent</option>
             {pol.agents.filter((a) => a.active).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
           </select>
         </label>}
-        {!payee.on && rule.kind === "payment" && <>
+        {!special && rule.kind === "payment" && <>
           <label className="field"><span>Payee</span>
             <select value={rule.target} onChange={(e) => setRule({ ...rule, target: e.target.value })}>
               <option value="">Any payee</option>
@@ -1624,7 +1733,7 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
           <label className="field"><span>Category</span><input value={rule.category} onChange={(e) => setRule({ ...rule, category: e.target.value })} placeholder="any" /></label>
           {rule.outcome === "Allow" && <label className="field"><span>Up to (USD)</span><input inputMode="decimal" value={rule.maxUsd} onChange={(e) => setRule({ ...rule, maxUsd: e.target.value })} placeholder="no cap" /></label>}
         </>}
-        {!payee.on && rule.kind === "http" && <>
+        {!special && rule.kind === "http" && <>
           <label className="field"><span>Method</span>
             <select value={rule.method} onChange={(e) => setRule({ ...rule, method: e.target.value })}>
               <option value="">Any</option>
@@ -1633,10 +1742,10 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
           </label>
           <label className="field grow"><span>Site</span><input value={rule.target} onChange={(e) => setRule({ ...rule, target: e.target.value })} placeholder="api.github.com or api.openai.com/v1/" /></label>
         </>}
-        {!payee.on && rule.kind === "shell" && (
+        {!special && rule.kind === "shell" && (
           <label className="field grow"><span>Command</span><input value={rule.target} onChange={(e) => setRule({ ...rule, target: e.target.value })} placeholder="git push   ·   or a pattern like *curl *" /></label>
         )}
-        {!payee.on && rule.kind === "file" && <>
+        {!special && rule.kind === "file" && <>
           <label className="field"><span>Access</span>
             <select value={rule.fileOp} onChange={(e) => setRule({ ...rule, fileOp: e.target.value })}>
               <option value="">Read or write</option>
@@ -1646,7 +1755,7 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
           </label>
           <label className="field grow"><span>Path</span><input value={rule.target} onChange={(e) => setRule({ ...rule, target: e.target.value })} placeholder="finance   ·   or a pattern like *.csv" /></label>
         </>}
-        {!payee.on && rule.kind === "message" && (
+        {!special && rule.kind === "message" && (
           <label className="field grow"><span>To</span>
             <select value={rule.target} onChange={(e) => setRule({ ...rule, target: e.target.value })}>
               <option value="">Any agent</option>
@@ -1654,9 +1763,9 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
             </select>
           </label>
         )}
-        <button className="btn btn-dark" disabled={busy || (payee.on ? !payeeOk : "error" in built)}><Icon name="plus" /> {payee.on ? "Propose payee" : "Propose rule"}</button>
-        <div className="rule-preview">{payee.on
-          ? (payeeOk ? <>Will be voted on as: <strong>add payee {payee.name.trim()} ({short(payee.account)}), category {rule.category.trim().toLowerCase()}</strong></> : "Enter a name, a 0x… payout address and a category")
+        <button className="btn btn-dark" disabled={busy || (specialChange ? "error" in specialChange : "error" in built)}><Icon name="plus" /> {special === "payee" ? "Propose payee" : special ? "Propose" : "Propose rule"}</button>
+        <div className="rule-preview">{specialChange
+          ? "error" in specialChange ? specialChange.error : <>Will be voted on as: <strong>{specialChange.text}</strong></>
           : "error" in built ? built.error : <>Will be voted on as: <strong>{describeRule(built.change, names)}</strong></>}</div>
       </form>
 
@@ -2248,6 +2357,60 @@ function Learned({ ctx }: { ctx: Ctx }) {
   );
 }
 
+// ============================================================== worst case
+
+const money = (n: number | null, wallet: number | null) => (n == null ? "no limit" : wallet != null && n >= wallet && wallet > 0 ? `${usd(n)} (the whole wallet)` : usd(n));
+const sites = (xs: string[]) => (xs.includes("*") ? "any site" : xs.length ? xs.join(", ") : "none");
+const FILE_WRITES = { none: "none", workspace: "its workspace only", anywhere: "anywhere in its sandbox" } as const;
+const TOOLS = { none: "read-only", "non-destructive": "all but destructive ones", all: "all" } as const;
+
+/** One line per agent: the money it could move and what else it could touch. */
+function agentWorst(x: AgentExposure, wallet: number | null): string {
+  const parts = [
+    x.dailyUsd === 0 && x.perPaymentUsd === 0 ? "no payments" : `${money(x.dailyUsd, wallet)}/day, ${money(x.perPaymentUsd, wallet)} per payment`,
+    x.writeSites.length ? `writes to ${sites(x.writeSites)}` : null,
+    x.keys.length ? `keys ${x.keys.join(", ")}` : null,
+    x.fileWrites !== "workspace" || x.writePaths.length ? `files: ${[FILE_WRITES[x.fileWrites], ...x.writePaths].join(", ")}` : null,
+    x.packageInstalls ? "package installs" : null,
+  ];
+  return parts.filter(Boolean).join(" · ");
+}
+
+/** Home: if every agent were hijacked right now, what they could do with no member. */
+function WorstCase({ x, names }: { x: Exposure; names: Record<string, string> }) {
+  const all = <T,>(f: (a: AgentExposure) => T[]) => [...new Set(x.agents.flatMap(f))];
+  const writeSites = all((a) => a.writeSites);
+  const keys = all((a) => a.keys);
+  const files = x.agents.some((a) => a.fileWrites === "anywhere") ? "anywhere in a sandbox" : x.agents.some((a) => a.fileWrites === "workspace") ? "workspaces only" : "none";
+  const installs = x.agents.filter((a) => a.packageInstalls).map((a) => names[a.agentId] ?? a.agentId);
+  return (
+    <div className="card rise worst" style={st(1)}>
+      <div className="hd"><h2>If every agent were hijacked</h2><span className="sub">what they could do with no member, under today's rules</span></div>
+      {x.frozen ? <div className="pad muted">Agents are frozen: nothing runs.</div> : (
+        <div className="pad">
+          <div className="kv"><span>Money out per day</span><b>{money(x.dailyUsd, x.walletUsd)}</b></div>
+          <div className="kv"><span>Largest single payment</span><b>{money(x.perPaymentUsd, x.walletUsd)}</b></div>
+          <div className="kv"><span>Sites they could write to</span><b className="mono">{sites(writeSites)}</b></div>
+          <div className="kv"><span>Keys they could use</span><b className="mono">{keys.length ? keys.join(", ") : "none"}</b></div>
+          <div className="kv"><span>File writes</span><b>{files}</b></div>
+          <div className="kv"><span>Package installs</span><b>{installs.length ? installs.join(", ") : "none"}</b></div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** On a ballot: what the change would add to (or take from) the worst case. */
+function WorstDelta({ lines }: { lines: string[] }) {
+  const up = lines.some((l) => l.startsWith("+"));
+  return (
+    <div className={`preview ${up ? "preview-warn" : ""}`}>
+      <span className="field-label"><Icon name="alert" size={13} /> Worst case if it passes</span>
+      <ul className="worst-delta">{lines.map((l) => <li key={l} className={l.startsWith("+") ? "up" : "down"}>{l}</li>)}</ul>
+    </div>
+  );
+}
+
 function PreviewBox({ p, ctx }: { p: LooseningPreview; ctx: Ctx }) {
   const pol = ctx.s.policy!;
   const agentName = (id: string) => pol.agents.find((a) => a.id === id)?.name ?? id;
@@ -2273,104 +2436,56 @@ function PreviewBox({ p, ctx }: { p: LooseningPreview; ctx: Ctx }) {
   );
 }
 
-// ============================================================== Keys (sandbox credentials)
+// ============================================================== keys, asked for where they're used
 
 /** A short, stable Dharma rule id (bytes32: 32 chars max). */
 const ruleId = (prefix: string) => `${prefix}-${Date.now().toString(36)}`.slice(0, 32);
 
-function Keys({ ctx }: { ctx: Ctx }) {
-  const { s, run, busy } = ctx;
-  const sb = s.sandbox;
-  const [form, setForm] = useState({ name: "", envVar: "", value: "", host: "", llm: true, use: "agents" as "agents" | "drafter", provider: "groq" as "groq" | "gemini" });
-  const drafter = form.use === "drafter";
-  const PROVIDERS = { groq: { label: "Groq", env: "GROQ_API_KEY", where: "console.groq.com" }, gemini: { label: "Gemini", env: "GEMINI_API_KEY", where: "aistudio.google.com" } } as const;
-  const blank = { name: "", envVar: "", value: "", host: "", llm: true, use: form.use, provider: form.provider };
-  const [bind, setBind] = useState<Record<string, string>>({});
-  const proposing = (scope: string) =>
-    s.policy!.proposals.some((g) => (g.status === "open" || g.status === "queued") && g.change?.op === "AddRule" && g.change.scope === scope);
+const DRAFTER_PROVIDERS = {
+  groq: { label: "Groq", env: "GROQ_API_KEY", where: "console.groq.com" },
+  gemini: { label: "Gemini", env: "GEMINI_API_KEY", where: "aistudio.google.com" },
+} as const;
+const hasDrafterKey = (s: Snapshot) => s.sandbox.keys.some((k) => k.purpose === "drafter" || k.name === DRAFTER_KEY);
 
-  const add = (e: FormEvent) => {
-    e.preventDefault();
-    if (drafter) {
-      // A drafter key is used by Karuna itself to draft rules from English. Agents never get it,
-      // so there's nothing to bind and nothing to vote on.
-      const name = form.name.trim().toLowerCase() || `${form.provider}-drafter`;
-      run(async () => {
-        await api("/keys", { name, envVar: PROVIDERS[form.provider].env, value: form.value, purpose: "drafter", provider: form.provider });
-        setForm(blank);
-      }, `${PROVIDERS[form.provider].label} key stored for the rule drafter. Agents can't use it.`);
-      return;
-    }
-    const name = form.name.trim().toLowerCase();
-    const host = form.host.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "");
-    run(async () => {
-      await api("/keys", { name, envVar: form.envVar.trim(), value: form.value });
-      // Where the key may travel is policy: a Dharma rule, voted like any loosening.
-      await submitChange(ctx.me, s.org.dharma!.address as Address, { kind: Kind.Propose, change: { op: "AddRule", id: ruleId(`k-${name}`), outcome: "Allow", scope: `key:${name}`, target: host } });
-      if (form.llm) await submitChange(ctx.me, s.org.dharma!.address as Address, { kind: Kind.Propose, change: { op: "AddRule", id: ruleId(`p-${name}`), outcome: "Allow", scope: "http:POST", target: host } });
-      setForm(blank);
-    }, `Key stored. Proposed on Dharma: ${name} may be sent to ${host}${form.llm ? ", and POSTs there skip approval" : ""}`);
-  };
-
+/** In both drafters until a free Groq or Gemini key is saved. Karuna uses it itself; agents never get it. */
+function DrafterKeyField({ ctx }: { ctx: Ctx }) {
+  const { run, busy } = ctx;
+  const [provider, setProvider] = useState<keyof typeof DRAFTER_PROVIDERS>("groq");
+  const [value, setValue] = useState("");
+  if (hasDrafterKey(ctx.s)) return null;
+  const P = DRAFTER_PROVIDERS[provider];
   return (
-    <div className="card">
-      <div className="hd"><h2>Keys</h2><span className="sub">{sb.keys.length ? sb.keys.length : "agents only ever see a placeholder"}</span></div>
-      <form onSubmit={add}>
-        <div className="inline-form">
-          <label className="field"><span>Use for</span>
-            <select value={form.use} onChange={(e) => setForm({ ...form, use: e.target.value as "agents" | "drafter" })}>
-              <option value="agents">Agents</option>
-              <option value="drafter">Drafter</option>
-            </select>
-          </label>
-          {drafter ? (
-            <label className="field"><span>Provider</span>
-              <select value={form.provider} onChange={(e) => setForm({ ...form, provider: e.target.value as "groq" | "gemini" })}>
-                <option value="groq">Groq (free)</option>
-                <option value="gemini">Gemini (free)</option>
-              </select>
-            </label>
-          ) : <>
-            <label className="field"><span>Name</span><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="openai" pattern="[a-zA-Z0-9\-]{1,40}" /></label>
-            <label className="field"><span>Variable name</span><input required className="mono" value={form.envVar} onChange={(e) => setForm({ ...form, envVar: e.target.value.toUpperCase() })} placeholder="OPENAI_API_KEY" /></label>
-          </>}
-          <label className="field grow"><span>Key value</span><input required type="password" autoComplete="off" className="mono" value={form.value} onChange={(e) => setForm({ ...form, value: e.target.value })} placeholder={drafter ? `from ${PROVIDERS[form.provider].where}` : "sk-…"} /></label>
-          {drafter && <button className="btn btn-dark" disabled={busy}><Icon name="plus" /> Store</button>}
-        </div>
-        {!drafter && (
-          <div className="inline-form" style={{ paddingTop: 0 }}>
-            <label className="field grow"><span>Allowed service</span><input required className="mono" value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} placeholder="api.openai.com" /></label>
-            <label className="check"><input type="checkbox" checked={form.llm} onChange={(e) => setForm({ ...form, llm: e.target.checked })} /> <span>POSTs to it skip approval <small>(needed for LLM APIs)</small></span></label>
-            <button className="btn btn-dark" disabled={busy}><Icon name="plus" /> Store &amp; propose</button>
-          </div>
-        )}
-      </form>
-        {sb.keys.length > 0 && (
-          <div className="table">
-            {sb.keys.map((k) => (
-              <div className="tr key-tr" key={k.name}>
-                <span className="intro-mark"><Icon name="key" size={15} /></span>
-                <span className="b">{k.name}<div className="muted small mono">{k.purpose === "drafter" ? "used by Karuna, never by agents" : `${k.envVar}=${k.placeholder}`}</div></span>
-                <span className="pills">
-                  {k.boundTo.length ? k.boundTo.map((h) => <span className="tag" key={h}><Icon name="lock" size={11} /> {h}</span>)
-                    : k.purpose === "drafter" ? <span className="tag"><Icon name="lock" size={11} /> rule drafter · {k.provider === "gemini" ? "Gemini" : "Groq"}</span>
-                    : k.name === DRAFTER_KEY ? <span className="tag"><Icon name="lock" size={11} /> rule drafter · used by Karuna only</span>
-                    : proposing(`key:${k.name}`) ? <Badge v="approval">binding proposed</Badge> : <span className="badge badge-quiet">not bound · unusable</span>}
-                </span>
-                <span className="shield-actions">
-                  {!k.boundTo.length && k.purpose !== "drafter" && k.name !== DRAFTER_KEY && !proposing(`key:${k.name}`) && <>
-                    <input className="select-sm mono bind-input" aria-label={`Bind ${k.name} to a host`} placeholder="api.example.com" value={bind[k.name] ?? ""} onChange={(e) => setBind({ ...bind, [k.name]: e.target.value })} />
-                    <button className="btn btn-ghost btn-sm" disabled={busy || !bind[k.name]} onClick={() => ctx.change({ op: "AddRule", id: ruleId(`k-${k.name}`), outcome: "Allow", scope: `key:${k.name}`, target: bind[k.name].trim().toLowerCase() })}>Propose binding</button>
-                  </>}
-                  <button className="btn btn-deny btn-sm" disabled={busy} onClick={async () => (await askConfirm(`Delete key ${k.name}? Boxes using it start failing at once.`, { action: "Delete key", danger: true, icon: "key" })) && run(() => api(`/keys/${k.name}`, undefined, "DELETE"), "Key deleted")}>Delete</button>
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
+    <div className="key-ask">
+      <span className="small">Drafting needs a free key from <a className="link-u" href={`https://${P.where}`} target="_blank" rel="noreferrer">{P.where}</a>. Only Karuna uses it, never an agent.</span>
+      <div className="row-form">
+        <select className="select-sm" aria-label="Drafter provider" value={provider} onChange={(e) => setProvider(e.target.value as keyof typeof DRAFTER_PROVIDERS)}>
+          <option value="groq">Groq</option>
+          <option value="gemini">Gemini</option>
+        </select>
+        <input type="password" autoComplete="off" className="mono grow" aria-label="Drafter key" value={value} onChange={(e) => setValue(e.target.value)} placeholder="Paste the key" />
+        <button type="button" className="btn btn-dark btn-sm" disabled={busy || !value.trim()}
+          onClick={() => run(async () => { await api("/keys", { name: `${provider}-drafter`, envVar: P.env, value: value.trim(), purpose: "drafter", provider }); setValue(""); }, `${P.label} key saved for drafting`)}>
+          Save
+        </button>
+      </div>
     </div>
   );
 }
+
+/** A connector's sign-in key, sent only to that connector's address by Karuna itself. */
+function ConnectorKey({ name, ctx }: { name: string; ctx: Ctx }) {
+  const [open, setOpen] = useState(false);
+  const [value, setValue] = useState("");
+  if (!open) return <button type="button" className="link-btn small" onClick={() => setOpen(true)}>Add sign-in key</button>;
+  return (
+    <span className="row-form">
+      <input type="password" autoComplete="off" className="select-sm mono" aria-label={`Sign-in key for ${name}`} value={value} onChange={(e) => setValue(e.target.value)} placeholder="Sign-in key" />
+      <button type="button" className="btn btn-ghost btn-sm" disabled={ctx.busy || !value.trim()}
+        onClick={() => ctx.run(async () => { await api("/keys", { name, envVar: connectorEnv(name), value: value.trim() }); setOpen(false); }, `Sign-in key saved for ${name}`)}>Save</button>
+    </span>
+  );
+}
+const connectorEnv = (name: string) => `${name.toUpperCase().replace(/-/g, "_")}_CONNECTOR_KEY`;
 
 // ============================================================== appearance
 
@@ -2559,6 +2674,10 @@ function ScheduleFields({ value, onChange }: { value: Schedule; onChange: (s: Sc
   );
 }
 
+/** The key built agents run on (agents/hosted/run.ts reads its placeholder). */
+const CLAUDE_KEY = "anthropic";
+const CLAUDE_HOST = "api.anthropic.com";
+
 /** Describe a job; Karuna drafts the agent; members review and propose it; Karuna runs it. */
 function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
   const { s, run, busy, me } = ctx;
@@ -2567,6 +2686,9 @@ function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
   const [err, setErr] = useState("");
   const [d, setD] = useState<AgentDraftView | null>(null);
   const [keep, setKeep] = useState<Record<number, boolean>>({});
+  const [claude, setClaude] = useState("");
+  const claudeKey = s.sandbox.keys.find((k) => k.name === CLAUDE_KEY);
+  const open = (scope: string) => s.policy!.proposals.some((g) => (g.status === "open" || g.status === "queued") && g.change?.op === "AddRule" && g.change.scope === scope);
   const draft = async () => {
     setDrafting(true);
     setErr("");
@@ -2584,12 +2706,19 @@ function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
     run(async () => {
       if (!d) return;
       const dharma = s.org.dharma!.address as Address;
+      if (!claudeKey) await api("/keys", { name: CLAUDE_KEY, envVar: "ANTHROPIC_API_KEY", value: claude.trim() });
       const { id } = await api<{ id: string }>("/agents/build", { name: d.name, instructions: d.instructions, schedule: d.schedule });
       await submitChange(me, dharma, { kind: Kind.Propose, change: { op: "SetAgent", id, capUsd: 0 }, label: d.name });
       // Its limits apply to it alone.
       for (const [i, r] of d.rules.entries()) if (keep[i]) await submitChange(me, dharma, { kind: Kind.Propose, change: { ...r.change, agent: id } });
+      // The Claude key it runs on: the key may only go to Anthropic, and this agent may call it.
+      if (!claudeKey?.boundTo.includes(CLAUDE_HOST) && !open(`key:${CLAUDE_KEY}`)) {
+        await submitChange(me, dharma, { kind: Kind.Propose, change: { op: "AddRule", id: ruleId(`k-${CLAUDE_KEY}`), outcome: "Allow", scope: `key:${CLAUDE_KEY}`, target: CLAUDE_HOST } });
+      }
+      await submitChange(me, dharma, { kind: Kind.Propose, change: { op: "AddRule", id: ruleId(`m-${id}`), outcome: "Allow", agent: id, scope: "http:POST", target: CLAUDE_HOST } });
       setD(null);
       setJob("");
+      setClaude("");
     }, `Proposed. Karuna runs it once the vote passes (${s.policy!.timelock}s), starting at Level 0`);
   return (
     <div className="card new-agent">
@@ -2597,6 +2726,7 @@ function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
       <div className="pad stack-sm">
         {!d ? (
           <>
+            <DrafterKeyField ctx={ctx} />
             <textarea aria-label="Describe the job" rows={3} value={job} onChange={(e) => setJob(e.target.value)} placeholder="e.g. Every morning, check grain prices; if flour is under $35, order from Valley Flour, up to $50 a week." />
             {err && <p className="err-text">{err}</p>}
             <div className="row-form"><button className="btn btn-dark" disabled={drafting || job.trim().length < 10} onClick={draft}>{drafting ? <span className="shimmer">Drafting…</span> : "Draft the agent"}</button></div>
@@ -2616,10 +2746,16 @@ function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
               </div>
             )}
             {(d.note || d.rulesNote) && <p className="muted small">{[d.note, d.rulesNote].filter(Boolean).join(" ")}</p>}
+            {!claudeKey && (
+              <label className="field"><span>Claude key (voted with it)</span>
+                <input type="password" autoComplete="off" className="mono" value={claude} onChange={(e) => setClaude(e.target.value)} placeholder="sk-ant-… from console.anthropic.com" />
+                <small className="muted">The agent only sees a placeholder. Karuna swaps in the key on requests to {CLAUDE_HOST} and nowhere else.</small>
+              </label>
+            )}
             <p className="muted small">It starts at Level 0: small payments only, everything else waits for a member until it earns more.</p>
             <div className="row-form">
               <button className="btn btn-ghost" onClick={() => setD(null)}>Back</button>
-              <button className="btn btn-dark" disabled={busy || !d.name.trim() || !d.instructions.trim()} onClick={propose}><Icon name="pen" size={14} /> Propose agent</button>
+              <button className="btn btn-dark" disabled={busy || !d.name.trim() || !d.instructions.trim() || (!claudeKey && !claude.trim())} onClick={propose}><Icon name="pen" size={14} /> Propose agent</button>
             </div>
           </>
         )}
@@ -2681,7 +2817,7 @@ function RunsPanel({ ctx, agentId, onClose }: { ctx: Ctx; agentId: string; onClo
             {runs.map((r) => (
               <button key={r.id} className={`run-item ${open === r.id ? "on" : ""}`} onClick={() => setOpen(r.id)}>
                 <span className={`run-dot ${r.status}`} />
-                <span><b>{r.trigger}</b><small>{ago(r.startedAt)} · {r.actions} action{r.actions === 1 ? "" : "s"}{r.waiting ? ` · ${r.waiting} waiting` : ""}</small></span>
+                <span><b>{r.trigger}</b><small>{ago(r.startedAt)} · {r.actions} action{r.actions === 1 ? "" : "s"}{r.waiting ? ` · ${r.waiting} waiting` : ""}{r.changes ? ` · ${r.changes} file${r.changes === 1 ? "" : "s"} changed${r.undone ? `, ${r.undone} undone` : ""}` : ""}</small></span>
               </button>
             ))}
           </div>
@@ -2728,6 +2864,7 @@ function RunTimeline({ ctx, id }: { ctx: Ctx; id: string }) {
         </span>
       </div>
       {!r.reasoningVisible && <p className="notice small">This agent's reasoning isn't visible; only its actions are.</p>}
+      {(r.fileChanges ?? []).length > 0 && <RunFiles ctx={ctx} r={r} live={live} />}
       {steps.length === 0 && <p className="muted small pad">{live ? <span className="shimmer">Starting…</span> : "Nothing recorded."}</p>}
       <ol className="steps">
         {steps.map((st, i) => (
@@ -2769,29 +2906,70 @@ function RunTimeline({ ctx, id }: { ctx: Ctx; id: string }) {
   );
 }
 
+/** What a run changed in writable folders, as diffs, with Undo for the run or one file. */
+function RunFiles({ ctx, r, live }: { ctx: Ctx; r: RunDetail; live: boolean }) {
+  const { run, busy } = ctx;
+  const files = r.fileChanges ?? [];
+  const left = files.filter((f) => !f.undoneAt).length;
+  const KIND = { added: "added", modified: "changed", deleted: "deleted" } as const;
+  const undo = async (f?: RunFileChange) => {
+    const what = f ? `Put ${f.path} back the way it was before this run?` : `Put all ${left} file${left === 1 ? "" : "s"} back the way they were before this run?`;
+    if (!(await askConfirm(`${what} Files the run added are removed.`, { action: f ? "Undo this change" : "Undo this run", danger: true }))) return;
+    run(() => api(`/runs/${r.id}/undo`, f ? { mount: f.mount, path: f.path } : {}), f ? `Undid ${f.path}` : "Undid this run's file changes");
+  };
+  return (
+    <div className="run-files">
+      <div className="run-files-hd">
+        <span className="field-label">Files changed · {files.length}{left < files.length ? ` · ${files.length - left} undone` : ""}</span>
+        {left > 0 && <button className="btn btn-deny btn-sm" disabled={busy || live} title={live ? "Stop the run first" : undefined} onClick={() => undo()}>Undo this run</button>}
+      </div>
+      {files.map((f) => (
+        <details key={`${f.mount}/${f.path}`} className={`run-file ${f.undoneAt ? "undone" : ""}`}>
+          <summary>
+            <span className={`file-kind ${f.kind}`}>{KIND[f.kind]}</span>
+            <span className="mono small grow" title={f.mount}>{f.path}</span>
+            {f.undoneAt ? <span className="muted small">undone</span> : (
+              <button className="link-btn small" disabled={busy || live} onClick={(e) => { e.preventDefault(); undo(f); }}>Undo this change</button>
+            )}
+          </summary>
+          {f.binary ? <p className="muted small">Binary file; no diff shown.</p> : f.diff ? (
+            <pre className="snippet diff">{f.diff.split("\n").map((l, i) => <span key={i} className={l.startsWith("+") && !l.startsWith("+++") ? "add" : l.startsWith("-") && !l.startsWith("---") ? "del" : ""}>{l || " "}</span>)}</pre>
+          ) : <p className="muted small">No diff kept.</p>}
+        </details>
+      ))}
+    </div>
+  );
+}
+
 // ============================================================== connectors (chat apps' tools, through Karuna)
 
 /** The team's connectors: other MCP servers whose tools chat apps reach only through Karuna. */
 function Connectors({ ctx }: { ctx: Ctx }) {
   const { s, busy, run } = ctx;
   const list = s.connectors ?? [];
-  const [form, setForm] = useState({ name: "", url: "" });
+  const [form, setForm] = useState({ name: "", url: "", key: "" });
   const name = form.name.trim().toLowerCase();
   const ok = /^[a-z0-9-]{2,24}$/.test(name) && /^https:\/\/\S+$/.test(form.url.trim());
   const rule = (n: string) => s.policy!.rules.find((r) => r.active && r.scope === `connector:${n}`);
   return (
     <div className="card">
       <div className="hd"><h2>Connectors</h2><span className="sub">chat apps reach these tools only through Karuna</span></div>
-      <form className="inline-form" onSubmit={(e) => { e.preventDefault(); ctx.change({ op: "AddRule", id: `conn-${name}`.slice(0, 31), outcome: "Allow", scope: `connector:${name}`, target: form.url.trim() }).then((done) => done && setForm({ name: "", url: "" })); }}>
+      <form className="inline-form" onSubmit={(e) => {
+        e.preventDefault();
+        (form.key.trim() ? run(() => api("/keys", { name, envVar: connectorEnv(name), value: form.key.trim() }), `Sign-in key saved for ${name}`) : Promise.resolve(true))
+          .then((ok) => ok && ctx.change({ op: "AddRule", id: `conn-${name}`.slice(0, 31), outcome: "Allow", scope: `connector:${name}`, target: form.url.trim() }))
+          .then((done) => done && setForm({ name: "", url: "", key: "" }));
+      }}>
         <label className="field"><span>Name</span><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. github" /></label>
         <label className="field grow"><span>Address (MCP, https)</span><input required className="mono" value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} placeholder="https://api.example.com/mcp" /></label>
+        <label className="field"><span>Sign-in key (optional)</span><input type="password" autoComplete="off" className="mono" value={form.key} onChange={(e) => setForm({ ...form, key: e.target.value })} placeholder="if it needs one" /></label>
         <button className="btn btn-dark" type="submit" disabled={busy || !ok}><Icon name="plus" /> Propose connector</button>
       </form>
       {list.map((c) => (
         <div className="resolved connector" key={c.name}>
           <div className="res">
             {c.error ? <Badge v="deny">unreachable</Badge> : <span className="intro-mark"><Icon name="plug" size={15} /></span>}
-            <span className="small"><b>{c.name}</b> <span className="mono muted">{c.url}</span>{c.error && <span className="muted"> · {c.error}</span>}{!c.hasKey && <span className="muted"> · no key (add one named {c.name} if it needs sign-in)</span>}</span>
+            <span className="small"><b>{c.name}</b> <span className="mono muted">{c.url}</span>{c.error && <span className="muted"> · {c.error}</span>}{!c.hasKey && <> · <ConnectorKey name={c.name} ctx={ctx} /></>}</span>
             {rule(c.name) ? <button className="btn btn-ghost btn-sm" disabled={busy} onClick={async () => (await askConfirm(`Remove the ${c.name} connector? Chat apps lose its tools.`, { action: "Remove connector", danger: true, icon: "plug" })) && ctx.change({ op: "RemoveRule", id: rule(c.name)!.id })}>Remove</button> : <span />}
           </div>
           {c.tools.map((t) => (

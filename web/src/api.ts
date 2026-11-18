@@ -25,6 +25,11 @@ export interface Proposal {
   resolvedAt?: string;
   txRef?: string;
   error?: string;
+  /** A large payment held in the org's Escrow: any member can cancel it before it releases. */
+  escrow?: {
+    address: string; status: "opening" | "held" | "released" | "cancelled"; holdId?: string; releaseAt: string;
+    openTx?: string; releaseTx?: string; cancelTx?: string; cancelledBy?: string; blocked?: string;
+  };
 }
 
 export interface OnchainRule {
@@ -48,6 +53,30 @@ export interface Governance {
   voters: string[];
   change: Record<string, unknown> & { op: string };
   preview: LooseningPreview | null;
+  /** What it would change about the worst case (engine exposureDelta): "+ $15.00/day", ... */
+  exposureDelta?: string[] | null;
+}
+
+/** If an agent were hijacked now: what it could do with no member (engine/src/exposure.ts). */
+export interface AgentExposure {
+  agentId: string;
+  perPaymentUsd: number | null; // null = no limit
+  dailyUsd: number | null;
+  writeSites: string[]; // "*" = any site
+  keys: string[];
+  fileWrites: "none" | "workspace" | "anywhere";
+  writePaths: string[];
+  packageInstalls: boolean;
+  messages: boolean;
+  tools: "none" | "non-destructive" | "all";
+  toolNames: string[];
+}
+export interface Exposure {
+  frozen: boolean;
+  dailyUsd: number | null; // capped by the wallet when its balance is known
+  perPaymentUsd: number | null;
+  agents: AgentExposure[];
+  walletUsd: number | null;
 }
 
 /** Preview Before Loosening: the last 7 days of requests replayed under the proposed rules. */
@@ -84,6 +113,13 @@ export interface RunSummary {
   id: string; agentId: string; agentName: string; trigger: string; startedAt: string; endedAt: string | null;
   status: "starting" | "running" | "done" | "failed" | "stopped"; built: boolean; host: string | null;
   steps: number; actions: number; models: string[]; reasoningVisible: boolean; waiting: number;
+  /** Files it changed in writable folders, and how many of those were undone. */
+  changes?: number; undone?: number;
+}
+
+/** A file a run changed in a writable folder (snapshotted first, so it can be undone). */
+export interface RunFileChange {
+  mount: string; path: string; kind: "added" | "modified" | "deleted"; diff: string | null; binary: boolean; undoneAt?: string;
 }
 
 export interface ModelExchange {
@@ -97,7 +133,7 @@ export type RunStep =
   | { at: string; kind: "action"; summary: string; outcome: "allowed" | "denied" | "waiting"; ruleId?: string; reason?: string; proposalId?: string; now?: string }
   | { at: string; kind: "note"; text: string };
 
-export type RunDetail = Omit<RunSummary, "steps"> & { steps: RunStep[] };
+export type RunDetail = Omit<RunSummary, "steps" | "changes"> & { steps: RunStep[]; changes?: number; fileChanges?: RunFileChange[] };
 
 export interface AgentDraftView {
   name: string; instructions: string; schedule: Schedule; limits: string; note: string; model: string;
@@ -127,11 +163,14 @@ export interface WatchdogEvent {
 
 export interface Snapshot {
   setUp: boolean;
+  /** The worst case if every agent were hijacked now. */
+  exposure?: Exposure | null;
   deploying: boolean;
   org: {
     name: string;
     wallet: { address: string; chain: string } | null;
     dharma: { address: string; chainId: number; deployedAt: string; txRef: string; explorer: string } | null;
+    escrow?: { address: string; opener: string; deployedAt: string; txRef: string; explorer: string } | null;
   };
   policy: null | {
     loaded: true;

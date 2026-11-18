@@ -9,14 +9,15 @@ import { EventEmitter } from "node:events";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { keccak256, stringToHex, verifyTypedData, zeroAddress, type Address, type Hex, type PublicClient } from "viem";
 import {
-  SignedLog, buildContext, buildRuleset, evaluate, httpTargetMatches, matchCustomRules, messageLevelDecision, LEVEL_GRANTS,
-  type Decision, type LogEntry, type LogEvent, type PolicyContext, type Request,
+  SignedLog, buildContext, buildRuleset, evaluate, exposure, exposureDelta, httpTargetMatches, matchCustomRules, messageLevelDecision, LEVEL_GRANTS,
+  type Decision, type Exposure, type LogEntry, type LogEvent, type PolicyContext, type Request,
 } from "@prekaruna/engine";
 import {
   DHARMA_ABI, Kind, LEVEL_UP_STREAK, actionTypedData, decodeChange, describeChange, encodeChange, levelLabel, levelUpEligibility, opName,
-  paymentDecisionTypedData, toBytes32, toMicro,
+  escrowCancelTypedData, escrowRef, paymentDecisionTypedData, toBytes32, toMicro, waitText,
   type AgentRecord, type Change,
 } from "@prekaruna/dharma";
+import type { EscrowBackend } from "./escrow.ts";
 import {
   type Invite, ConfigError, DEFAULT_ALLOWLISTED_DOMAINS, EXPLORER, USDC_TOKEN, WALLET_CHAIN, emptyOrg, isSetUp,
   requireAddress, requireText, slugId, type OrgFile,
@@ -29,7 +30,7 @@ import {
   TEMPLATES, assertShieldSafe, autoRule, isAutoRule, makeTest, tracesTo,
   type InboxMessage, type ShieldTest, type TestTemplate,
 } from "./shield.ts";
-import { band, bandLabel, learnedDenyRule, previewLoosening, suggestions, isLoosening, type PastRequest, type Precedent, type Preview } from "./learn.ts";
+import { applyChange, band, bandLabel, learnedDenyRule, previewLoosening, suggestions, isLoosening, type PastRequest, type Precedent, type Preview } from "./learn.ts";
 import { PivotTracker, findCredential, findTrap, mintTraps, targetOf, trapEnvFile, trapLeakMessage, type TrapSet } from "./swarm.ts";
 import { SecretStore } from "./secrets.ts";
 import { DRAFT_KEYS, NoDrafterError, draftRules, freshIds, type DraftResult } from "./draft.ts";
@@ -84,6 +85,21 @@ export interface Proposal {
   result?: unknown; // returned to the agent on success
   txRef?: string;
   error?: string; // human-facing only
+  /** A large payment held in the org's Escrow: any member can cancel it before it releases. */
+  escrow?: EscrowHoldView;
+}
+
+export interface EscrowHoldView {
+  address: string; // the org's Escrow
+  status: "opening" | "held" | "released" | "cancelled";
+  holdId?: string; // the Escrow's hold id (decimal)
+  releaseAt: string;
+  openTx?: string;
+  releaseTx?: string;
+  cancelTx?: string;
+  cancelledBy?: string;
+  /** Why the Gatekeeper couldn't release it yet (frozen, payee removed): it waits for a member. */
+  blocked?: string;
 }
 
 /** The only shape an agent ever sees. No reasons, ever (CLAUDE.md §2 rule 7). */
@@ -214,6 +230,10 @@ export interface GatekeeperDeps {
   chatUrl?: string; // the public address chat apps reach Karuna at (a tunnel to the public port)
   /** Starts a built agent's sandbox run (`karuna run` with the hosted runner). Returns a stop function. */
   launcher?: (run: { agentId: string; token: string; runId: string; onOutput: (line: string) => void; onExit: (code: number) => void }) => () => void;
+  /** Escrow for large payments (the relayer key opens and releases holds). None: escrow rules make such payments fail. */
+  escrow?: EscrowBackend;
+  /** Undoes a run's file changes from its snapshot on this machine (`karuna undo`). PATH = one file's host path. */
+  undo?: (run: { runId: string; path?: string }) => Promise<{ restored: { mount: string; path: string }[]; skipped: { mount: string; path: string; reason: string }[]; error?: string }>;
 }
 
 /** One `karuna run`: an agent in a box, reachable only through the egress proxy. */
@@ -273,7 +293,25 @@ export interface Run {
   exitCode?: number;
   host?: string | null;
   isolation?: string;
+  /** Files the run changed in writable mounts (the runner snapshots them first, so they can be undone). */
+  changes?: RunFileChange[];
 }
+
+export interface RunFileChange {
+  mount: string; // host folder
+  path: string; // relative to it, "/"-separated
+  kind: "added" | "modified" | "deleted";
+  diff: string | null;
+  binary: boolean;
+  undoneAt?: string;
+}
+const MAX_RUN_CHANGES = 500;
+const MAX_DIFF_CHARS = 20_000;
+/** A run's file on the host: its mount folder plus the "/"-separated path inside it. */
+const joinHost = (mount: string, rel: string) => {
+  const sep = mount.includes("\\") ? "\\" : "/";
+  return `${mount.replace(/[\\/]+$/, "")}${sep}${rel.split("/").join(sep)}`;
+};
 
 export type RunStep =
   | { at: string; kind: "model"; exchange: ModelExchange; status: number }
@@ -345,6 +383,7 @@ function runSummary(r: Run, agentName: string) {
   return {
     id: r.id, agentId: r.agentId, agentName, trigger: r.trigger, startedAt: r.startedAt, endedAt: r.endedAt ?? null, status: r.status,
     built: r.built, host: r.host ?? null, steps: r.steps.length, actions, models,
+    changes: (r.changes ?? []).length, undone: (r.changes ?? []).filter((c) => c.undoneAt).length,
     reasoningVisible: modelSteps > 0 || actions === 0,
     waiting: r.steps.filter((s) => s.kind === "action" && s.outcome === "waiting").length,
   };
@@ -491,7 +530,7 @@ export class Gatekeeper extends EventEmitter {
 
   private addSpend(agentId: string, amount: number) {
     const day = (this.state.spend[this.today()] ??= {});
-    day[agentId] = Math.round(((day[agentId] ?? 0) + amount) * 1e6) / 1e6;
+    day[agentId] = Math.max(0, Math.round(((day[agentId] ?? 0) + amount) * 1e6) / 1e6);
   }
 
   // ------------------------------------------------ Dharma plumbing
@@ -573,6 +612,99 @@ export class Gatekeeper extends EventEmitter {
     this.shieldHousekeeping();
     this.scheduleBuiltAgents();
     this.watchConnectors();
+    await this.releaseDueEscrows();
+  }
+
+  // ================================================================ escrow (undo for large payments)
+
+  /** The escrow setting for this agent's payment, or null: the strictest active `escrow` rule that applies. */
+  escrowFor(agentId: string, amountUsd: number): { thresholdUsd: number; waitSeconds: number } | null {
+    const rules = (this.policy?.rules ?? []).filter((r) => r.active && !r.builtin && r.scope === "escrow" && (!r.agent || r.agent === agentId));
+    if (!rules.length) return null;
+    const thresholdUsd = Math.min(...rules.map((r) => r.maxUsd));
+    const waitSeconds = Math.max(...rules.map((r) => Number(r.target) || 0));
+    return amountUsd >= thresholdUsd && waitSeconds > 0 ? { thresholdUsd, waitSeconds } : null;
+  }
+
+  /** The org's Escrow, deployed by the relayer the first time a payment needs it. */
+  private escrowDeploying: Promise<string> | null = null;
+  private async ensureEscrow(): Promise<string> {
+    if (this.org.escrow) return this.org.escrow.address;
+    if (!this.deps.escrow) throw new GatekeeperError("Escrow is on for this payment, but this Karuna has no relayer key (KARUNA_RELAYER_KEY) to hold it. Nothing was paid.", 503);
+    this.escrowDeploying ??= (async () => {
+      const d = await this.deps.escrow!.deploy({ dharma: this.dharmaAddress(), refundTo: this.org.wallet!.address as Address });
+      this.org.escrow = { address: lower(d.address), opener: lower(this.deps.escrow!.opener), deployedAt: this.now().toISOString(), txRef: d.txRef };
+      this.logEvent({ type: "escrow-deployed", escrow: this.org.escrow.address, opener: this.org.escrow.opener, txRef: d.txRef });
+      this.save();
+      return this.org.escrow.address;
+    })().finally(() => (this.escrowDeploying = null));
+    return this.escrowDeploying;
+  }
+
+  private releasing = false;
+  /** Release every hold whose window has passed (anyone may; the Gatekeeper does it promptly). */
+  async releaseDueEscrows() {
+    if (this.releasing || !this.deps.escrow) return;
+    const now = this.now().getTime();
+    const due = this.state.proposals.filter((p) => p.escrow?.status === "held" && p.escrow.holdId && Date.parse(p.escrow.releaseAt) <= now);
+    if (!due.length) return;
+    this.releasing = true;
+    try {
+      for (const p of due) {
+        const e = p.escrow!;
+        try {
+          const r = await this.deps.escrow.release(e.address as Address, BigInt(e.holdId!));
+          e.status = "released";
+          e.releaseTx = r.txRef;
+          delete e.blocked;
+          this.logEvent({ type: "escrow-released", proposalId: p.id, holdId: e.holdId, txRef: r.txRef });
+        } catch (err) {
+          const reason = err instanceof ChainError ? err.reason : undefined;
+          const blocked = reason === "Frozen" ? "Agents are frozen; it releases once they're unfrozen, or a member can cancel it."
+            : reason === "NotPayee" ? "The payee was removed; a member should cancel it."
+            : reason === "NotHeld" ? null
+            : `Couldn't release yet: ${scrub(err)}`;
+          if (blocked === null) e.status = "released"; // settled already (released by someone else)
+          else if (e.blocked !== blocked) {
+            e.blocked = blocked;
+            this.logEvent({ type: "escrow-release-blocked", proposalId: p.id, holdId: e.holdId, detail: blocked });
+          }
+        }
+      }
+      this.save();
+    } finally {
+      this.releasing = false;
+    }
+  }
+
+  /** A member cancels a held payment (signed; the Escrow checks the signer is a member). The USDC returns to the org's wallet. */
+  async cancelEscrow(paymentId: string, input: { signer?: unknown; signature?: unknown }) {
+    const p = this.state.proposals.find((x) => x.id === paymentId);
+    const e = p?.escrow;
+    if (!p || !e) throw new GatekeeperError("That payment isn't in escrow", 404);
+    if (e.status !== "held" || !e.holdId) throw new GatekeeperError(e.status === "opening" ? "It's still being placed in escrow; try again in a moment" : `It was already ${e.status}`, 409);
+    if (!this.deps.escrow) throw new GatekeeperError("This Karuna has no relayer key to send the cancel", 503);
+    const signer = requireAddress(input.signer, "signer");
+    if (!this.isMember(signer)) throw new GatekeeperError("This key is not a Dharma member", 403);
+    const signature = String(input.signature ?? "") as Hex;
+    const typed = escrowCancelTypedData(e.address as Address, this.requireReady().chainId, { id: BigInt(e.holdId) });
+    if (!(await verifyTypedData({ address: signer as Address, ...typed, signature }))) throw new GatekeeperError("Signature does not match this cancel", 401);
+    try {
+      const r = await this.deps.escrow.cancel(e.address as Address, BigInt(e.holdId), signature);
+      e.status = "cancelled";
+      e.cancelTx = r.txRef;
+      e.cancelledBy = lower(signer);
+      delete e.blocked;
+    } catch (err) {
+      if (err instanceof ChainError && err.reason === "NotHeld") throw new GatekeeperError("Too late: it was already released or cancelled", 409);
+      throw new GatekeeperError(`Cancel failed: ${scrub(err)}`, 502);
+    }
+    const pay = p.payload!;
+    this.addSpend(p.agentId, -pay.amountUsd); // the money came back
+    this.logEvent({ type: "escrow-cancelled", proposalId: p.id, holdId: e.holdId, by: lower(signer), amountUsd: pay.amountUsd, txRef: e.cancelTx });
+    this.emit("notice", { kind: "escrow", agent: p.agentId, tone: "good", summary: `Cancelled ${usd(pay.amountUsd)} in escrow; it's back in the wallet` });
+    this.save();
+    return { status: "cancelled" as const, txRef: e.cancelTx };
   }
 
   private connectorsCheckedAt = 0;
@@ -1217,6 +1349,7 @@ export class Gatekeeper extends EventEmitter {
       const amountUsd = Number(action.amountUsd);
       if (!Number.isFinite(amountUsd) || amountUsd <= 0) throw new Error("amountUsd must be > 0");
       const rec = payee(to);
+      const held = this.escrowFor(agentId, amountUsd);
       const payload: PaymentPayload = { kind: "transfer", from, chain: WALLET_CHAIN, to, amountUsd, token: USDC_TOKEN };
       return {
         payload,
@@ -1228,7 +1361,9 @@ export class Gatekeeper extends EventEmitter {
           ...(rec ? [{ label: "Category", value: rec.category }] : []),
           { label: "Amount", value: `${usd(amountUsd)} USDC` },
           { label: "Network", value: "Arc testnet" },
-          { label: "Reversible", value: "No", tone: "warn" },
+          held
+            ? { label: "Reversible", value: `Held in escrow for ${waitText(held.waitSeconds)}; any member can cancel before release` }
+            : { label: "Reversible", value: "No", tone: "warn" },
         ],
       };
     }
@@ -1268,6 +1403,19 @@ export class Gatekeeper extends EventEmitter {
         const r = await this.deps.wallet.payX402(pay.from, pay.url, pay.method, pay.body, pay.amountUsd, p.id);
         p.result = r.response;
         p.txRef = r.transaction;
+      } else if (this.escrowFor(p.agentId, pay.amountUsd)) {
+        const e = this.escrowFor(p.agentId, pay.amountUsd)!;
+        const escrow = await this.ensureEscrow();
+        const releaseAt = Math.floor(this.now().getTime() / 1000) + e.waitSeconds;
+        // Marked before the USDC moves, so the watchdog knows the transfer into the Escrow is ours.
+        p.escrow = { address: escrow, status: "opening", releaseAt: new Date(releaseAt * 1000).toISOString() };
+        this.save();
+        const r = await this.deps.wallet.transfer(pay.from, escrow, pay.amountUsd, p.id);
+        p.txRef = r.txRef;
+        const h = await this.deps.escrow!.open(escrow as Address, { payee: pay.to as Address, amountUsd: pay.amountUsd, releaseAt, ref: escrowRef(p.id) });
+        p.escrow = { ...p.escrow, status: "held", holdId: h.id.toString(), openTx: h.txRef };
+        p.result = { sent: pay.amountUsd, to: pay.to, txRef: r.txRef, escrowedUntil: p.escrow.releaseAt };
+        this.logEvent({ type: "escrowed", proposalId: p.id, escrow, holdId: p.escrow.holdId, releaseAt: p.escrow.releaseAt, amountUsd: pay.amountUsd, txRef: h.txRef });
       } else {
         const r = await this.deps.wallet.transfer(pay.from, pay.to, pay.amountUsd, p.id);
         p.result = { sent: pay.amountUsd, to: pay.to, txRef: r.txRef };
@@ -1852,7 +2000,7 @@ export class Gatekeeper extends EventEmitter {
       : this.state.proposals.find((p) =>
           !!p.payload && !claimed.has(p.id) && (p.status === "executing" || p.status === "executed") &&
           Math.round(p.payload.amountUsd * 1e6) === micro &&
-          lower(p.payload.kind === "transfer" ? p.payload.to : p.payload.seller) === to);
+          (lower(p.payload.kind === "transfer" ? p.payload.to : p.payload.seller) === to || (!!p.escrow && lower(p.escrow.address) === to)));
     if (to === GATEWAY_WALLET) ev.verdict = "gateway-deposit";
     else if (match) {
       ev.verdict = "matched";
@@ -2391,7 +2539,68 @@ export class Gatekeeper extends EventEmitter {
       const p = this.state.proposals.find((x) => x.id === st.proposalId);
       return p ? { ...st, now: p.status } : st;
     });
-    return { ...runSummary(r, this.labels().agent(r.agentId) ?? r.agentId), steps };
+    return { ...runSummary(r, this.labels().agent(r.agentId) ?? r.agentId), steps, fileChanges: r.changes ?? [] };
+  }
+
+  /**
+   * The runner's report of what a run changed in its writable mounts. From the run's own session,
+   * or (after the box exited) from the agent's token for one of its own runs.
+   */
+  recordRunChanges(auth: { token: string } | { agentId: string }, body: { runId?: unknown; changes?: unknown }) {
+    const run = "token" in auth
+      ? this.runOf(auth.token)
+      : (this.state.runs ?? []).find((r) => r.id === body.runId && r.agentId === auth.agentId) ?? null;
+    if (!run) throw new GatekeeperError("No such run", 404);
+    if (!Array.isArray(body.changes)) throw new GatekeeperError("changes must be a list", 400);
+    const KINDS = ["added", "modified", "deleted"];
+    run.changes = (body.changes as Record<string, unknown>[]).slice(0, MAX_RUN_CHANGES).flatMap((c) => {
+      if (!c || typeof c.mount !== "string" || typeof c.path !== "string" || !KINDS.includes(c.kind as string)) return [];
+      if (c.path.split("/").includes("..")) return [];
+      const diff = typeof c.diff === "string" ? (c.diff.length > MAX_DIFF_CHARS ? `${c.diff.slice(0, MAX_DIFF_CHARS)}\n… (cut)` : c.diff) : null;
+      return [{ mount: c.mount.slice(0, 500), path: c.path.slice(0, 500), kind: c.kind as RunFileChange["kind"], diff, binary: c.binary === true }];
+    });
+    if (run.changes.length) {
+      const n = run.changes.length;
+      this.addStep(run, { at: this.now().toISOString(), kind: "note", text: `Karuna: ${n} file${n === 1 ? "" : "s"} changed in writable folders (snapshot kept, can be undone)` });
+    }
+    this.save();
+    return { ok: true, changes: run.changes.length };
+  }
+
+  /** Console: put a run's files back (all of them, or one), from the snapshot on the runner's machine. */
+  async undoRunChanges(id: string, input: { mount?: unknown; path?: unknown } = {}) {
+    const run = (this.state.runs ?? []).find((x) => x.id === id);
+    if (!run) throw new GatekeeperError("No such run", 404);
+    if (run.status === "running" || run.status === "starting") throw new GatekeeperError("Stop the run before undoing its changes", 409);
+    const all = run.changes ?? [];
+    const one = typeof input.path === "string" ? all.find((c) => c.path === input.path && (input.mount === undefined || c.mount === input.mount)) : undefined;
+    if (typeof input.path === "string" && !one) throw new GatekeeperError("That file isn't one of this run's changes", 404);
+    if (one ? one.undoneAt : !all.some((c) => !c.undoneAt)) throw new GatekeeperError("Already undone", 409);
+    const hostPath = one ? joinHost(one.mount, one.path) : undefined;
+    const command = `pnpm karuna undo --run ${id}${hostPath ? ` --path "${hostPath}"` : ""}`;
+    if (!this.deps.undo) throw new GatekeeperError(`Undo runs on the machine that ran it. There, run: ${command}`, 501);
+    const r = await this.deps.undo({ runId: id, ...(hostPath ? { path: hostPath } : {}) });
+    const at = this.now().toISOString();
+    const find = (x: { mount: string; path: string }) => all.find((c) => c.path === x.path && c.mount === x.mount) ?? all.find((c) => c.path === x.path);
+    for (const x of r.restored) {
+      const c = find(x);
+      if (c) c.undoneAt = at;
+    }
+    for (const x of r.skipped) {
+      const c = x.reason === "already undone" ? find(x) : undefined;
+      if (c) c.undoneAt ??= at;
+    }
+    if (r.restored.length) {
+      const names = r.restored.map((x) => x.path);
+      this.addStep(run, { at, kind: "note", text: `Karuna: undid ${names.length} file change${names.length === 1 ? "" : "s"} (${names.slice(0, 5).join(", ")}${names.length > 5 ? ", …" : ""})` });
+      this.logEvent({ type: "run-undone", agent: run.agentId, run: id, files: names.slice(0, 50) });
+    }
+    this.save();
+    const failed = r.skipped.filter((x) => x.reason !== "already undone");
+    if (!r.restored.length && (r.error || failed.length)) {
+      throw new GatekeeperError(`${r.error ?? failed.map((x) => `${x.path}: ${x.reason}`).join("; ")}. On the machine that ran it: ${command}`, 409);
+    }
+    return { restored: r.restored, skipped: r.skipped };
   }
 
   /** Console: stop a run now (its box stops on the next heartbeat; its network is cut at once). */
@@ -2646,6 +2855,44 @@ export class Gatekeeper extends EventEmitter {
     return this.state.proposals.map((p) => ({ proposalId: p.id, at: p.createdAt, request: p.request, decision: p.decision, flagged: FLAGS[p.decision.ruleId] ?? null }));
   }
 
+  /** Last USDC balance read for the org's wallet (the /wallet route refreshes it); caps the worst case. */
+  walletUsd: number | null = null;
+
+  /** If every agent were hijacked now: what it could do with no human (engine/src/exposure.ts). */
+  exposureOf(pol: Pick<OnchainPolicy, "agents" | "payees" | "domains" | "levelLimits" | "rules">): Exposure {
+    return exposure({
+      agents: pol.agents.map((a) => ({ id: a.id, dailyAllowanceUsd: a.capUsd, level: a.level })),
+      recipients: pol.payees.map((p) => ({ address: p.account, name: this.org.labels.payees[lower(p.account)] ?? p.account, category: p.category })),
+      allowlistedDomains: pol.domains,
+      levelLimits: pol.levelLimits ?? undefined,
+      rules: pol.rules,
+      frozen: !!this.isFrozen(),
+    }, this.walletUsd == null ? {} : { walletUsd: this.walletUsd });
+  }
+
+  private exposureCache = new Map<string, { now: Exposure; deltas: Map<number, string[]> }>();
+  /** The worst case now, and what each open proposal would change about it. */
+  private exposureNow(pol: OnchainPolicy) {
+    const key = `${pol.policyVersion}:${pol.proposals.length}:${!!this.isFrozen()}:${this.walletUsd}`;
+    const hit = this.exposureCache.get(key);
+    if (hit) return hit;
+    const now = this.exposureOf(pol);
+    const deltas = new Map<number, string[]>();
+    for (const g of pol.proposals) {
+      if (!g.change || (g.status !== "open" && g.status !== "queued")) continue;
+      try {
+        const after = this.exposureOf({ ...pol, ...applyChange(pol, g.change) } as OnchainPolicy);
+        deltas.set(g.id, exposureDelta(now, after, this.org.labels.agents));
+      } catch {
+        // A change the model can't apply shows no delta rather than breaking the snapshot.
+      }
+    }
+    this.exposureCache.clear();
+    const r = { now, deltas };
+    this.exposureCache.set(key, r);
+    return r;
+  }
+
   private previewCache = new Map<string, Preview>();
   /** What an open loosening proposal would have allowed over the last 7 days. */
   previewFor(govId: number): Preview | null {
@@ -2851,14 +3098,17 @@ export class Gatekeeper extends EventEmitter {
     const v = this.log.verify();
     const L = this.labels();
     const frozen = this.isFrozen();
+    const worst = pol ? this.exposureNow(pol) : null;
     return {
       setUp: isSetUp(this.org),
+      exposure: worst && { ...worst.now, walletUsd: this.walletUsd },
       deploying: this.deploying,
       lastChainEventAt: this.lastChainEventAt || null,
       org: {
         name: this.org.name,
         wallet: this.org.wallet,
         dharma: this.org.dharma ? { ...this.org.dharma, explorer: `${EXPLORER}/address/${this.org.dharma.address}` } : null,
+        escrow: this.org.escrow ? { ...this.org.escrow, explorer: `${EXPLORER}/address/${this.org.escrow.address}` } : null,
       },
       policy: pol && {
         loaded: true,
@@ -2901,6 +3151,7 @@ export class Gatekeeper extends EventEmitter {
           proposer: lower(p.proposer),
           description: p.change ? describeChange(p.change, L) : `op ${opName(p.op)}`,
           preview: p.status === "open" || p.status === "queued" ? this.previewFor(p.id) : null,
+          exposureDelta: worst?.deltas.get(p.id) ?? null,
         })),
       },
       frozen: frozen && { ...frozen, by: frozen.by ? (L.member(frozen.by) ?? frozen.by) : null },
