@@ -135,6 +135,13 @@ describe("escrow for large payments", () => {
     expect(describeChange({ op: "AddRule", id: "escrow-1", outcome: "Approval", scope: "escrow", target: "86400", maxUsd: 100 })).toMatch(/Hold payments of \$100\.00 or more in escrow for 24h; any member can cancel/);
   });
 
+  it("the approval card says a large payment will be held and can be cancelled, not that it's irreversible", async () => {
+    const r = await gk.propose(bills, { type: "transfer", to: PAYEE, amountUsd: 8 });
+    expect(r.status).toBe("pending");
+    const p = gk.snapshot().proposals.find((x) => x.id === r.id)!;
+    expect(p.facts.find((f) => f.label === "Reversible")).toEqual({ label: "Reversible", value: "Held in escrow for 1h; any member can cancel before release" });
+  }, 60_000);
+
   it("small payments go straight to the payee; large ones into the Escrow, which the watchdog knows is ours", async () => {
     expect((await gk.propose(bills, { type: "transfer", to: PAYEE, amountUsd: 1 })).status).toBe("done");
     expect(wallet.paid.at(-1)).toEqual({ to: PAYEE, usd: 1 });

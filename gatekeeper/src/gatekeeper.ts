@@ -14,7 +14,7 @@ import {
 } from "@prekaruna/engine";
 import {
   DHARMA_ABI, Kind, LEVEL_UP_STREAK, actionTypedData, decodeChange, describeChange, encodeChange, levelLabel, levelUpEligibility, opName,
-  escrowCancelTypedData, escrowRef, paymentDecisionTypedData, toBytes32, toMicro,
+  escrowCancelTypedData, escrowRef, paymentDecisionTypedData, toBytes32, toMicro, waitText,
   type AgentRecord, type Change,
 } from "@prekaruna/dharma";
 import type { EscrowBackend } from "./escrow.ts";
@@ -1190,6 +1190,7 @@ export class Gatekeeper extends EventEmitter {
       const amountUsd = Number(action.amountUsd);
       if (!Number.isFinite(amountUsd) || amountUsd <= 0) throw new Error("amountUsd must be > 0");
       const rec = payee(to);
+      const held = this.escrowFor(agentId, amountUsd);
       const payload: PaymentPayload = { kind: "transfer", from, chain: WALLET_CHAIN, to, amountUsd, token: USDC_TOKEN };
       return {
         payload,
@@ -1201,7 +1202,9 @@ export class Gatekeeper extends EventEmitter {
           ...(rec ? [{ label: "Category", value: rec.category }] : []),
           { label: "Amount", value: `${usd(amountUsd)} USDC` },
           { label: "Network", value: "Arc testnet" },
-          { label: "Reversible", value: "No", tone: "warn" },
+          held
+            ? { label: "Reversible", value: `Held in escrow for ${waitText(held.waitSeconds)}; any member can cancel before release` }
+            : { label: "Reversible", value: "No", tone: "warn" },
         ],
       };
     }

@@ -924,7 +924,7 @@ function EscrowHolds({ ctx }: { ctx: Ctx }) {
               <span className="b">{usd(p.payload?.amountUsd ?? p.request.amountUsd ?? 0)} to {payee(p.request.to)}</span>
               <span className="small muted">{agentName(p.agentId)} · {e.blocked ?? (e.status === "opening" ? "placing in escrow…" : `releases ${new Date(e.releaseAt).toLocaleString()}`)}</span>
               <button className="btn btn-deny btn-sm" disabled={busy || e.status !== "held" || !e.holdId}
-                onClick={async () => (await askConfirm(`Cancel this ${usd(p.payload?.amountUsd ?? 0)} payment? The USDC goes back to the org's wallet and the payee gets nothing.`, { action: "Cancel payment", danger: true }))
+                onClick={async () => (await askConfirm(`Cancel this ${usd(p.payload?.amountUsd ?? 0)} payment? The USDC goes back to the org's wallet and the payee gets nothing.`, { action: "Cancel payment", back: "Keep it", danger: true }))
                   && run(() => cancelEscrow(me, e.address as Address, e.holdId!, p.id), "Cancelled; the USDC is back in the wallet")}>
                 Cancel
               </button>
@@ -1391,11 +1391,21 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
     e.preventDefault();
     if (specialChange) {
       if ("error" in specialChange) return;
-      ctx.change(specialChange.change, specialChange.label).then((ok) => ok && (setExtra({ ...extra, name: "", account: "", domain: "", usd: "" }), setRule({ ...rule, category: "" })));
+      // Once it's proposed, clear only what was submitted (read the latest state: the member may
+      // already be filling in the next one).
+      const sent = special;
+      ctx.change(specialChange.change, specialChange.label).then((ok) => {
+        if (!ok) return;
+        if (sent === "payee") {
+          setExtra((x) => ({ ...x, name: "", account: "" }));
+          setRule((r) => ({ ...r, category: "" }));
+        } else if (sent === "site") setExtra((x) => ({ ...x, domain: "" }));
+        else setExtra((x) => ({ ...x, usd: "" }));
+      });
       return;
     }
     if ("error" in built) return;
-    ctx.change(built.change).then((ok) => ok && setRule({ ...EMPTY_RULE, kind: rule.kind }));
+    ctx.change(built.change).then((ok) => ok && setRule((r) => ({ ...EMPTY_RULE, kind: r.kind })));
   };
 
   return (
@@ -1408,7 +1418,7 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
               <span className="i">{String(i + 1).padStart(2, "0")}</span>
               <span className="nm">
                 <span>{r.id}{r.core && <span className="lock" title="Core boundary: can never be removed"><Icon name="lock" size={10} /> core</span>}</span>
-                <span className="desc">{r.builtin ? desc(r.id) ?? r.scope : `${describeScope(r.scope, r.target, names)} · ${r.agent ? names.agent(r.agent) : "every agent"}`}</span>
+                <span className="desc">{r.builtin ? desc(r.id) ?? r.scope : `${r.scope === "escrow" ? `payments of ${usd(r.maxUsd)} or more wait ${waitText(Number(r.target))} in escrow, and any member can cancel them` : describeScope(r.scope, r.target, names)} · ${r.agent ? names.agent(r.agent) : "every agent"}`}</span>
               </span>
               <span className="rule-actions">
                 {r.active ? <Badge v={r.outcome} /> : <span className="badge badge-quiet">removed</span>}
