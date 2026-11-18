@@ -1,4 +1,5 @@
 export * from "./types.ts";
 export { evaluate, agentFacingResult } from "./engine.ts";
 export { defaultRules, buildContext, buildRuleset, customRule, matchCustomRules, httpTargetMatches, commandMatches, pathMatches, DEFAULT_ALLOWLISTED_DOMAINS, registrableDomain, LEVEL_GRANTS, levelRules, messageLevelDecision, hostToolRules, hostWebRules, type OrgPolicyConfig, type OnchainRule } from "./rules.ts";
+export { exposure, exposureDelta, NO_LIMIT_USD, type Exposure, type AgentExposure, type ExposureInput } from "./exposure.ts";
 export { SignedLog, canonical, GENESIS, type LogEntry, type LogEvent } from "./log.ts";

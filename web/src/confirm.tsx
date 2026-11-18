@@ -13,6 +13,8 @@ export interface ConfirmOptions {
   /** A destructive or risky step: the button is red and the dialog shows a warning mark. */
   danger?: boolean;
   icon?: IconName;
+  /** The dismiss button's label (default "Cancel"); set it when the action itself is a cancel. */
+  back?: string;
 }
 
 interface Ask extends ConfirmOptions {
@@ -92,7 +94,7 @@ export function ConfirmHost() {
           {rest.length > 0 && <div className="confirm-detail">{rest.join("\n\n")}</div>}
         </div>
         <div className="confirm-actions">
-          <button type="button" className="btn btn-ghost" onClick={() => close(false)}>Cancel</button>
+          <button type="button" className="btn btn-ghost" onClick={() => close(false)}>{ask.back ?? "Cancel"}</button>
           <button type="button" ref={okRef} className={`btn ${ask.danger ? "btn-danger" : "btn-dark"}`} onClick={() => close(true)}>{ask.action ?? "OK"}</button>
         </div>
       </div>

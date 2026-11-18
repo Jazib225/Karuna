@@ -1,14 +1,18 @@
 #!/usr/bin/env -S npx tsx
 // karuna run: put an agent in a box whose only way out is the Karuna Gatekeeper.
 import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { USAGE, parseArgs, type RunArgs } from "./args.ts";
+import { USAGE, parseArgs, parseUndoArgs, type RunArgs } from "./args.ts";
 import { scanForSecrets } from "./scan.ts";
 import { ensureDocker } from "./docker.ts";
+import {
+  listChanges, pruneSnapshots, recordChanges, removeSnapshot, renameSnapshot, takeSnapshot, toReport, undoRun, validRunId,
+} from "./snapshot.ts";
 import {
   DESKTOP_BASE_DOCKERFILE, DESKTOP_BASE_TAG, DESKTOP_BROWSER, DESKTOP_ENTRY,
   REMOTE_RELAY_DOCKERFILE, REMOTE_RELAY_JS, REMOTE_RELAY_TAG,
@@ -102,8 +106,39 @@ function ensureRemoteRelayImage(tmp: string) {
   docker(["build", "-q", "-t", REMOTE_RELAY_TAG, d]);
 }
 
+/** `karuna changes` and `karuna undo`: read a run's snapshot on this machine; JSON on stdout. */
+function snapshotCommand(cmd: "changes" | "undo", rest: string[]): never {
+  let u;
+  try {
+    u = parseUndoArgs(cmd, rest);
+  } catch (e) {
+    process.stderr.write(`${(e as Error).message}\n\n${USAGE}\n`);
+    process.exit(2);
+  }
+  try {
+    if (cmd === "changes") {
+      process.stdout.write(`${JSON.stringify(listChanges(u.run))}\n`);
+      process.exit(0);
+    }
+    const r = undoRun(u.run, { path: u.path, force: u.force });
+    process.stdout.write(`${JSON.stringify({ restored: r.restored, skipped: r.skipped })}\n`);
+    if (r.refused) {
+      const n = r.skipped.filter((s) => s.reason !== "already undone").length;
+      say(`refused: ${n} file${n === 1 ? "" : "s"} changed again after run ${u.run} ended, so nothing was restored. Use --force to restore anyway.`);
+      process.exit(1);
+    }
+    const failed = r.skipped.filter((s) => s.reason !== "already undone");
+    for (const f of failed) say(`could not restore ${f.path}: ${f.reason}`);
+    process.exit(failed.length ? 1 : 0);
+  } catch (e) {
+    say((e as Error).message);
+    process.exit(1);
+  }
+}
+
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
+  if (cmd === "changes" || cmd === "undo") snapshotCommand(cmd, rest);
   if (cmd !== "run") {
     process.stderr.write(`${USAGE}\n`);
     process.exit(cmd ? 2 : 0);
@@ -142,13 +177,77 @@ async function main() {
     rmSync(tmp, { recursive: true, force: true });
     throw e;
   }
-  const sess = await api(a, "/v1/sessions", a.token, "POST", {
-    host: hostname(), mounts: a.mounts.filter((m) => m.writable).map((m) => resolve(m.host)), isolation, desktop: a.desktop, remote,
-    // When Karuna itself started this run (an agent it builds and runs), its run record.
-    ...(process.env.KARUNA_RUN_ID ? { runId: process.env.KARUNA_RUN_ID } : {}),
-  });
+
+  // Undo: copy every writable mount before the box can touch it. Taken under a temporary id and
+  // renamed to the run's id once the Gatekeeper has given one.
+  try {
+    pruneSnapshots();
+  } catch {
+    /* an old snapshot that can't be removed now is removed next time */
+  }
+  const writableMounts = [...new Set(a.mounts.filter((m) => m.writable).map((m) => resolve(m.host)))];
+  let snapId: string | null = null;
+  if (writableMounts.length) {
+    const pending = `pending-${randomBytes(6).toString("hex")}`;
+    try {
+      const m = takeSnapshot(pending, writableMounts);
+      snapId = pending;
+      const files = m.mounts.reduce((n, s) => n + Object.keys(s.files).length, 0);
+      const skipped = m.mounts.reduce((n, s) => n + s.skipped.length, 0);
+      say(`snapshot of ${writableMounts.length} writable mount${writableMounts.length === 1 ? "" : "s"}: ${files} file${files === 1 ? "" : "s"}${skipped ? `, ${skipped} skipped (large files, node_modules, .git, links)` : ""}`);
+    } catch (e) {
+      removeSnapshot(pending);
+      say(`could not snapshot the writable mounts (${(e as Error).message}); this run's file changes can't be undone`);
+    }
+  }
+
+  let sess: Record<string, unknown>;
+  try {
+    sess = await api(a, "/v1/sessions", a.token, "POST", {
+      host: hostname(), mounts: writableMounts, isolation, desktop: a.desktop, remote,
+      // When Karuna itself started this run (an agent it builds and runs), its run record.
+      ...(process.env.KARUNA_RUN_ID ? { runId: process.env.KARUNA_RUN_ID } : {}),
+    });
+  } catch (e) {
+    if (snapId) removeSnapshot(snapId);
+    throw e;
+  }
   const session = String(sess.session);
   const id = String(sess.id);
+  // The run this session belongs to: the Gatekeeper's own run id when it says so.
+  const runId = String(sess.runId ?? process.env.KARUNA_RUN_ID ?? id);
+  if (snapId && validRunId(runId)) {
+    try {
+      renameSnapshot(snapId, runId);
+      snapId = runId;
+    } catch (e) {
+      say(`snapshot kept as ${snapId} (${(e as Error).message})`);
+    }
+  }
+  let boxStarted = false;
+  // After the box exits: record what changed in the writable mounts and tell the Gatekeeper.
+  // Never fails the run.
+  const reportChanges = async () => {
+    if (!snapId) return;
+    let changes;
+    try {
+      changes = toReport(recordChanges(snapId));
+    } catch (e) {
+      say(`could not record this run's file changes (${(e as Error).message})`);
+      return;
+    }
+    const n = changes.length;
+    say(n ? `${n} file${n === 1 ? "" : "s"} changed in writable mounts (undo: karuna undo --run ${snapId})` : "no files changed in writable mounts");
+    const body = { runId, changes };
+    try {
+      await api(a, "/v1/sessions/changes", session, "POST", body);
+    } catch (e) {
+      // The Gatekeeper may already have ended this session (it stopped the run): try the agent's token.
+      const ended = /Unknown agent token|session/i.test((e as Error).message);
+      const sent = ended && (await api(a, "/v1/sessions/changes", a.token, "POST", body).then(() => true, () => false));
+      if (!sent) say(`could not send the file changes to the Gatekeeper (${(e as Error).message}); they are kept on this machine`);
+    }
+  };
   const net = `karuna-run-${id}`;
   const relay = `karuna-relay-${id}`;
   const box = `karuna-box-${id}`;
@@ -251,6 +350,7 @@ async function main() {
       for (const l of parts) if (l.trim()) pending.push(l.slice(0, 2000));
       if (pending.length > 2000) pending = pending.slice(-2000);
     };
+    boxStarted = true;
     const code = await new Promise<number>((done) => {
       const p = spawn("docker", args, { stdio: ["inherit", "pipe", "pipe"] });
       p.stdout!.on("data", (b: Buffer) => {
@@ -272,9 +372,12 @@ async function main() {
       process.once("SIGTERM", stop);
     });
     say(`run ${id} ended (exit ${code}); box, network and relay removed`);
+    await reportChanges();
     await cleanup();
     process.exit(code);
   } catch (e) {
+    if (boxStarted) await reportChanges();
+    else if (snapId) removeSnapshot(snapId);
     await cleanup();
     throw e;
   }

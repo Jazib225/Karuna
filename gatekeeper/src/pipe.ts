@@ -60,7 +60,8 @@ export function pipeServer(gk: Gatekeeper): Server {
     action_type: actionType(p),
     payload: payloadOf(p),
     payload_hash: p.payloadHash ?? ZERO_HASH,
-    reversible: p.payload ? false : p.request.tool === "http" && ["GET", "HEAD"].includes((p.request.method ?? "GET").toUpperCase()),
+    // A transfer held in escrow can be cancelled by any member until it's released.
+    reversible: p.payload ? p.payload.kind === "transfer" && !!gk.escrowFor(p.agentId, p.payload.amountUsd) : p.request.tool === "http" && ["GET", "HEAD"].includes((p.request.method ?? "GET").toUpperCase()),
     agent_reason: p.reason ?? null,
     expires_at: p.request.tool === "http" && !p.payload ? new Date(Date.parse(p.createdAt) + gk.holdMs).toISOString() : null,
     agent: p.agentId,

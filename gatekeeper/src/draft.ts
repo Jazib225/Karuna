@@ -7,12 +7,12 @@
 // agents and payees before it's shown.
 //
 // Free providers, tried in order until one answers (each OpenAI-compatible; keys live in Karuna's
-// key store on the Keys page and are only ever used by the Gatekeeper). A provider without a key is
+// key store, saved from the drafter box in the console, and are only ever used by the Gatekeeper). A provider without a key is
 // skipped. Busy, rate-limited, timed out or refused: the next one is tried.
 //   1. Groq    KARUNA_DRAFT_GROQ_MODEL     default openai/gpt-oss-20b ("" = skip)
 //   2. Gemini  KARUNA_DRAFT_MODEL          default gemini-3.8-flash
 //   3. Gemini  KARUNA_DRAFT_FALLBACK_MODEL default gemini-3.5-flash-lite ("" = skip)
-// Keys: one marked "Rule drafter" on the Keys page for that provider (agents can never use it).
+// Keys: one saved as a drafter key for that provider (agents can never use it).
 // On top of that the Gatekeeper remembers drafts that worked (see Gatekeeper.draftRules), so a
 // rehearsed sentence never needs a model at all.
 import { describeScope } from "@prekaruna/dharma";
@@ -28,7 +28,7 @@ export const DRAFT_PROVIDERS: DraftProvider[] = ([
   { name: "Gemini", key: "gemini", url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", model: process.env.KARUNA_DRAFT_MODEL ?? "gemini-3.8-flash" },
   { name: "Gemini", key: "gemini", url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", model: process.env.KARUNA_DRAFT_FALLBACK_MODEL ?? "gemini-3.5-flash-lite" },
 ] as DraftProvider[]).filter((p) => p.model);
-/** Key names the drafter can use, for messages and the Keys page. */
+/** Key names the drafter can use. */
 export const DRAFT_KEYS = [...new Set(DRAFT_PROVIDERS.map((p) => p.key))];
 const ATTEMPT_MS = 9_000; // per provider, so a dead one can't stall the demo
 
@@ -182,7 +182,7 @@ export async function draftRules(
 
 export class NoDrafterError extends Error {
   constructor() {
-    super(`No rule drafter yet. On the Keys page, add a free key and choose "Rule drafter": Groq (console.groq.com) and/or Gemini (aistudio.google.com). You can still fill in the form by hand.`);
+    super(`No drafter key yet. Paste a free Groq (console.groq.com) or Gemini (aistudio.google.com) key in the box above. You can still fill in the form by hand.`);
   }
 }
 

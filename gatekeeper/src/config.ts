@@ -31,6 +31,8 @@ export interface OrgFile {
   invites?: Invite[];
   /** Newer Dharma code deployed for an Upgrade vote (the org moves only once the vote passes). */
   dharmaCode?: { implementation: string; version: number; txRef: string; deployedAt: string };
+  /** The org's Escrow for large payments (deployed the first time an escrow rule needs it). */
+  escrow?: { address: string; opener: string; deployedAt: string; txRef: string };
 }
 
 export interface Invite {
