@@ -1019,7 +1019,9 @@ function Console({ s, log, wallet, refreshWallet, run, busy, me, offline, refres
     };
     // A freeze alert ("Unfreezing needs a member vote") stays only while agents are still frozen.
     const thawed = (a: Alert) => !!a.whileFrozen && !sRef.current.frozen;
-    const t = setInterval(() => setAlerts((prev) => prev.filter((a) => (a.sticky && !nothingToVote(a) && !thawed(a)) || Date.now() - a.at < 8000)), 1000);
+    // A vote or freeze card goes as soon as there's nothing left to do about it. Otherwise a card
+    // leaves when its timer bar runs out (the bar is the only clock; see .alert-timer).
+    const t = setInterval(() => setAlerts((prev) => prev.filter((a) => !(a.sticky && (nothingToVote(a) || thawed(a))))), 500);
     return () => clearInterval(t);
   }, []);
   const dismiss = (id: string) => setAlerts((prev) => prev.filter((a) => a.id !== id));
@@ -1167,6 +1169,8 @@ function Console({ s, log, wallet, refreshWallet, run, busy, me, offline, refres
               <button className="alert-x" aria-label="Dismiss" onClick={() => dismiss(a.id)}><Icon name="x" size={14} /></button>
               <div className="alert-body">{a.body}</div>
               {a.go && <button className="alert-cta" onClick={() => { setView(a.go!); dismiss(a.id); }}>{a.cta ?? "Open"} <span className="nudge"><Icon name="arrow" size={14} /></span></button>}
+              {/* The card's clock: it closes when this bar runs out. Hovering or focusing the card pauses the bar where it is. */}
+              <span className="alert-timer" aria-hidden style={{ animationDuration: `${alertReadMs(a)}ms` }} onAnimationEnd={() => dismiss(a.id)} />
             </div>
           ))}
         </div>
@@ -2563,6 +2567,12 @@ function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string
 
 /** Bottom-right cards on screen at once. */
 const MAX_ALERTS = 3;
+
+/** How long a card stays: time to read it (3–6 s by length; at least 5 s for one that needs you). */
+function alertReadMs(a: { title: string; body: string; sticky: boolean }) {
+  const read = 1500 + (a.title.length + a.body.length) * 30;
+  return Math.min(6_000, Math.max(a.sticky ? 5_000 : 3_000, read));
+}
 
 /** A Dharma proposal event, for the proposal pop-ups (null for every other event). */
 function govEvent(e: ChainEvent, s: Snapshot, me: string, name: (a?: string | null) => string, whats: Map<number, string>): GovEvent | null {

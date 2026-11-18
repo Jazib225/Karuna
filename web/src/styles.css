@@ -1123,3 +1123,10 @@ html, body, * { scrollbar-width: none; }
 .preflight-list li.bad .preflight-text small { color: var(--danger); }
 .preflight-fix { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; margin-top: 4px; padding: 6px 8px; border-radius: var(--r-sm); background: var(--surface); border: 1px solid var(--line); }
 @keyframes pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+
+/* The time a bottom-right card has left: a thin bar that runs down, and stops while it's hovered. */
+.alert { overflow: hidden; }
+.alert-timer { position: absolute; left: 0; bottom: 0; height: 2px; width: 100%; background: var(--n400); opacity: .55; transform-origin: left; animation: alert-timer linear forwards; pointer-events: none; }
+.alert.bad .alert-timer { background: var(--danger); }
+.alert:hover .alert-timer, .alert:focus-within .alert-timer { animation-play-state: paused; }
+@keyframes alert-timer { from { transform: scaleX(1); } to { transform: scaleX(0); } }
