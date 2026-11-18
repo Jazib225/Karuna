@@ -10,6 +10,7 @@ import { keccak256, stringToHex } from "viem";
 import { PREVIEW, previewLog, previewRun, previewSigner, previewSnapshot, previewWallet } from "./preview.ts";
 import { Badge, Icon, type IconName } from "./icons.tsx";
 import { askConfirm } from "./confirm.tsx";
+import { inviteCode, joinStatus, lookupInvite, sendJoin, sentJoins, type SentJoin } from "./invites.ts";
 import { IN_APP, getIslandEnabled, setDesktopSigner, setIslandEnabled } from "./desktop.ts";
 import { setThemePref, useThemePref, type ThemePref } from "./theme.ts";
 import { eventName, NAMED_KEYS } from "./eventNames.ts";
@@ -166,6 +167,7 @@ export default function App() {
       return { me: null, error: e instanceof SignerUnavailable ? e.message : String(e) };
     }
   }, [keyVersion]);
+  const [flash, setFlash] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const account: AccountCtl = {
     email,
     signIn: async (e, pw) => {
@@ -179,14 +181,22 @@ export default function App() {
       await createAccount(e, pw, key);
       setEmail(accountEmail());
     },
-    signOut: () => {
+    // Log out: this device forgets its key and the console goes back to the log-in screen.
+    // Saved to an account, the key comes back on the next log-in; not saved, it's gone for good.
+    signOut: async () => {
+      const ok = email
+        ? await askConfirm(`Log out of ${email}? This device forgets your key until you log in again.`, { action: "Log out", icon: "logout" })
+        : await askConfirm("This device's key isn't saved to an account. Logging out deletes it for good: you'd lose your seat until a teammate adds you back. Create an account first to keep it.", { action: "Log out and delete key", danger: true });
+      if (!ok) return;
       accountSignOut();
       setEmail(null);
       setKeyVersion((v) => v + 1);
+      notify("ok", "Logged out");
     },
   };
-  const [flash, setFlash] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  // Not a member: the start screen is Create organization; its "Ask to Join" opens the join page.
+  const [joining, setJoining] = useState(false);
   const notify: Notify = (kind, text) => {
     setFlash({ kind, text });
     setTimeout(() => setFlash((f) => (f?.text === text ? null : f)), 6000);
@@ -219,10 +229,14 @@ export default function App() {
   useEffect(() => setDesktopSigner(signer.me, (s?.org.dharma?.address as Address | undefined) ?? null, isMember), [signer.me, s?.org.dharma?.address, isMember]);
   if (!s && gk.offline) body = <Offline reason={gk.offline} />;
   else if (!s) body = <Loading text="Connecting to the Gatekeeper…" />;
-  else if (!signer.me) body = <div className="center"><Backdrop /><div className="onboard narrow"><div className="onboard-body"><h2 className="setup-title heading-gradient">No signing key</h2><p className="lede">{signer.error}</p><AccountBox me={null} account={account} run={run} busy={busy} /></div></div></div>;
-  else if (!s.setUp) body = <Setup s={s} me={signer.me} run={run} busy={busy} account={account} />;
+  else if (!signer.me) body = <div className="center"><Backdrop /><div className="onboard narrow"><div className="onboard-body"><h2 className="setup-title heading-gradient">No signing key</h2><p className="lede">{signer.error}</p><AccountBox key={account.email ?? "logged-out"} me={null} account={account} run={run} busy={busy} /></div></div></div>;
+  else if (joining && (!s.setUp || (s.policy && !s.policy.members.some((m) => m.address === signer.me!.address.toLowerCase()))))
+    body = <Join me={signer.me} run={run} busy={busy} account={account} onBack={() => setJoining(false)} />;
+  // Logged out (or new here): every start is a brand-new organization. Creating one when this app
+  // already runs an organization archives that one to a backup folder first (Gatekeeper side).
+  else if (!s.setUp) body = <Setup s={s} me={signer.me} run={run} busy={busy} account={account} onJoin={() => setJoining(true)} />;
   else if (!s.policy) body = <Loading text="Reading Dharma from Arc…" />;
-  else if (!s.policy.members.some((m) => m.address === signer.me!.address.toLowerCase())) body = <Join s={s} me={signer.me} run={run} busy={busy} account={account} />;
+  else if (!s.policy.members.some((m) => m.address === signer.me!.address.toLowerCase())) body = <Setup s={s} me={signer.me} run={run} busy={busy} account={account} onJoin={() => setJoining(true)} replace />;
   else body = <Console s={s} log={gk.log} wallet={gk.wallet} run={run} busy={busy} me={signer.me} offline={gk.offline} refresh={gk.refresh} account={account} />;
 
   return (
@@ -270,7 +284,7 @@ function Offline({ reason }: { reason: string }) {
 
 // ============================================================== setup: deploy this org's Dharma
 
-function Setup({ s, me, run, busy, account }: { s: Snapshot; me: Signer; run: Run; busy: boolean; account: AccountCtl }) {
+function Setup({ s, me, run, busy, account, onJoin, replace = false }: { s: Snapshot; me: Signer; run: Run; busy: boolean; account: AccountCtl; onJoin: () => void; replace?: boolean }) {
   const [detected, setDetected] = useState<string[] | null>(null);
   const [detectErr, setDetectErr] = useState<string | null>(null);
   const [form, setForm] = useState({ orgName: "", memberName: "", walletAddress: "" });
@@ -291,19 +305,21 @@ function Setup({ s, me, run, busy, account }: { s: Snapshot; me: Signer; run: Ru
   }, []);
 
   const deploying = busy || s.deploying;
-  const submit = (e: FormEvent) => {
+  const submit = async (e: FormEvent) => {
     e.preventDefault();
-    run(() => api("/setup", { ...form, memberAddress: me.address }), "Dharma deployed — your organization is live");
+    await run(() => api("/setup", { ...form, memberAddress: me.address, replace }), "Dharma deployed — your organization is live");
   };
 
   return (
     <div className="center">
       <Backdrop />
       <form className="onboard narrow rise" onSubmit={submit}>
-        <OnboardTop sub="First-time setup" />
+        <OnboardTop sub="New organization" />
         <div className="onboard-body">
           <div>
-            <p className="eyebrow">Deploy your rulebook on Arc</p>
+            <button type="button" className="back-btn" onClick={onJoin} disabled={deploying}>
+              <Icon name="plug" size={15} /> Ask to Join
+            </button>
             <h2 className="setup-title heading-gradient" style={{ marginTop: 14 }}>Set up your organization</h2>
             <p className="lede">Karuna deploys your organization's own <b>Dharma</b> rulebook on Arc. Every rule change needs your team's vote and a short waiting period; only the panic button acts instantly. You'll be its first member.</p>
           </div>
@@ -336,7 +352,7 @@ function Setup({ s, me, run, busy, account }: { s: Snapshot; me: Signer; run: Ru
                   : <>No logged-in Circle wallet found{detectErr ? ` (${detectErr})` : ""}. Run <span className="mono">circle wallet login &lt;email&gt; --testnet</span></>}
             </small>
           </div>
-          <AccountBox me={me} account={account} run={run} busy={busy} />
+          <AccountBox key={account.email ?? "logged-out"} me={me} account={account} run={run} busy={busy} />
           <button className="btn btn-dark btn-lg btn-block" type="submit" disabled={deploying}>
             {deploying ? <span className="shimmer">Deploying Dharma on Arc…</span> : <>Create organization <span className="nudge"><Icon name="arrow" size={16} /></span></>}
           </button>
@@ -348,31 +364,87 @@ function Setup({ s, me, run, busy, account }: { s: Snapshot; me: Signer; run: Ru
 
 // ============================================================== join: a browser that isn't a member yet
 
-function Join({ s, me, run, busy, account }: { s: Snapshot; me: Signer; run: Run; busy: boolean; account: AccountCtl }) {
+function Join({ me, run, busy, account, onBack }: { me: Signer; run: Run; busy: boolean; account: AccountCtl; onBack: () => void }) {
   const [name, setName] = useState("");
-  const requested = s.enrollments.some((e) => e.address === me.address.toLowerCase());
+  const [link, setLink] = useState("");
+  const [found, setFound] = useState<{ link: string; org: string } | null>(null);
+  const [lookErr, setLookErr] = useState<string | null>(null);
+  const [looking, setLooking] = useState(false);
+  const [sent, setSent] = useState<SentJoin[]>(() => sentJoins(me.address));
+  const code = inviteCode(link);
+
+  // Look the link up as soon as it's pasted: say whose organization it is before anything is sent.
+  useEffect(() => {
+    setFound(null);
+    setLookErr(null);
+    if (!link.trim()) return;
+    if (!code) {
+      setLookErr("That isn't a Karuna invite link (it ends in /invite/inv_…).");
+      return;
+    }
+    let live = true;
+    setLooking(true);
+    lookupInvite(link)
+      .then((r) => { if (live) setFound({ link, org: r.org }); }, (e) => { if (live) setLookErr(e instanceof Error ? e.message : String(e)); })
+      .finally(() => { if (live) setLooking(false); });
+    return () => { live = false; };
+  }, [link]);
+
+  const sendInvite = () => {
+    if (!found) return;
+    run(async () => {
+      const r = await sendJoin(me, found.link, found.org, name);
+      setSent(sentJoins(me.address));
+      setLink("");
+      if (r.status === "member") throw new Error(`You're already a member of ${r.org}`);
+    }, `Request sent to ${found.org}`);
+  };
+  const check = (j: SentJoin) => run(async () => { await joinStatus(j); setSent(sentJoins(me.address)); });
+
   return (
     <div className="center">
       <Backdrop />
-      <form className="onboard narrow rise" onSubmit={(e) => { e.preventDefault(); run(() => api("/access-request", { address: me.address, name }), "Request sent"); }}>
-        <OnboardTop sub={s.org.name} />
+      <div className="onboard narrow rise">
+        <OnboardTop sub="Ask to join" />
         <div className="onboard-body">
           <div>
-            <p className="eyebrow">Not a member yet</p>
-            <h2 className="setup-title heading-gradient" style={{ marginTop: 14 }}>Ask to join {s.org.name}</h2>
-            <p className="lede">Members sign every approval and policy change themselves. A current member proposes adding you, and Dharma adds you after the vote and a {s.policy!.timelock}s wait.</p>
+            <button type="button" className="back-btn back" onClick={onBack}><Icon name="arrow" size={16} /> Go back</button>
+            <h2 className="setup-title heading-gradient" style={{ marginTop: 14 }}>Ask to join an organization</h2>
+            <p className="lede">Paste the invite link a member sent you. Your request is signed with this device's key, and their members vote to add you.</p>
           </div>
-          <AccountBox me={me} account={account} run={run} busy={busy} />
-          {requested ? (
-            <p className="ok-text"><Icon name="check" /> Request sent. A member will see it under Team.</p>
-          ) : (
-            <>
-              <label className="field"><span>Your name</span><input required value={name} onChange={(e) => setName(e.target.value)} placeholder="So teammates recognize you" /></label>
-              <button className="btn btn-dark btn-lg btn-block">Ask to join <span className="nudge"><Icon name="arrow" size={16} /></span></button>
-            </>
+          <label className="field">
+            <span>Your name</span>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="So the team recognizes you" maxLength={40} />
+          </label>
+          <form className="stack-sm" onSubmit={(e) => { e.preventDefault(); sendInvite(); }}>
+            <label className="field">
+              <span>Invite link</span>
+              <span className={`input-icon${lookErr ? " bad" : ""}`}>
+                <Icon name="chain" size={15} />
+                <input className="plain-input mono" value={link} onChange={(e) => setLink(e.target.value)} placeholder="https://…/invite/inv_…" spellCheck={false} />
+              </span>
+              {looking && <small className="shimmer">Looking up the invite…</small>}
+              {lookErr && <small className="bad-text" role="alert">{lookErr}</small>}
+              {found && <small className="ok-text"><Icon name="check" size={13} /> Invite to <b>{found.org}</b></small>}
+            </label>
+            <button className="btn btn-dark btn-lg btn-block" disabled={busy || !found || !name.trim()}>
+              {found ? `Ask to join ${found.org}` : "Send join request"} <span className="nudge"><Icon name="arrow" size={16} /></span>
+            </button>
+          </form>
+          {sent.length > 0 && (
+            <div className="keybox">
+              <span className="field-label"><Icon name="inbox" size={14} /> Requests you sent</span>
+              {sent.slice().reverse().map((j) => (
+                <div className="sent-join" key={j.link}>
+                  <div><b>{j.org}</b><div className="small muted">{j.status === "member" ? "You're a member" : j.status === "none" ? "Not found: they may have removed it" : "Waiting for their members' vote"} · sent {ago(j.sentAt)}</div></div>
+                  <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => check(j)}>Check</button>
+                </div>
+              ))}
+            </div>
           )}
+          <AccountBox key={account.email ?? "logged-out"} me={me} account={account} run={run} busy={busy} />
         </div>
-      </form>
+      </div>
     </div>
   );
 }
@@ -383,36 +455,65 @@ interface AccountCtl {
   email: string | null;
   signIn: (email: string, password: string) => Promise<void>;
   create: (email: string, password: string) => Promise<void>;
-  signOut: () => void;
+  signOut: () => Promise<void>;
 }
 
-/** Sign in with email and password, or save this device's key to a new account. */
+/** Log in with email and password, or save this device's key to a new account. */
 function AccountBox({ me, account, run, busy }: { me: Signer | null; account: AccountCtl; run: Run; busy: boolean }) {
   const [mode, setMode] = useState<"in" | "create">("in");
   const [form, setForm] = useState({ email: "", password: "", again: "" });
+  const [showPw, setShowPw] = useState(false);
+  const [pwTouched, setPwTouched] = useState(false);
   if (account.email) {
     return (
       <div className="keybox">
-        <span className="field-label"><Icon name="check" size={14} /> Signed in</span>
+        <span className="field-label"><Icon name="check" size={14} /> Logged in</span>
         <div><b>{account.email}</b>{me && <span className="mono small muted"> {short(me.address)}</span>}</div>
-        <div className="small muted">The same member on every device you sign in on. <button type="button" className="link-btn" onClick={account.signOut}>Sign out</button></div>
+        <div className="small muted">The same member on every device you log in on. <button type="button" className="link-btn" onClick={() => void account.signOut()}>Log out</button></div>
       </div>
     );
   }
   const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim()) && form.password.length >= (mode === "create" ? 10 : 1) && (mode === "in" || form.password === form.again);
+  const pwType = showPw ? "text" : "password";
+  const mismatch = mode === "create" && form.again.length > 0 && form.again !== form.password;
+  // New accounts need 10+ characters: say so once the person leaves the box (then live until it's long enough).
+  const tooShort = mode === "create" && pwTouched && form.password.length > 0 && form.password.length < 10;
   return (
     <div className="keybox">
       <div className="email-signin">
-        <span className="field-label"><Icon name="key" size={14} /> {mode === "in" ? "Sign in" : "Save this device's key to an account"}</span>
-        <input type="email" aria-label="Email" autoComplete="username" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="you@company.com" />
-        <input type="password" aria-label="Password" autoComplete={mode === "in" ? "current-password" : "new-password"} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder={mode === "in" ? "Password" : "Password (10+ characters)"} />
-        {mode === "create" && <input type="password" aria-label="Password again" autoComplete="new-password" value={form.again} onChange={(e) => setForm({ ...form, again: e.target.value })} placeholder="Password again" />}
+        <span className="field-label"><Icon name="key" size={14} /> {mode === "in" ? "Log in" : "Save this device's key to an account"}</span>
+        <label className="field">
+          <span>Email</span>
+          <span className="input-icon">
+            <Icon name="inbox" size={15} />
+            <input className="plain-input" type="email" aria-label="Email" autoComplete="username" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="you@company.com" />
+          </span>
+        </label>
+        <label className="field">
+          <span>Password</span>
+          <span className={`input-icon${tooShort ? " bad" : ""}`}>
+            <Icon name="lock" size={15} />
+            <input className="plain-input" type={pwType} aria-label="Password" aria-invalid={tooShort || undefined} autoComplete={mode === "in" ? "current-password" : "new-password"} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} onBlur={() => setPwTouched(true)} placeholder={mode === "in" ? "Your password" : "At least 10 characters"} />
+            <button type="button" className="input-toggle" onMouseDown={(e) => e.preventDefault()} onClick={() => setShowPw(!showPw)} aria-label={showPw ? "Hide password" : "Show password"}>{showPw ? "Hide" : "Show"}</button>
+          </span>
+          {tooShort && <small className="bad-text" role="alert">Too short: use at least 10 characters ({form.password.length} so far).</small>}
+        </label>
+        {mode === "create" && (
+          <label className="field">
+            <span>Password again</span>
+            <span className={`input-icon${mismatch ? " bad" : ""}`}>
+              <Icon name="lock" size={15} />
+              <input className="plain-input" type={pwType} aria-label="Password again" autoComplete="new-password" value={form.again} onChange={(e) => setForm({ ...form, again: e.target.value })} placeholder="Type it again" />
+            </span>
+            {mismatch && <small className="bad-text">The passwords don't match yet.</small>}
+          </label>
+        )}
         <div className="row-form">
           <button type="button" className="btn btn-dark" disabled={busy || !ok}
-            onClick={() => run(() => (mode === "in" ? account.signIn(form.email, form.password) : account.create(form.email, form.password)), mode === "in" ? "Signed in" : "Account created")}>
-            {mode === "in" ? "Sign in" : "Create account"}
+            onClick={() => run(() => (mode === "in" ? account.signIn(form.email, form.password) : account.create(form.email, form.password)), mode === "in" ? "Logged in" : "Account created")}>
+            {mode === "in" ? "Log in" : "Create account"}
           </button>
-          <button type="button" className="link-btn small" onClick={() => setMode(mode === "in" ? "create" : "in")}>{mode === "in" ? "Create an account instead" : "I have an account"}</button>
+          <button type="button" className="link-btn small" onClick={() => setMode(mode === "in" ? "create" : "in")}>{mode === "in" ? "Create an account" : "I have an account"}</button>
         </div>
         <div className="small muted">{mode === "in" ? "Use the same email and password on any device." : "Your password locks your key in this browser; Karuna can't open it or reset it."}</div>
       </div>
@@ -673,8 +774,9 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
         </nav>
         <div className="member" title="This browser's signing key">
           <span className="av">{myName[0]?.toUpperCase()}</span>
-          <div className="who" title={account.email ? `Signed in as ${account.email} · ${myAddr}` : `This device's key · ${myAddr}`}><div>{myName}</div><div>{account.email ?? short(myAddr)}</div></div>
+          <div className="who" title={account.email ? `Logged in as ${account.email} · ${myAddr}` : `This device's key · ${myAddr}`}><div>{myName}</div><div>{account.email ?? short(myAddr)}</div></div>
         </div>
+        <button type="button" className="logout-btn" onClick={() => void account.signOut()}><Icon name="logout" size={15} /> Log out</button>
       </aside>
 
       <main className="main">
@@ -1588,7 +1690,7 @@ function Team({ ctx }: { ctx: Ctx }) {
               return (
                 <div className="tr" key={e.address}>
                   <span className="av">{e.name[0]?.toUpperCase()}</span>
-                  <span className="b">{e.name}</span>
+                  <span className="b">{e.name}{e.via === "invite" && <span className="tag" style={{ marginLeft: 8 }}>invite link</span>}</span>
                   <span className="mono small">{e.address}</span>
                   {proposed ? <Badge v="approval">proposed</Badge> : <button className="btn btn-dark btn-sm" disabled={busy} onClick={() => ctx.change({ op: "AddMember", member: e.address as Address }, e.name)}><Icon name="plus" size={14} /> Propose adding</button>}
                 </div>
@@ -1597,6 +1699,7 @@ function Team({ ctx }: { ctx: Ctx }) {
           </div>
         </div>
       )}
+      <InviteLinks ctx={ctx} />
       <div className="card">
         <div className="hd"><h2>Members</h2><span className="sub">{pol.members.length}</span></div>
         <div className="table">
@@ -1619,6 +1722,52 @@ function Team({ ctx }: { ctx: Ctx }) {
       </div>
     </div>
   );
+}
+
+/** Invite links: send one to someone; they paste it in their own Karuna's Ask to Join. */
+function InviteLinks({ ctx }: { ctx: Ctx }) {
+  const { s, run, busy } = ctx;
+  const [copied, setCopied] = useState<string | null>(null);
+  const invites = s.invites ?? [];
+  const copy = (link: string) => {
+    navigator.clipboard?.writeText(link);
+    setCopied(link);
+    setTimeout(() => setCopied((c) => (c === link ? null : c)), 2000);
+  };
+  const create = () => run(async () => { const r = await api<{ link: string }>("/invites", {}); copy(r.link); }, "Invite link created and copied");
+  const revoke = async (code: string) => {
+    if (await askConfirm("Revoke this invite link? Anyone who hasn't used it yet won't be able to. Requests already sent stay under Access requests.", { action: "Revoke", danger: true }))
+      run(() => api(`/invites/${code}`, undefined, "DELETE"), "Invite link revoked");
+  };
+  return (
+    <div className="card">
+      <div className="hd">
+        <h2>Invite links</h2>
+        {s.publicUrl && <button className="btn btn-dark btn-sm" disabled={busy} onClick={create}><Icon name="plus" size={14} /> Create invite link</button>}
+      </div>
+      <div className="pad stack-sm">
+        {!s.publicUrl ? (
+          <p className="muted small">Invite links need Karuna's public address (the tunnel chat apps use). Set <span className="mono">KARUNA_CHAT_URL</span> in <span className="mono">.env</span> and restart the Gatekeeper.</p>
+        ) : invites.length === 0 ? (
+          <p className="muted small">Send someone a link: they open Karuna on their computer, choose <b>Ask to Join</b> and paste it. Their request shows up here, and members vote to add them. Links work for 7 days or 10 requests.</p>
+        ) : (
+          invites.map((i) => (
+            <div className="invite-row" key={i.code}>
+              <code className="token" title={i.link}>{i.link}</code>
+              <span className="small muted">{i.uses} of {i.maxUses} used · {daysLeft(i.expiresAt)}</span>
+              <button className="btn btn-ghost btn-sm" onClick={() => copy(i.link)}><Icon name={copied === i.link ? "check" : "copy"} size={13} /> {copied === i.link ? "Copied" : "Copy"}</button>
+              <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => revoke(i.code)}>Revoke</button>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function daysLeft(iso: string) {
+  const h = Math.max(0, (Date.parse(iso) - Date.now()) / 3600_000);
+  return h >= 24 ? `${Math.floor(h / 24)}d left` : `${Math.max(1, Math.floor(h))}h left`;
 }
 
 // ============================================================== live alerts

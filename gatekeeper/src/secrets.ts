@@ -48,6 +48,12 @@ export class SecretStore {
     writeFileSync(this.file, JSON.stringify(this.items, null, 2), { mode: 0o600 });
   }
 
+  /** Forget every key (they were archived with the organization). */
+  clear() {
+    this.items = [];
+    this.save();
+  }
+
   list(): KeyMeta[] {
     return this.items.map(({ name, envVar, createdAt, rotatedAt, purpose, provider }) => ({ name, envVar, createdAt, rotatedAt, ...(purpose ? { purpose, provider } : {}) }));
   }

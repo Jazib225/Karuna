@@ -110,7 +110,9 @@ export const previewSnapshot: Snapshot = {
     ],
   },
   frozen: false,
-  enrollments: [{ address: "0x8d3e5f7a9c1b3d5f7e9a1c3b5d7f9e1a3c5b7d9f", name: "Priya", requestedAt: iso(1800) }],
+  enrollments: [{ address: "0x8d3e5f7a9c1b3d5f7e9a1c3b5d7f9e1a3c5b7d9f", name: "Priya", requestedAt: iso(1800), via: "invite" }],
+  publicUrl: "https://karuna.sunrise-bakery.example",
+  invites: [{ code: "inv_preview0demo1", link: "https://karuna.sunrise-bakery.example/invite/inv_preview0demo1", createdAt: iso(86_400), expiresAt: new Date(Date.now() + 6 * 86_400_000).toISOString(), uses: 1, maxUses: 10 }],
   shield: {
     tests: [
       { id: "t3", messageId: "m3", agentId: "payables", template: "bank-change", category: "utilities", bait: { address: "0x0", ref: "INV-0042", amountUsd: 412 }, sentAt: iso(5400), status: "failed", resolution: "paid the bait invoice", proposalIds: [], ruleId: "sh-payables-utilities" },

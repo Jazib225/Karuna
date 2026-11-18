@@ -18,7 +18,7 @@ import {
   type AgentRecord, type Change,
 } from "@prekaruna/dharma";
 import {
-  ConfigError, DEFAULT_ALLOWLISTED_DOMAINS, EXPLORER, USDC_TOKEN, WALLET_CHAIN, emptyOrg, isSetUp,
+  type Invite, ConfigError, DEFAULT_ALLOWLISTED_DOMAINS, EXPLORER, USDC_TOKEN, WALLET_CHAIN, emptyOrg, isSetUp,
   requireAddress, requireText, slugId, type OrgFile,
 } from "./config.ts";
 import { readFingerprint, readPolicy, scrub, ChainError, type ChainWriter, type OnchainPolicy, type WriteFn } from "./chain.ts";
@@ -355,13 +355,25 @@ const DEVICE_TTL_MS = 30 * 60_000;
 /** Circle Gateway's wallet contract on EVM testnets: deposits there stay the org's money. */
 export const GATEWAY_WALLET = (process.env.KARUNA_GATEWAY_WALLET ?? "0x0077777d7EBA4688BDeF3E311b846F25870A19B9").toLowerCase();
 const KIND_NAMES = ["tighten", "propose", "vote"] as const;
+const INVITE_TTL_MS = 7 * 24 * 3600_000;
+const INVITE_MAX_USES = 10;
+
+/** What a person signs to send a join request with an invite link (EIP-712, so wallets show it plainly). */
+export function inviteTypedData(org: string, invite: string, member: Address, name: string) {
+  return {
+    domain: { name: "Karuna invite", version: "1" },
+    types: { JoinRequest: [{ name: "org", type: "string" }, { name: "invite", type: "string" }, { name: "member", type: "address" }, { name: "name", type: "string" }] },
+    primaryType: "JoinRequest" as const,
+    message: { org, invite, member, name },
+  };
+}
 
 // ---------------------------------------------------------------- gatekeeper
 
 export class Gatekeeper extends EventEmitter {
   org: OrgFile;
   private state: State;
-  readonly log: SignedLog;
+  log: SignedLog;
   policy: OnchainPolicy | null = null;
   deploying = false;
   /** When the relay last reported a Dharma event (QuickNode Stream or its RPC fallback). */
@@ -668,8 +680,12 @@ export class Gatekeeper extends EventEmitter {
   // ================================================================ setup
 
   /** Deploy this org's Dharma, with the first member's browser key as its only member. */
-  async setup(input: { orgName: unknown; memberName: unknown; memberAddress: unknown; walletAddress: unknown }) {
-    if (isSetUp(this.org) || this.deploying) throw new GatekeeperError("Already set up", 409);
+  async setup(input: { orgName: unknown; memberName: unknown; memberAddress: unknown; walletAddress: unknown; replace?: unknown }) {
+    if (this.deploying) throw new GatekeeperError("Already deploying", 409);
+    // One organization per Gatekeeper. Starting a new one (replace: true) archives the current one
+    // once the new Dharma is deployed, so a failed deploy leaves everything as it was.
+    const replacing = isSetUp(this.org);
+    if (replacing && input.replace !== true) throw new GatekeeperError("Already set up", 409);
     const name = requireText(input.orgName, "Organization name");
     const memberName = requireText(input.memberName, "Your name", 40);
     const member = requireAddress(input.memberAddress, "Your signing key");
@@ -682,19 +698,53 @@ export class Gatekeeper extends EventEmitter {
       const d = await this.deps.writerFor(wallet as Address).deploy({
         firstMember: member as Address, timelockSeconds: timelock, coreTimelockSeconds: coreTimelock, thresholdMicro: toMicro(500), domains: DEFAULT_ALLOWLISTED_DOMAINS,
       });
+      const archived = replacing ? this.archiveOrg() : null;
       this.org.name = name;
       this.org.wallet = { address: wallet, chain: WALLET_CHAIN };
       this.org.dharma = { address: lower(d.address), chainId: await this.deps.client.getChainId(), deployedAt: this.now().toISOString(), txRef: d.txRef };
       this.org.labels.members[member] = memberName;
       this.logEvent({ type: "setup", dharma: lower(d.address), wallet, firstMember: member, timelockSeconds: timelock, coreTimelockSeconds: coreTimelock, implementation: lower(d.implementation), txRef: d.txRef });
       await this.sync(true).catch(() => undefined);
-      return { dharma: this.org.dharma };
+      return { dharma: this.org.dharma, archived };
     } catch (e) {
       throw new GatekeeperError(`Could not deploy Dharma: ${scrub(e)}`, 502);
     } finally {
       this.deploying = false;
       this.save();
     }
+  }
+
+  /**
+   * Move this organization (org, state, decision log, stored keys) into data/archive/<when>-<name>/
+   * and clear it here. Live runs are stopped. To restore: stop the Gatekeeper and copy the files
+   * back into the data folder.
+   */
+  private archiveOrg(): { folder: string; name: string } {
+    const name = this.org.name || "organization";
+    for (const stop of this.launchStops.values()) stop();
+    this.launchStops.clear();
+    for (const sess of this.sessions.values()) sess.stopRequested = true;
+    this.sessions.clear();
+    const folder = this.deps.store.archive(name, ["org.json", "state.json", "log.jsonl", "secrets.json", "secrets.key", "log-signing-key.pem"]);
+    this.deps.secrets?.clear();
+    this.org = emptyOrg();
+    this.state = emptyState();
+    this.log = SignedLog.restore([], this.deps.store.loadOrCreateLogKeys());
+    this.deps.store.resetLog();
+    this.policy = null;
+    this.pivots = new PivotTracker();
+    this.executing.clear();
+    this.executeTried.clear();
+    this.grants.clear();
+    this.connectorErrors.clear();
+    this.pendingLevel.clear();
+    this.lastTripwire.clear();
+    this.lastSyncKey = "";
+    this.lastFingerprint = "";
+    this.lastFullRead = 0;
+    this.lastAnchorTry = 0;
+    this.lastChainEventAt = 0;
+    return { folder, name };
   }
 
   renameOrg(name: unknown) {
@@ -871,15 +921,95 @@ export class Gatekeeper extends EventEmitter {
   }
 
   /** A browser that isn't a member yet asks to join; a member proposes adding it. */
-  requestAccess(address: unknown, name: unknown) {
+  requestAccess(address: unknown, name: unknown, via?: "invite") {
     this.requireReady();
     const a = requireAddress(address, "Signing key");
     if (this.isMember(a)) throw new GatekeeperError("Already a member", 409);
     const n = requireText(name, "Your name", 40);
-    this.org.enrollments = [...this.org.enrollments.filter((e) => e.address !== a), { address: a, name: n, requestedAt: this.now().toISOString() }];
+    this.org.enrollments = [...this.org.enrollments.filter((e) => e.address !== a), { address: a, name: n, requestedAt: this.now().toISOString(), ...(via ? { via } : {}) }];
     this.org.labels.members[a] = n;
-    this.logEvent({ type: "access-requested", address: a });
+    this.logEvent({ type: "access-requested", address: a, ...(via ? { via } : {}) });
     this.save();
+  }
+
+  // ------------------------------------------------ invite links (join from another computer)
+
+  /** Where other Karunas reach this one: the public address (a tunnel to the public port). */
+  get publicUrl(): string | null {
+    return this.deps.chatUrl ? this.deps.chatUrl.replace(/\/+$/, "").replace(/\/mcp$/, "") : null;
+  }
+
+  private inviteLink(code: string) {
+    return `${this.publicUrl}/invite/${code}`;
+  }
+
+  /** A new invite link: good for 7 days and up to 10 join requests. Members still vote on each person. */
+  createInvite() {
+    this.requireReady();
+    if (!this.publicUrl) throw new GatekeeperError("Invite links need Karuna's public address. Set KARUNA_CHAT_URL to your tunnel's https address and restart the Gatekeeper.", 409);
+    const now = this.now();
+    const active = (this.org.invites ?? []).filter((i) => this.inviteOpen(i));
+    if (active.length >= 20) throw new GatekeeperError("You have 20 open invite links. Revoke one first.", 409);
+    const inv: Invite = { code: `inv_${randomBytes(12).toString("base64url")}`, createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + INVITE_TTL_MS).toISOString(), uses: 0, maxUses: INVITE_MAX_USES };
+    this.org.invites = [...active, inv];
+    this.logEvent({ type: "invite-created", invite: inv.code.slice(0, 8) });
+    this.save();
+    return { ...inv, link: this.inviteLink(inv.code) };
+  }
+
+  revokeInvite(code: string) {
+    const inv = (this.org.invites ?? []).find((i) => i.code === code);
+    if (!inv) throw new GatekeeperError("No such invite link", 404);
+    inv.revoked = true;
+    this.org.invites = (this.org.invites ?? []).filter((i) => this.inviteOpen(i));
+    this.logEvent({ type: "invite-revoked", invite: code.slice(0, 8) });
+    this.save();
+  }
+
+  private inviteOpen(i: Invite) {
+    return !i.revoked && i.uses < i.maxUses && Date.parse(i.expiresAt) > this.now().getTime();
+  }
+
+  private openInvite(code: unknown): Invite {
+    const inv = (this.org.invites ?? []).find((i) => i.code === code);
+    if (!inv || !isSetUp(this.org) || !this.inviteOpen(inv)) throw new GatekeeperError("This invite link isn't valid anymore. Ask for a new one.", 404);
+    return inv;
+  }
+
+  /** What an invite link shows before you send a request: the organization's name. */
+  inviteInfo(code: unknown) {
+    const inv = this.openInvite(code);
+    return { org: this.org.name, expiresAt: inv.expiresAt, dharma: this.org.dharma?.address ?? null };
+  }
+
+  /** A join request sent with an invite link, signed by the key that wants to join. */
+  async requestWithInvite(code: unknown, body: { address?: unknown; name?: unknown; signature?: unknown }) {
+    const inv = this.openInvite(code);
+    const a = requireAddress(body.address, "Signing key");
+    const name = requireText(body.name, "Your name", 40);
+    const ok = await verifyTypedData({
+      ...inviteTypedData(this.org.name, inv.code, a as Address, name),
+      address: a as Address,
+      signature: String(body.signature ?? "") as Hex,
+    }).catch(() => false);
+    if (!ok) throw new GatekeeperError("The join request isn't signed by that key", 401);
+    if (this.isMember(a)) return { org: this.org.name, status: "member" as const };
+    const already = this.org.enrollments.some((e) => e.address === a);
+    this.requestAccess(a, name, "invite");
+    if (!already) {
+      inv.uses++;
+      this.save();
+    }
+    return { org: this.org.name, status: "pending" as const };
+  }
+
+  /** Has the person who used this link been added yet? (Only says yes/no for that one key.) */
+  inviteStatus(code: unknown, address: unknown) {
+    const inv = (this.org.invites ?? []).find((i) => i.code === code);
+    if (!inv || !isSetUp(this.org)) throw new GatekeeperError("This invite link isn't valid anymore.", 404);
+    const a = requireAddress(address, "Signing key");
+    const status = this.isMember(a) ? "member" : this.org.enrollments.some((e) => e.address === a) ? "pending" : "none";
+    return { org: this.org.name, status };
   }
 
   // ================================================================ agent side
@@ -2737,6 +2867,8 @@ export class Gatekeeper extends EventEmitter {
       frozen: frozen && { ...frozen, by: frozen.by ? (L.member(frozen.by) ?? frozen.by) : null },
       paused: this.state.paused ?? null,
       enrollments: this.org.enrollments,
+      invites: (this.org.invites ?? []).filter((i) => this.inviteOpen(i)).map((i) => ({ ...i, link: this.inviteLink(i.code) })),
+      publicUrl: this.publicUrl,
       shield: {
         tests: this.state.tests.slice(-100).reverse(),
         alerts: this.state.alerts.slice(-50).reverse(),

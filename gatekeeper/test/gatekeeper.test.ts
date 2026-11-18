@@ -16,7 +16,10 @@ import {
 } from "@prekaruna/dharma";
 import { Store } from "../src/store.ts";
 import { SecretStore } from "../src/secrets.ts";
-import { Gatekeeper, GatekeeperError, type SignedAction } from "../src/gatekeeper.ts";
+import { Gatekeeper, GatekeeperError, inviteTypedData, type SignedAction } from "../src/gatekeeper.ts";
+import { publicApi } from "../src/chat.ts";
+import { remoteInvite } from "../src/invite.ts";
+import type { AddressInfo } from "node:net";
 import { ViemChainWriter, ChainError, RelayedChainWriter, type ChainWriter } from "../src/chain.ts";
 import type { WalletBackend, X402Quote } from "../src/wallet.ts";
 
@@ -73,9 +76,9 @@ let alice: PrivateKeyAccount;
 let bob: PrivateKeyAccount;
 const gkAccount = privateKeyToAccount(GK_KEY);
 
-function makeGatekeeper(d: string) {
+function makeGatekeeper(d: string, extra: { chatUrl?: string } = {}) {
   const writer = new ViemChainWriter(createWalletClient({ chain, account: gkAccount, transport: http(RPC) }), client);
-  return new Gatekeeper({ store: new Store(d), wallet, client, writerFor: () => writer, timelockSeconds: 60, anchorEvery: 1000 });
+  return new Gatekeeper({ store: new Store(d), wallet, client, writerFor: () => writer, timelockSeconds: 60, anchorEvery: 1000, ...extra });
 }
 
 beforeEach(async () => {
@@ -145,6 +148,27 @@ describe("setup deploys the org's own Dharma", () => {
     expect(s.policy!.agents).toEqual([]);
     expect(s.policy!.payees).toEqual([]);
   });
+
+  it("a second setup is refused unless it replaces the org, which archives the old one first", async () => {
+    const { id } = gk.prepareAgent("Old agent");
+    const oldDharma = gk.org.dharma!.address;
+    await expect(gk.setup({ orgName: "Second", memberName: "Bob", memberAddress: bob.address, walletAddress: gkAccount.address })).rejects.toThrow(/Already set up/);
+    const r = await gk.setup({ orgName: "Second Org", memberName: "Bob", memberAddress: bob.address, walletAddress: gkAccount.address, replace: true });
+    const s = gk.snapshot();
+    expect(s.org.name).toBe("Second Org");
+    expect(gk.org.dharma!.address).not.toBe(oldDharma);
+    expect(s.policy!.members).toEqual([{ address: bob.address.toLowerCase(), name: "Bob" }]);
+    expect(JSON.stringify(gk.org)).not.toContain(id);
+    expect(gk.log.verify().ok).toBe(true);
+    expect(gk.log.length).toBe(1); // the new org's log starts with its setup
+    // The old org is in the archive folder, intact.
+    const archived = JSON.parse(readFileSync(join(r.archived!.folder, "org.json"), "utf8"));
+    expect(archived.name).toBe("Test Org");
+    expect(archived.dharma.address).toBe(oldDharma);
+    expect(r.archived!.folder.startsWith(join(dir, "archive"))).toBe(true);
+    // A restart reads the new org, not the old one.
+    expect(makeGatekeeper(dir).org.name).toBe("Second Org");
+  }, 30_000);
 
   it("names stay off-chain", async () => {
     const { id } = gk.prepareAgent("Secret project agent");
@@ -237,6 +261,49 @@ describe("Rule changes: every member edit is voted on; only panic is instant", (
     await waitTimelock();
     expect((await gk.propose(id, { type: "action", tool: "shell", command: "ls" })).status).toBe("allowed");
   }, 30_000);
+});
+
+describe("invite links", () => {
+  it("without a public address there are no invite links", () => {
+    expect(() => gk.createInvite()).toThrow(/public address/);
+  });
+
+  it("someone with a link sends a signed join request from their own Karuna; members still vote them in", async () => {
+    // The owner's Karuna, reachable at its public port (here: 127.0.0.1).
+    await gk.idle();
+    const owner = makeGatekeeper(dir, { chatUrl: "http://127.0.0.1:1" });
+    await owner.housekeeping(); // reads Dharma from the chain
+    const srv2 = publicApi(owner, new Store(dir)).listen(0, "127.0.0.1");
+    await new Promise((r) => srv2.once("listening", r));
+    const port2 = (srv2.address() as AddressInfo).port;
+    try {
+      const inv = owner.createInvite();
+      const link = inv.link.replace(":1/", `:${port2}/`);
+      expect(link).toMatch(/\/invite\/inv_/);
+      // The joiner's side: look it up, then sign and send.
+      expect(await remoteInvite<{ org: string }>(link, "")).toMatchObject({ org: "Test Org" });
+      const sig = await bob.signTypedData(inviteTypedData("Test Org", inv.code, bob.address, "Bob"));
+      // A request signed by someone else's key is refused.
+      const forged = await alice.signTypedData(inviteTypedData("Test Org", inv.code, bob.address, "Bob"));
+      await expect(remoteInvite(link, "/request", { address: bob.address, name: "Bob", signature: forged })).rejects.toThrow(/isn't signed by that key/);
+      expect(await remoteInvite(link, "/request", { address: bob.address, name: "Bob", signature: sig })).toEqual({ org: "Test Org", status: "pending" });
+      expect(owner.snapshot().enrollments).toEqual([expect.objectContaining({ address: bob.address.toLowerCase(), name: "Bob", via: "invite" })]);
+      expect(owner.snapshot().invites[0].uses).toBe(1);
+      expect(await remoteInvite(link, `/status?address=${bob.address}`)).toEqual({ org: "Test Org", status: "pending" });
+      // Not a member until the vote passes.
+      expect(owner.snapshot().policy!.members).toHaveLength(1);
+      gk = owner;
+      await propose(alice, { op: "AddMember", member: bob.address }, "Bob");
+      await waitTimelock();
+      expect(await remoteInvite(link, `/status?address=${bob.address}`)).toEqual({ org: "Test Org", status: "member" });
+      // Revoked links stop working; made-up ones never did.
+      owner.revokeInvite(inv.code);
+      await expect(remoteInvite(link, "")).rejects.toThrow(/isn't valid anymore/);
+      await expect(remoteInvite("https://example.com/not-an-invite", "")).rejects.toThrow(/isn't a Karuna invite link/);
+    } finally {
+      srv2.close();
+    }
+  }, 60_000);
 });
 
 describe("nobody can act without a member's signature", () => {

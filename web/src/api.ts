@@ -165,7 +165,11 @@ export interface Snapshot {
   /** Recent runs (sandboxed agents): open one for its timeline. */
   runs?: RunSummary[];
   frozen: null | false | { by: string | null; at: string; confirmed: boolean };
-  enrollments: { address: string; name: string; requestedAt: string }[];
+  enrollments: { address: string; name: string; requestedAt: string; via?: "invite" }[];
+  /** Open invite links (anyone with one can send a join request from their own Karuna). */
+  invites?: { code: string; link: string; createdAt: string; expiresAt: string; uses: number; maxUses: number }[];
+  /** This Karuna's public address (KARUNA_CHAT_URL), or null: invite links need it. */
+  publicUrl?: string | null;
   shield: {
     tests: ShieldTest[];
     alerts: ShieldAlert[];
