@@ -31,6 +31,21 @@ export interface WalletBackend {
   listWallets(): Promise<string[]>;
   /** Move USDC from the wallet into its Circle Gateway balance, which x402 purchases draw on. */
   depositGateway?(from: string, amountUsd: number): Promise<{ txRef: string; raw: unknown }>;
+  /** Whether the Circle CLI is here and logged in to testnet (and as whom). */
+  loginStatus?(): Promise<WalletLoginStatus>;
+  /** Email a one-time code for a testnet login. A first login also creates the account's wallets. */
+  loginStart?(email: string): Promise<{ requestId: string }>;
+  /** Finish the login with the code from the email. */
+  loginFinish?(requestId: string, code: string): Promise<{ email: string | null }>;
+  /** Ask Circle's testnet faucet for USDC (one of this account's wallets). */
+  fundTestnet?(address: string): Promise<void>;
+}
+
+export interface WalletLoginStatus {
+  cli: boolean;
+  loggedIn: boolean;
+  email: string | null;
+  expiresIn: string | null;
 }
 
 export class WalletError extends Error {
@@ -173,5 +188,34 @@ export class CircleCliWallet implements WalletBackend {
     const d = await this.run(["wallet", "list", "--type", "agent", "--chain", WALLET_CHAIN], 30_000);
     const wallets = (d.wallets ?? []) as { address?: string }[];
     return [...new Set(wallets.map((w) => String(w.address ?? "").toLowerCase()).filter(Boolean))];
+  }
+
+  async loginStatus(): Promise<WalletLoginStatus> {
+    try {
+      const d = await this.run(["wallet", "status", "--type", "agent"], 30_000);
+      const t = (d.testnet ?? {}) as { email?: string; tokenStatus?: string; expiresIn?: string };
+      const loggedIn = t.tokenStatus === "VALID";
+      return { cli: true, loggedIn, email: loggedIn ? t.email ?? null : null, expiresIn: loggedIn ? t.expiresIn ?? null : null };
+    } catch (e) {
+      if (/ENOENT|not recognized|not found/i.test(e instanceof Error ? e.message : String(e))) return { cli: false, loggedIn: false, email: null, expiresIn: null };
+      throw e;
+    }
+  }
+
+  async loginStart(email: string) {
+    const d = await this.run(["wallet", "login", email, "--type", "agent", "--testnet", "--init"], 60_000);
+    // The CLI says what to run next: "circle wallet login --request <id> --otp <code>".
+    const id = /--request\s+(\S+)/.exec(String(d.message ?? ""))?.[1];
+    if (!id) throw new WalletError("Circle didn't start the login. Try again.");
+    return { requestId: id };
+  }
+
+  async loginFinish(requestId: string, code: string) {
+    const d = await this.run(["wallet", "login", "--request", requestId, "--otp", code, "--type", "agent", "--testnet"], 60_000);
+    return { email: /Logged in as (\S+)/.exec(String(d.message ?? ""))?.[1] ?? null };
+  }
+
+  async fundTestnet(address: string) {
+    await this.run(["wallet", "fund", "--address", address, "--chain", WALLET_CHAIN], 60_000);
   }
 }

@@ -105,7 +105,7 @@ describe("upgrading an org from Dharma v2 to v3", () => {
 
     // The console's "Propose upgrade": deploy the code (twice is a no-op), then a core vote.
     const code = await gk.prepareUpgrade();
-    expect(code).toMatchObject({ version: 3, current: 2 });
+    expect(code).toMatchObject({ version: 4, current: 2 });
     expect(await gk.prepareUpgrade()).toEqual(code);
     await gk.submitAction(await sign(Kind.Propose, { op: "Upgrade", implementation: code.implementation as Address }));
     expect(gk.policy!.proposals[0]).toMatchObject({ core: true, status: "queued" });
@@ -113,7 +113,8 @@ describe("upgrading an org from Dharma v2 to v3", () => {
     expect(gk.policy!.version).toBe(2); // the normal wait isn't enough for a core change
     await wait(CORE_WAIT);
 
-    expect(gk.policy!.version).toBe(3);
+    expect(gk.policy!.version).toBe(4);
+    expect(gk.policy!.team?.structure).toBe("flat"); // v4: team roles, Flat until someone picks a Tree
     expect(gk.org.dharma!.address).toBe(address);
     expect(gk.policy!.agents).toEqual([{ id: agent, capUsd: 3, level: 0 }]);
     expect(gk.policy!.payees).toHaveLength(1);

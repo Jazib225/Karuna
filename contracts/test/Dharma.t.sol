@@ -8,7 +8,7 @@ import {DharmaProxy} from "../src/DharmaProxy.sol";
 /// Stand-in for a future Dharma version, to test upgrades.
 contract DharmaNext is Dharma {
     function version() external pure override returns (uint256) {
-        return 4;
+        return 5;
     }
 }
 
@@ -74,6 +74,22 @@ contract DharmaTest is Test {
         id = propose(aliceKey, op, data);
         vm.warp(block.timestamp + TIMELOCK);
         dharma.execute(id);
+    }
+
+    function manage(uint256 pk, Dharma.Op op, bytes memory data) internal {
+        bytes memory sig = sign(pk, Dharma.Kind.Manage, op, data, 0, false);
+        dharma.manage(op, data, vm.addr(pk), block.timestamp + 1 hours, sig);
+    }
+
+    function expectManageRevert(uint256 pk, Dharma.Op op, bytes memory data, bytes4 err) internal {
+        bytes memory sig = sign(pk, Dharma.Kind.Manage, op, data, 0, false);
+        vm.expectRevert(err);
+        dharma.manage(op, data, vm.addr(pk), block.timestamp + 1 hours, sig);
+    }
+
+    function tree() internal {
+        addMembers();
+        manage(aliceKey, Dharma.Op.SetStructure, abi.encode(uint8(1)));
     }
 
     function addMembers() internal {
@@ -341,7 +357,7 @@ contract DharmaTest is Test {
     // ------------------------------------------------------------- v2: proxy + setup
 
     function test_runs_behind_a_proxy_that_nobody_can_reinitialize() public {
-        assertEq(dharma.version(), 3);
+        assertEq(dharma.version(), 4);
         assertEq(dharma.timelock(), TIMELOCK);
         assertEq(dharma.coreTimelock(), CORE);
         string[] memory d = new string[](0);
@@ -528,7 +544,7 @@ contract DharmaTest is Test {
         dharma.execute(id);
 
         assertEq(dharma.implementation(), next);
-        assertEq(dharma.version(), 4);
+        assertEq(dharma.version(), 5);
         // same address, same org: members, rules, payees and signatures all carry over
         assertEq(dharma.members().length, 3);
         assertEq(dharma.rules().length, 13);
@@ -692,5 +708,103 @@ contract DharmaTest is Test {
         vm.expectEmit(true, true, false, true);
         emit Dharma.UnapprovedTransfer(bytes32("tx"), PAYEE, 5e6);
         dharma.reportUnapprovedTransfer(bytes32("tx"), PAYEE, 5e6);
+    }
+
+    // ------------------------------------------------------------- team roles (v4)
+
+    function test_a_new_org_is_flat_and_every_member_can_do_everything() public {
+        addMembers();
+        assertEq(dharma.structure(), 0);
+        assertEq(dharma.permissionsOf(bob), 127);
+        assertEq(dharma.permissionsOf(mallory()), 0);
+        tighten(bobKey, Dharma.Op.Freeze, "");
+        assertTrue(dharma.frozen());
+    }
+
+    function test_a_tree_makes_its_creator_admin_and_everyone_else_a_member() public {
+        tree();
+        assertEq(dharma.structure(), 1);
+        assertEq(dharma.roleOf(alice), 1);
+        assertEq(dharma.permissionsOf(alice), 127);
+        assertEq(dharma.permissionsOf(bob), 15); // approve, cancel escrow, propose, agents
+
+        bytes memory sig = sign(bobKey, Dharma.Kind.Tighten, Dharma.Op.Freeze, "", 0, false);
+        vm.prank(gk);
+        vm.expectRevert(Dharma.NoPermission.selector);
+        dharma.tighten(Dharma.Op.Freeze, "", bob, block.timestamp + 1 hours, sig);
+
+        expectManageRevert(bobKey, Dharma.Op.SetRole, abi.encode(bob, uint8(1)), Dharma.NoPermission.selector);
+        propose(bobKey, Dharma.Op.AddDomain, abi.encode("example.com")); // members still propose
+    }
+
+    function test_roles_never_stop_a_member_from_voting() public {
+        tree();
+        manage(aliceKey, Dharma.Op.SetRolePerms, abi.encode(uint8(3), uint16(1))); // approve only
+        manage(aliceKey, Dharma.Op.SetRole, abi.encode(carol, uint8(3)));
+        assertEq(dharma.permissionsOf(carol), 1);
+
+        bytes memory sig = sign(carolKey, Dharma.Kind.Propose, Dharma.Op.AddDomain, abi.encode("example.com"), 0, false);
+        vm.expectRevert(Dharma.NoPermission.selector);
+        dharma.propose(Dharma.Op.AddDomain, abi.encode("example.com"), carol, block.timestamp + 1 hours, sig);
+
+        uint256 id = propose(aliceKey, Dharma.Op.AddDomain, abi.encode("example.com"));
+        vote(carolKey, id, true);
+        assertTrue(dharma.hasVoted(id, carol));
+    }
+
+    function test_deleting_a_custom_role_falls_back_to_the_default() public {
+        tree();
+        manage(aliceKey, Dharma.Op.SetRolePerms, abi.encode(uint8(3), uint16(64))); // freeze only
+        manage(aliceKey, Dharma.Op.SetRole, abi.encode(carol, uint8(3)));
+        assertEq(dharma.permissionsOf(carol), 64);
+        assertEq((dharma.rolePerms() >> 48) & 0xffff, 64 | 0x4000);
+
+        manage(aliceKey, Dharma.Op.SetRolePerms, abi.encode(uint8(3), uint16(0x8000)));
+        assertEq(dharma.permissionsOf(carol), 15);
+        assertEq((dharma.rolePerms() >> 48) & 0xffff, 0);
+
+        expectManageRevert(aliceKey, Dharma.Op.SetRole, abi.encode(carol, uint8(4)), Dharma.BadRole.selector);
+        expectManageRevert(aliceKey, Dharma.Op.SetRolePerms, abi.encode(uint8(2), uint16(0x8000)), Dharma.BadRole.selector);
+        expectManageRevert(aliceKey, Dharma.Op.SetRolePerms, abi.encode(uint8(1), uint16(1)), Dharma.BadRole.selector);
+    }
+
+    function test_changing_member_permissions_applies_to_everyone_with_the_default_role() public {
+        tree();
+        manage(aliceKey, Dharma.Op.SetRolePerms, abi.encode(uint8(2), uint16(15 | 64)));
+        assertEq(dharma.permissionsOf(bob), 79);
+        tighten(bobKey, Dharma.Op.Freeze, "");
+        assertTrue(dharma.frozen());
+    }
+
+    function test_someone_always_keeps_team_access() public {
+        tree();
+        manage(aliceKey, Dharma.Op.SetRole, abi.encode(alice, uint8(2))); // the only Admin steps down
+        assertEq(dharma.permissionsOf(alice), 127); // first member, nobody else has "team"
+        manage(aliceKey, Dharma.Op.SetRole, abi.encode(bob, uint8(1)));
+        assertEq(dharma.permissionsOf(alice), 15);
+    }
+
+    function test_role_changes_only_go_through_manage() public {
+        bytes memory data = abi.encode(uint8(1));
+        bytes memory sig = sign(aliceKey, Dharma.Kind.Propose, Dharma.Op.SetStructure, data, 0, false);
+        vm.expectRevert(Dharma.BadRole.selector);
+        dharma.propose(Dharma.Op.SetStructure, data, alice, block.timestamp + 1 hours, sig);
+
+        expectManageRevert(aliceKey, Dharma.Op.AddDomain, abi.encode("example.com"), Dharma.BadRole.selector);
+        expectManageRevert(malloryKey, Dharma.Op.SetStructure, data, Dharma.NotMember.selector);
+    }
+
+    function test_removing_a_member_clears_their_role() public {
+        tree();
+        manage(aliceKey, Dharma.Op.SetRole, abi.encode(carol, uint8(1)));
+        uint256 id = propose(aliceKey, Dharma.Op.RemoveMember, abi.encode(carol));
+        vote(bobKey, id, true);
+        vm.warp(block.timestamp + TIMELOCK);
+        dharma.execute(id);
+        assertEq(dharma.roleOf(carol), 0);
+    }
+
+    function mallory() internal view returns (address) {
+        return vm.addr(malloryKey);
     }
 }

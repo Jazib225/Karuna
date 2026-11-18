@@ -523,6 +523,39 @@ export const DHARMA_ABI = [
   },
   {
     "type": "function",
+    "name": "manage",
+    "inputs": [
+      {
+        "name": "op",
+        "type": "uint8",
+        "internalType": "enum Dharma.Op"
+      },
+      {
+        "name": "data",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "signer",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "deadline",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "sig",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "members",
     "inputs": [],
     "outputs": [
@@ -574,6 +607,25 @@ export const DHARMA_ABI = [
             "internalType": "string"
           }
         ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "permissionsOf",
+    "inputs": [
+      {
+        "name": "a",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
       }
     ],
     "stateMutability": "view"
@@ -835,6 +887,38 @@ export const DHARMA_ABI = [
   },
   {
     "type": "function",
+    "name": "roleOf",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "rolePerms",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "packed",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "rules",
     "inputs": [],
     "outputs": [
@@ -889,6 +973,19 @@ export const DHARMA_ABI = [
             "internalType": "uint256"
           }
         ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "structure",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
       }
     ],
     "stateMutability": "view"
@@ -1368,6 +1465,56 @@ export const DHARMA_ABI = [
   },
   {
     "type": "event",
+    "name": "RolePermsSet",
+    "inputs": [
+      {
+        "name": "role",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      },
+      {
+        "name": "perms",
+        "type": "uint16",
+        "indexed": false,
+        "internalType": "uint16"
+      },
+      {
+        "name": "by",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "RoleSet",
+    "inputs": [
+      {
+        "name": "member",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "role",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      },
+      {
+        "name": "by",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "RuleAdded",
     "inputs": [
       {
@@ -1418,6 +1565,25 @@ export const DHARMA_ABI = [
         "type": "bytes32",
         "indexed": true,
         "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "StructureSet",
+    "inputs": [
+      {
+        "name": "structure",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      },
+      {
+        "name": "by",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
       }
     ],
     "anonymous": false
@@ -1600,6 +1766,11 @@ export const DHARMA_ABI = [
   },
   {
     "type": "error",
+    "name": "BadRole",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "BadSignature",
     "inputs": []
   },
@@ -1627,6 +1798,11 @@ export const DHARMA_ABI = [
   {
     "type": "error",
     "name": "MembersMustPropose",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NoPermission",
     "inputs": []
   },
   {

@@ -4,7 +4,7 @@
 //
 // Out (Gatekeeper → app):
 //   decision            { id, action_type, summary, result: "allow" | "deny" }
-//   approval_requested  { id, action_type, payload, payload_hash, reversible, agent_reason, expires_at }
+//   approval_requested  { id, action_type, payload, payload_hash, reversible, agent_reason, why, if_unanswered, expires_at }
 //   approval_resolved   { id, result: "approved" | "denied" | "failed" }
 //   agent_paused        { by, at }      agent_resumed {}
 //   error               { id?, error }  (a response we ignored, and why)
@@ -63,6 +63,9 @@ export function pipeServer(gk: Gatekeeper): Server {
     // A transfer held in escrow can be cancelled by any member until it's released.
     reversible: p.payload ? p.payload.kind === "transfer" && !!gk.escrowFor(p.agentId, p.payload.amountUsd) : p.request.tool === "http" && ["GET", "HEAD"].includes((p.request.method ?? "GET").toUpperCase()),
     agent_reason: p.reason ?? null,
+    // Why Karuna held it (the rule that matched), and what happens if no member answers.
+    why: p.decision.reason ?? null,
+    if_unanswered: gk.ifUnanswered(p),
     expires_at: p.request.tool === "http" && !p.payload ? new Date(Date.parse(p.createdAt) + gk.holdMs).toISOString() : null,
     agent: p.agentId,
   });
