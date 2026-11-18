@@ -386,33 +386,58 @@ interface AccountCtl {
   signOut: () => void;
 }
 
-/** Sign in with email and password, or save this device's key to a new account. */
+/** Log in with email and password, or save this device's key to a new account. */
 function AccountBox({ me, account, run, busy }: { me: Signer | null; account: AccountCtl; run: Run; busy: boolean }) {
   const [mode, setMode] = useState<"in" | "create">("in");
   const [form, setForm] = useState({ email: "", password: "", again: "" });
+  const [showPw, setShowPw] = useState(false);
   if (account.email) {
     return (
       <div className="keybox">
-        <span className="field-label"><Icon name="check" size={14} /> Signed in</span>
+        <span className="field-label"><Icon name="check" size={14} /> Logged in</span>
         <div><b>{account.email}</b>{me && <span className="mono small muted"> {short(me.address)}</span>}</div>
-        <div className="small muted">The same member on every device you sign in on. <button type="button" className="link-btn" onClick={account.signOut}>Sign out</button></div>
+        <div className="small muted">The same member on every device you log in on. <button type="button" className="link-btn" onClick={account.signOut}>Log out</button></div>
       </div>
     );
   }
   const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim()) && form.password.length >= (mode === "create" ? 10 : 1) && (mode === "in" || form.password === form.again);
+  const pwType = showPw ? "text" : "password";
+  const mismatch = mode === "create" && form.again.length > 0 && form.again !== form.password;
   return (
     <div className="keybox">
       <div className="email-signin">
-        <span className="field-label"><Icon name="key" size={14} /> {mode === "in" ? "Sign in" : "Save this device's key to an account"}</span>
-        <input type="email" aria-label="Email" autoComplete="username" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="you@company.com" />
-        <input type="password" aria-label="Password" autoComplete={mode === "in" ? "current-password" : "new-password"} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder={mode === "in" ? "Password" : "Password (10+ characters)"} />
-        {mode === "create" && <input type="password" aria-label="Password again" autoComplete="new-password" value={form.again} onChange={(e) => setForm({ ...form, again: e.target.value })} placeholder="Password again" />}
+        <span className="field-label"><Icon name="key" size={14} /> {mode === "in" ? "Log in" : "Save this device's key to an account"}</span>
+        <label className="field">
+          <span>Email</span>
+          <span className="input-icon">
+            <Icon name="inbox" size={15} />
+            <input className="plain-input" type="email" aria-label="Email" autoComplete="username" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="you@company.com" />
+          </span>
+        </label>
+        <label className="field">
+          <span>Password</span>
+          <span className="input-icon">
+            <Icon name="lock" size={15} />
+            <input className="plain-input" type={pwType} aria-label="Password" autoComplete={mode === "in" ? "current-password" : "new-password"} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder={mode === "in" ? "Your password" : "At least 10 characters"} />
+            <button type="button" className="input-toggle" onClick={() => setShowPw(!showPw)} aria-label={showPw ? "Hide password" : "Show password"}>{showPw ? "Hide" : "Show"}</button>
+          </span>
+        </label>
+        {mode === "create" && (
+          <label className="field">
+            <span>Password again</span>
+            <span className={`input-icon${mismatch ? " bad" : ""}`}>
+              <Icon name="lock" size={15} />
+              <input className="plain-input" type={pwType} aria-label="Password again" autoComplete="new-password" value={form.again} onChange={(e) => setForm({ ...form, again: e.target.value })} placeholder="Type it again" />
+            </span>
+            {mismatch && <small className="bad-text">The passwords don't match yet.</small>}
+          </label>
+        )}
         <div className="row-form">
           <button type="button" className="btn btn-dark" disabled={busy || !ok}
-            onClick={() => run(() => (mode === "in" ? account.signIn(form.email, form.password) : account.create(form.email, form.password)), mode === "in" ? "Signed in" : "Account created")}>
-            {mode === "in" ? "Sign in" : "Create account"}
+            onClick={() => run(() => (mode === "in" ? account.signIn(form.email, form.password) : account.create(form.email, form.password)), mode === "in" ? "Logged in" : "Account created")}>
+            {mode === "in" ? "Log in" : "Create account"}
           </button>
-          <button type="button" className="link-btn small" onClick={() => setMode(mode === "in" ? "create" : "in")}>{mode === "in" ? "Create an account instead" : "I have an account"}</button>
+          <button type="button" className="link-btn small" onClick={() => setMode(mode === "in" ? "create" : "in")}>{mode === "in" ? "Create an account" : "I have an account"}</button>
         </div>
         <div className="small muted">{mode === "in" ? "Use the same email and password on any device." : "Your password locks your key in this browser; Karuna can't open it or reset it."}</div>
       </div>
@@ -673,7 +698,7 @@ function Console({ s, log, wallet, run, busy, me, offline, refresh, account }: {
         </nav>
         <div className="member" title="This browser's signing key">
           <span className="av">{myName[0]?.toUpperCase()}</span>
-          <div className="who" title={account.email ? `Signed in as ${account.email} · ${myAddr}` : `This device's key · ${myAddr}`}><div>{myName}</div><div>{account.email ?? short(myAddr)}</div></div>
+          <div className="who" title={account.email ? `Logged in as ${account.email} · ${myAddr}` : `This device's key · ${myAddr}`}><div>{myName}</div><div>{account.email ?? short(myAddr)}</div></div>
         </div>
       </aside>
 

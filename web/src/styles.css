@@ -927,3 +927,22 @@ html, body, * { scrollbar-width: none; }
 }
 .clock-note svg { flex: none; margin-top: 2px; color: var(--n500); }
 .clock-note b { color: var(--ink); font-weight: 500; }
+
+/* Email sign-in (AccountBox): the console's own fields, with an icon inside and a Show/Hide toggle */
+.email-signin { gap: 12px; }
+.email-signin .field { gap: 6px; }
+.input-icon { position: relative; display: flex; align-items: center; }
+.input-icon > svg { position: absolute; left: 14px; color: var(--n400); pointer-events: none; transition: color .2s var(--ease); }
+.input-icon .plain-input {
+  width: 100%; height: 44px; padding: 0 14px 0 40px; border-radius: var(--r-md); border: 1px solid var(--n200); background: var(--canvas);
+  color: var(--ink); font-size: 14px; outline: none; transition: border-color .2s var(--ease), box-shadow .2s var(--ease), background-color .2s var(--ease);
+}
+.input-icon:has(.input-toggle) .plain-input { padding-right: 64px; }
+.input-icon:focus-within > svg { color: var(--ink); }
+.input-icon.bad .plain-input { border-color: var(--danger-line); }
+.input-toggle {
+  position: absolute; right: 8px; height: 28px; padding: 0 10px; border-radius: 999px; border: 1px solid transparent; background: transparent;
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--n500); cursor: pointer;
+}
+.input-toggle:hover { color: var(--ink); background: var(--surface-2); border-color: var(--line); }
+.email-signin .row-form { align-items: center; gap: 14px; }
