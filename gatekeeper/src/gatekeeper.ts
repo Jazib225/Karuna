@@ -9,8 +9,8 @@ import { EventEmitter } from "node:events";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { keccak256, stringToHex, verifyTypedData, zeroAddress, type Address, type Hex, type PublicClient } from "viem";
 import {
-  SignedLog, buildContext, buildRuleset, evaluate, httpTargetMatches, matchCustomRules, messageLevelDecision, LEVEL_GRANTS,
-  type Decision, type LogEntry, type LogEvent, type PolicyContext, type Request,
+  SignedLog, buildContext, buildRuleset, evaluate, exposure, exposureDelta, httpTargetMatches, matchCustomRules, messageLevelDecision, LEVEL_GRANTS,
+  type Decision, type Exposure, type LogEntry, type LogEvent, type PolicyContext, type Request,
 } from "@prekaruna/engine";
 import {
   DHARMA_ABI, Kind, LEVEL_UP_STREAK, actionTypedData, decodeChange, describeChange, encodeChange, levelLabel, levelUpEligibility, opName,
@@ -29,7 +29,7 @@ import {
   TEMPLATES, assertShieldSafe, autoRule, isAutoRule, makeTest, tracesTo,
   type InboxMessage, type ShieldTest, type TestTemplate,
 } from "./shield.ts";
-import { band, bandLabel, learnedDenyRule, previewLoosening, suggestions, isLoosening, type PastRequest, type Precedent, type Preview } from "./learn.ts";
+import { applyChange, band, bandLabel, learnedDenyRule, previewLoosening, suggestions, isLoosening, type PastRequest, type Precedent, type Preview } from "./learn.ts";
 import { PivotTracker, findCredential, findTrap, mintTraps, targetOf, trapEnvFile, trapLeakMessage, type TrapSet } from "./swarm.ts";
 import { SecretStore } from "./secrets.ts";
 import { DRAFT_KEYS, NoDrafterError, draftRules, freshIds, type DraftResult } from "./draft.ts";
@@ -2477,6 +2477,44 @@ export class Gatekeeper extends EventEmitter {
     return this.state.proposals.map((p) => ({ proposalId: p.id, at: p.createdAt, request: p.request, decision: p.decision, flagged: FLAGS[p.decision.ruleId] ?? null }));
   }
 
+  /** Last USDC balance read for the org's wallet (the /wallet route refreshes it); caps the worst case. */
+  walletUsd: number | null = null;
+
+  /** If every agent were hijacked now: what it could do with no human (engine/src/exposure.ts). */
+  exposureOf(pol: Pick<OnchainPolicy, "agents" | "payees" | "domains" | "levelLimits" | "rules">): Exposure {
+    return exposure({
+      agents: pol.agents.map((a) => ({ id: a.id, dailyAllowanceUsd: a.capUsd, level: a.level })),
+      recipients: pol.payees.map((p) => ({ address: p.account, name: this.org.labels.payees[lower(p.account)] ?? p.account, category: p.category })),
+      allowlistedDomains: pol.domains,
+      levelLimits: pol.levelLimits ?? undefined,
+      rules: pol.rules,
+      frozen: !!this.isFrozen(),
+    }, this.walletUsd == null ? {} : { walletUsd: this.walletUsd });
+  }
+
+  private exposureCache = new Map<string, { now: Exposure; deltas: Map<number, string[]> }>();
+  /** The worst case now, and what each open proposal would change about it. */
+  private exposureNow(pol: OnchainPolicy) {
+    const key = `${pol.policyVersion}:${pol.proposals.length}:${!!this.isFrozen()}:${this.walletUsd}`;
+    const hit = this.exposureCache.get(key);
+    if (hit) return hit;
+    const now = this.exposureOf(pol);
+    const deltas = new Map<number, string[]>();
+    for (const g of pol.proposals) {
+      if (!g.change || (g.status !== "open" && g.status !== "queued")) continue;
+      try {
+        const after = this.exposureOf({ ...pol, ...applyChange(pol, g.change) } as OnchainPolicy);
+        deltas.set(g.id, exposureDelta(now, after, this.org.labels.agents));
+      } catch {
+        // A change the model can't apply shows no delta rather than breaking the snapshot.
+      }
+    }
+    this.exposureCache.clear();
+    const r = { now, deltas };
+    this.exposureCache.set(key, r);
+    return r;
+  }
+
   private previewCache = new Map<string, Preview>();
   /** What an open loosening proposal would have allowed over the last 7 days. */
   previewFor(govId: number): Preview | null {
@@ -2682,8 +2720,10 @@ export class Gatekeeper extends EventEmitter {
     const v = this.log.verify();
     const L = this.labels();
     const frozen = this.isFrozen();
+    const worst = pol ? this.exposureNow(pol) : null;
     return {
       setUp: isSetUp(this.org),
+      exposure: worst && { ...worst.now, walletUsd: this.walletUsd },
       deploying: this.deploying,
       lastChainEventAt: this.lastChainEventAt || null,
       org: {
@@ -2732,6 +2772,7 @@ export class Gatekeeper extends EventEmitter {
           proposer: lower(p.proposer),
           description: p.change ? describeChange(p.change, L) : `op ${opName(p.op)}`,
           preview: p.status === "open" || p.status === "queued" ? this.previewFor(p.id) : null,
+          exposureDelta: worst?.deltas.get(p.id) ?? null,
         })),
       },
       frozen: frozen && { ...frozen, by: frozen.by ? (L.member(frozen.by) ?? frozen.by) : null },

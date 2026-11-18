@@ -89,6 +89,7 @@ export const previewSnapshot: Snapshot = {
       {
         id: 31, op: 3, description: "Add payee Oven Repair Ltd (maintenance)", proposer: sam, createdAt: unix(420), queuedAt: 0, eta: null,
         yes: 1, no: 0, core: false, needed: 2, status: "open", voters: [sam], change: { op: "SetPayee" },
+        exposureDelta: ["+ largest single payment $5.00 → $20.00", "+ payments to Oven Repair Ltd for Bills agent"],
         preview: {
           replayed: 214, days: 7, newlyBlocked: 0, flaggedAllowed: 1,
           newlyAllowed: [
@@ -107,6 +108,15 @@ export const previewSnapshot: Snapshot = {
       },
       { id: 29, op: 9, description: "Add member Sam", proposer: me, createdAt: unix(86400), queuedAt: unix(86000), eta: unix(85940), yes: 1, no: 0, core: false, needed: 2, status: "executed", voters: [me], change: { op: "AddMember" }, preview: null },
       { id: 28, op: 6, description: "Allow domain pastebin.com", proposer: sam, createdAt: unix(90000), queuedAt: 0, eta: null, yes: 1, no: 1, core: false, needed: 2, status: "defeated", voters: [me, sam], change: { op: "AddDomain" }, preview: null },
+    ],
+  },
+  exposure: {
+    frozen: false, dailyUsd: 312.4, perPaymentUsd: 40, walletUsd: 1842.5,
+    agents: [
+      { agentId: "supplies", perPaymentUsd: 40, dailyUsd: 230, writeSites: ["api.flourco.com"], keys: [], fileWrites: "workspace", writePaths: [], packageInstalls: false, messages: true, tools: "non-destructive", toolNames: [] },
+      { agentId: "payables", perPaymentUsd: 0.5, dailyUsd: 5, writeSites: [], keys: ["quickbooks"], fileWrites: "workspace", writePaths: [], packageInstalls: false, messages: false, tools: "none", toolNames: [] },
+      { agentId: "research", perPaymentUsd: 0.1, dailyUsd: 1, writeSites: [], keys: [], fileWrites: "workspace", writePaths: [], packageInstalls: false, messages: false, tools: "none", toolNames: [] },
+      { agentId: "flour-buyer", perPaymentUsd: 0.1, dailyUsd: 1, writeSites: [], keys: ["anthropic"], fileWrites: "workspace", writePaths: [], packageInstalls: false, messages: false, tools: "none", toolNames: [] },
     ],
   },
   frozen: false,

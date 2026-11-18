@@ -201,6 +201,8 @@ export function consoleApi(
         if (!addr) return send(res, 200, null);
         if (!walletCache || Date.now() - walletCache.at > 10_000) {
           walletCache = { at: Date.now(), value: { address: addr, ...(await wallet.balances(addr)) } };
+          const n = Number((walletCache.value as { usdc: string }).usdc);
+          if (Number.isFinite(n)) gk.walletUsd = n;
         }
         return send(res, 200, walletCache.value);
       }

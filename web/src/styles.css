@@ -930,3 +930,11 @@ html, body, * { scrollbar-width: none; }
 }
 .clock-note svg { flex: none; margin-top: 2px; color: var(--n500); }
 .clock-note b { color: var(--ink); font-weight: 500; }
+
+/* worst case */
+.worst .kv b.mono { font-size: 12px; text-align: right; overflow-wrap: anywhere; }
+.worst-line { display: flex; gap: 6px; align-items: baseline; font-size: 12.5px; color: var(--n600); line-height: 1.45; margin: 2px 0 8px; }
+.preview-warn { border-color: var(--danger-line); }
+.worst-delta { margin: 0; padding-left: 18px; display: grid; gap: 2px; }
+.worst-delta .up { color: var(--danger); }
+.worst-delta .down { color: var(--n600); }

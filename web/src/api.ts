@@ -48,6 +48,30 @@ export interface Governance {
   voters: string[];
   change: Record<string, unknown> & { op: string };
   preview: LooseningPreview | null;
+  /** What it would change about the worst case (engine exposureDelta): "+ $15.00/day", ... */
+  exposureDelta?: string[] | null;
+}
+
+/** If an agent were hijacked now: what it could do with no member (engine/src/exposure.ts). */
+export interface AgentExposure {
+  agentId: string;
+  perPaymentUsd: number | null; // null = no limit
+  dailyUsd: number | null;
+  writeSites: string[]; // "*" = any site
+  keys: string[];
+  fileWrites: "none" | "workspace" | "anywhere";
+  writePaths: string[];
+  packageInstalls: boolean;
+  messages: boolean;
+  tools: "none" | "non-destructive" | "all";
+  toolNames: string[];
+}
+export interface Exposure {
+  frozen: boolean;
+  dailyUsd: number | null; // capped by the wallet when its balance is known
+  perPaymentUsd: number | null;
+  agents: AgentExposure[];
+  walletUsd: number | null;
 }
 
 /** Preview Before Loosening: the last 7 days of requests replayed under the proposed rules. */
@@ -127,6 +151,8 @@ export interface WatchdogEvent {
 
 export interface Snapshot {
   setUp: boolean;
+  /** The worst case if every agent were hijacked now. */
+  exposure?: Exposure | null;
   deploying: boolean;
   org: {
     name: string;

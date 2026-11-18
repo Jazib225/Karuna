@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import type { Address } from "viem";
 import { isAddr, isNoLimit, decodeChange, describeChange, describeScope, NO_LIMIT_USD, waitText, type Change } from "@prekaruna/dharma";
-import { api, useGatekeeper, type LooseningPreview, type AgentView, type AgentDraftView, type Governance, type LogEntry, type Proposal, type Rule, type RunDetail, type RunStep, type Schedule, type Snapshot, type WalletInfo } from "./api.ts";
+import { api, useGatekeeper, type LooseningPreview, type AgentExposure, type Exposure, type AgentView, type AgentDraftView, type Governance, type LogEntry, type Proposal, type Rule, type RunDetail, type RunStep, type Schedule, type Snapshot, type WalletInfo } from "./api.ts";
 import { Kind, SignerUnavailable, decidePayment, loadSigner, signerKey, submitChange, type Signer } from "./signer.ts";
 import { accountEmail, createAccount, signIn as accountSignIn, signOut as accountSignOut } from "./account.ts";
 import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
@@ -790,6 +790,8 @@ function Overview({ ctx, wallet, go }: { ctx: Ctx; wallet: WalletInfo | null; go
         <div className="tile rise" style={st(3)}><div className="k">Spent today <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{usd(spent)}</div><div className="note">of {usd(pol.agents.filter((a) => a.active).reduce((n, a) => n + a.capUsd, 0))} allowed</div></div>
       </div>
 
+      {s.exposure && <WorstCase x={s.exposure} names={Object.fromEntries(pol.agents.map((a) => [a.id, a.name]))} />}
+
       {steps.some((x) => !x.done) && !startHidden && (
         <div className="card rise" style={st(1)}>
           <div className="hd">
@@ -998,6 +1000,7 @@ function Ballots({ ctx }: { ctx: Ctx }) {
                 </span>
               )}
             </div>
+            {g.exposureDelta && g.exposureDelta.length > 0 && <WorstDelta lines={g.exposureDelta} />}
             {g.preview && <PreviewBox p={g.preview} ctx={ctx} />}
           </div>
         );
@@ -1130,6 +1133,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
                   </span>
                 </div>
                 {a.active && <Meter a={limited(a)} frozen={!!s.frozen} />}
+                {a.active && (() => { const x = s.exposure?.agents.find((e) => e.agentId === a.id); return x && <div className="worst-line"><Icon name="alert" size={12} /> If hijacked: {agentWorst(x, s.exposure!.walletUsd)}</div>; })()}
                 {a.active && levels && <AgentLevel a={a} ctx={ctx} />}
                 {a.active && a.built && <BuiltControls a={a} ctx={ctx} openRuns={() => setRunsFor(a.id)} />}
                 {a.active && (
@@ -2058,6 +2062,60 @@ function Learned({ ctx }: { ctx: Ctx }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ============================================================== worst case
+
+const money = (n: number | null, wallet: number | null) => (n == null ? "no limit" : wallet != null && n >= wallet && wallet > 0 ? `${usd(n)} (the whole wallet)` : usd(n));
+const sites = (xs: string[]) => (xs.includes("*") ? "any site" : xs.length ? xs.join(", ") : "none");
+const FILE_WRITES = { none: "none", workspace: "its workspace only", anywhere: "anywhere in its sandbox" } as const;
+const TOOLS = { none: "read-only", "non-destructive": "all but destructive ones", all: "all" } as const;
+
+/** One line per agent: the money it could move and what else it could touch. */
+function agentWorst(x: AgentExposure, wallet: number | null): string {
+  const parts = [
+    x.dailyUsd === 0 && x.perPaymentUsd === 0 ? "no payments" : `${money(x.dailyUsd, wallet)}/day, ${money(x.perPaymentUsd, wallet)} per payment`,
+    x.writeSites.length ? `writes to ${sites(x.writeSites)}` : null,
+    x.keys.length ? `keys ${x.keys.join(", ")}` : null,
+    x.fileWrites !== "workspace" || x.writePaths.length ? `files: ${[FILE_WRITES[x.fileWrites], ...x.writePaths].join(", ")}` : null,
+    x.packageInstalls ? "package installs" : null,
+  ];
+  return parts.filter(Boolean).join(" · ");
+}
+
+/** Home: if every agent were hijacked right now, what they could do with no member. */
+function WorstCase({ x, names }: { x: Exposure; names: Record<string, string> }) {
+  const all = <T,>(f: (a: AgentExposure) => T[]) => [...new Set(x.agents.flatMap(f))];
+  const writeSites = all((a) => a.writeSites);
+  const keys = all((a) => a.keys);
+  const files = x.agents.some((a) => a.fileWrites === "anywhere") ? "anywhere in a sandbox" : x.agents.some((a) => a.fileWrites === "workspace") ? "workspaces only" : "none";
+  const installs = x.agents.filter((a) => a.packageInstalls).map((a) => names[a.agentId] ?? a.agentId);
+  return (
+    <div className="card rise worst" style={st(1)}>
+      <div className="hd"><h2>If every agent were hijacked</h2><span className="sub">what they could do with no member, under today's rules</span></div>
+      {x.frozen ? <div className="pad muted">Agents are frozen: nothing runs.</div> : (
+        <div className="pad">
+          <div className="kv"><span>Money out per day</span><b>{money(x.dailyUsd, x.walletUsd)}</b></div>
+          <div className="kv"><span>Largest single payment</span><b>{money(x.perPaymentUsd, x.walletUsd)}</b></div>
+          <div className="kv"><span>Sites they could write to</span><b className="mono">{sites(writeSites)}</b></div>
+          <div className="kv"><span>Keys they could use</span><b className="mono">{keys.length ? keys.join(", ") : "none"}</b></div>
+          <div className="kv"><span>File writes</span><b>{files}</b></div>
+          <div className="kv"><span>Package installs</span><b>{installs.length ? installs.join(", ") : "none"}</b></div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** On a ballot: what the change would add to (or take from) the worst case. */
+function WorstDelta({ lines }: { lines: string[] }) {
+  const up = lines.some((l) => l.startsWith("+"));
+  return (
+    <div className={`preview ${up ? "preview-warn" : ""}`}>
+      <span className="field-label"><Icon name="alert" size={13} /> Worst case if it passes</span>
+      <ul className="worst-delta">{lines.map((l) => <li key={l} className={l.startsWith("+") ? "up" : "down"}>{l}</li>)}</ul>
     </div>
   );
 }

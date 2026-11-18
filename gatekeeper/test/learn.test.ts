@@ -162,6 +162,19 @@ describe("Preview Before Loosening", () => {
     expect(pv.newlyAllowed[0]).toMatchObject({ was: "deny", now: "approval", flagged: "changed bank account" });
   }, 30_000);
 
+  it("snapshot carries the worst case, and each open proposal what it would change", async () => {
+    const before = gk.snapshot().exposure!;
+    expect(before.frozen).toBe(false);
+    expect(before.agents.map((a) => a.agentId)).toContain(bills);
+    const res = await gk.submitAction(await sign(Kind.Propose, { op: "AddRule", id: "al-bills-other", outcome: "Allow", agent: bills, scope: "payment", target: OTHER, maxUsd: 15 }));
+    const gov = gk.snapshot().policy!.proposals.find((g) => g.id === Number(res.proposalId))!;
+    expect(gov.exposureDelta).toEqual(expect.arrayContaining([expect.stringMatching(/^\+ /)]));
+    gk.walletUsd = 3;
+    const capped = gk.snapshot().exposure!;
+    expect(capped.walletUsd).toBe(3);
+    expect(capped.dailyUsd ?? 3).toBeLessThanOrEqual(3);
+  }, 30_000);
+
   it("tracks daily spend while replaying, and tightenings get no preview", () => {
     const before = { rules: [], payees: [], agents: [{ id: "a", capUsd: 1 }], domains: [] };
     expect(applyChange(before, { op: "SetAgent", id: "a", capUsd: 5 }).agents).toEqual([{ id: "a", capUsd: 5 }]);
