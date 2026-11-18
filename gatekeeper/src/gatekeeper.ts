@@ -1150,7 +1150,16 @@ export class Gatekeeper extends EventEmitter {
     } else if (a.kind === Kind.Tighten) {
       this.requirePermission(signer, opName(Number(a.op)) === "Freeze" ? "freeze" : "agents");
     } else if (a.kind === Kind.Propose) {
-      if (isRoleOp(Number(a.op))) throw new GatekeeperError("Role changes apply at once; they aren't proposals", 409);
+      // Dharma v5 votes on one role change: a flat team of two or more switching to a tree.
+      let toTree = false;
+      try {
+        const c = decodeChange(Number(a.op), a.data);
+        toTree = c.op === "SetStructure" && c.structure === "tree";
+      } catch {
+        /* not a structure change */
+      }
+      const votedStructure = toTree && (this.policy?.version ?? 0) >= 5 && this.structure() === "flat" && (this.policy?.members.length ?? 1) > 1;
+      if (isRoleOp(Number(a.op)) && !votedStructure) throw new GatekeeperError("Role changes apply at once; they aren't proposals", 409);
       this.requirePermission(signer, "propose");
     }
 
@@ -1655,7 +1664,9 @@ export class Gatekeeper extends EventEmitter {
       } else if (this.escrowFor(p.agentId, pay.amountUsd)) {
         const e = this.escrowFor(p.agentId, pay.amountUsd)!;
         const escrow = await this.ensureEscrow();
-        const releaseAt = Math.floor(this.now().getTime() / 1000) + e.waitSeconds;
+        // Escrow never releases sooner than a minute after the hold opens (MIN_HOLD); leave room for
+        // the transfer to land first.
+        const releaseAt = Math.floor(this.now().getTime() / 1000) + Math.max(e.waitSeconds, 120);
         // Marked before the USDC moves, so the watchdog knows the transfer into the Escrow is ours.
         p.escrow = { address: escrow, status: "opening", releaseAt: new Date(releaseAt * 1000).toISOString() };
         this.save();

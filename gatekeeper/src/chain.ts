@@ -16,7 +16,7 @@ import {
   type Address, type Chain, type Hex, type PublicClient, type WalletClient,
 } from "viem";
 import { arcTestnet } from "viem/chains";
-import { DHARMA_ABI, DHARMA_PROXY_ABI, MAX_LEVEL, OUTCOME_NAMES, STATUS_NAMES, decodeChange, fromBytes32, fromMicro, type Change, type LevelLimits, decodeRolePerms, type Structure
+import { DHARMA_ABI, DHARMA_PROXY_ABI, MAX_LEVEL, OUTCOME_NAMES, Op, STATUS_NAMES, decodeChange, fromBytes32, fromMicro, type Change, type LevelLimits, decodeRolePerms, type Structure
 } from "@prekaruna/dharma";
 import { DHARMA_BYTECODE, DHARMA_PROXY_BYTECODE } from "@prekaruna/dharma/bytecode";
 import type { OnchainRule } from "@prekaruna/engine";
@@ -410,7 +410,8 @@ export async function readPolicy(client: PublicClient, address: Address, maxProp
         id: ids[i], op: p.op, data: p.data, change, proposer: p.proposer,
         createdAt: Number(p.createdAt), queuedAt: Number(p.queuedAt),
         eta: status === "queued" || status === "executed" ? Number(p.eta) : null,
-        core: p.core, needed: p.core ? members.length : Number(required),
+        // Removing a member needs everyone but them (at least a majority) on Dharma v5.
+        core: p.core, needed: p.core ? members.length : p.op === Op.RemoveMember && Number(codeVersion) >= 5 ? Math.max(Number(required), members.length - 1) : Number(required),
         yes: p.yes, no: p.no, status, voters: (voters.get(ids[i]) ?? []).map((v) => v.toLowerCase() as Address),
       };
     }),

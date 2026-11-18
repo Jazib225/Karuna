@@ -14,6 +14,10 @@ pragma solidity ^0.8.24;
 ///         role. A member with "team" changes roles at once (`manage`); roles never change who votes,
 ///         and every member can always vote, so no role change can pass or block a proposal.
 ///         A changed wait applies to proposals that pass after it, never to ones already waiting.
+///         v5: a loosening proposed before an instant tightening of the same thing is cancelled, not
+///         executed; only blocks are instant (never approval rules); removing a member needs everyone
+///         else and the core wait; a proposal left open across a team change is cancelled; a flat
+///         team of two or more votes on becoming a tree; deleting a role takes it from its holders.
 ///         Members sign EIP-712 actions with their own keys. The Gatekeeper only relays them and
 ///         pays gas — it cannot forge a member's vote.
 /// @dev    Runs behind DharmaProxy (ERC-1967): the proxy holds the address and all storage, and
@@ -123,7 +127,30 @@ contract Dharma {
     error MembersMustPropose();
     error UseTighten();
     error CoreBoundary();
-    error Invalid(string why);
+    error Invalid(string why); // older Dharma versions; kept so their reverts still decode
+    error AlreadyFrozen();
+    error AlreadyVoted();
+    error BadAgent();
+    error BadCoreWait();
+    error BadDomain();
+    error BadImplementation();
+    error BadLevel();
+    error BadLevelLimits();
+    error BadMember();
+    error BadRule();
+    error CannotRemove();
+    error LengthMismatch();
+    error LogCannotShrink();
+    error NoSuchAgent();
+    error NoSuchDomain();
+    error NoSuchPayee();
+    error NoSuchProposal();
+    error NoSuchRule();
+    error NotFrozen();
+    error RuleExists();
+    error VotingClosed();
+    error WaitTooLong();
+    error ZeroAddress();
     error NotReady();
     error AlreadyInitialized();
     error NoPermission();
@@ -153,6 +180,8 @@ contract Dharma {
     uint8 internal constant ROLE_MEMBER = 2; // its permissions can change
     uint8 internal constant STRUCTURE_FLAT = 0;
     uint8 internal constant STRUCTURE_TREE = 1;
+    /// `_subject`'s group for each Op, one byte per op in enum order.
+    bytes32 internal constant SUBJECT_GROUPS = 0x0101020203030404050606000000000003070000000000000000000000000000;
     uint8 internal constant MAX_ROLE = 15; // 2 = Member, 3..15 custom
     uint16 internal constant DELETE_ROLE = 0x8000; // SetRolePerms with this deletes a custom role
     uint16 internal constant ROLE_EXISTS = 0x4000;
@@ -185,7 +214,7 @@ contract Dharma {
 
     bytes32[] internal _agentIds;
     mapping(bytes32 => uint256) internal _agentIdx;
-    mapping(bytes32 => uint256) public agentCap;
+    mapping(bytes32 => uint256) internal agentCap; // read with agents()
 
     string[] internal _domains;
     mapping(bytes32 => uint256) internal _domainIdx;
@@ -196,7 +225,7 @@ contract Dharma {
 
     // v3 (appended): trust levels. Every agent starts at Level 0. A level's limits fall back to the
     // defaults below until members change them by vote, so upgraded orgs need no migration.
-    mapping(bytes32 => uint8) public agentLevel;
+    mapping(bytes32 => uint8) internal agentLevel; // read with levels()
     mapping(uint8 => LevelLimits) internal _levelLimits;
     mapping(uint8 => bool) internal _levelLimitsSet;
 
@@ -205,6 +234,18 @@ contract Dharma {
     uint8 public structure;
     mapping(address => uint8) public roleOf; // 0 = the structure's default role
     mapping(uint8 => uint16) internal _rolePerms; // with ROLE_EXISTS set once a role is defined
+
+    // v5 (appended).
+    /// When something was last tightened at once (by subject, see `_subject`). A loosening proposed
+    /// before that is cancelled instead of executed: voters never saw the tightening it would undo.
+    mapping(bytes32 => uint64) internal _tightenedAt;
+    /// Bumps whenever a member joins or leaves. A proposal remembers it (+1; 0 = made before v5):
+    /// votes cast under another team don't count toward today's, so such a proposal is cancelled
+    /// the next time someone votes on it, and gets proposed again.
+    uint64 internal _teamEpoch;
+    mapping(uint256 => uint64) internal _epochOf;
+    /// Each proposal's `_subject`, fixed when it's made.
+    mapping(uint256 => bytes32) internal _subjectOf;
 
     // ------------------------------------------------------------------ setup
 
@@ -227,9 +268,9 @@ contract Dharma {
     ) external {
         if (_initialized) revert AlreadyInitialized();
         _initialized = true;
-        if (gatekeeper_ == address(0) || firstMember == address(0)) revert Invalid("zero address");
-        if (timelock_ > MAX_TIMELOCK) revert Invalid("wait too long");
-        if (coreTimelock_ < MIN_CORE_TIMELOCK || coreTimelock_ > MAX_CORE_TIMELOCK) revert Invalid("bad core wait");
+        if (gatekeeper_ == address(0) || firstMember == address(0)) revert ZeroAddress();
+        if (timelock_ > MAX_TIMELOCK) revert WaitTooLong();
+        if (coreTimelock_ < MIN_CORE_TIMELOCK || coreTimelock_ > MAX_CORE_TIMELOCK) revert BadCoreWait();
         gatekeeper = gatekeeper_;
         timelock = timelock_;
         coreTimelock = coreTimelock_;
@@ -279,6 +320,7 @@ contract Dharma {
         if (!isTightening(op, data)) revert NotTightening();
         _validate(op, data);
         _apply(op, data, actor);
+        _tightenedAt[_subject(op, data)] = uint64(block.timestamp);
         emit Tightened(op, actor);
     }
 
@@ -286,12 +328,15 @@ contract Dharma {
     ///         counts as their "yes" vote.
     function propose(Op op, bytes calldata data, address signer, uint256 deadline, bytes calldata sig) external returns (uint256 id) {
         _auth(Kind.Propose, op, data, 0, false, signer, deadline, sig);
-        if (_isRoleOp(op)) revert BadRole();
+        // Roles apply at once via manage; only a team's switch to a tree is voted (see manage).
+        if (_isRoleOp(op) && op != Op.SetStructure) revert BadRole();
         if (permissionsOf(signer) & P_PROPOSE == 0) revert NoPermission();
         _validate(op, data);
         bool core = isCoreChange(op, data);
         id = _proposals.length;
         _proposals.push(Proposal(op, data, signer, uint64(block.timestamp), 0, 0, 0, Status.Open, core, 0));
+        _epochOf[id] = _teamEpoch + 1;
+        _subjectOf[id] = _subject(op, data);
         if (core) _pendingCore.push(id);
         emit ProposalCreated(id, op, signer, data);
         _count(id, signer, true);
@@ -300,20 +345,28 @@ contract Dharma {
     /// @notice Vote on an open proposal. A normal change that already passed stays open to "yes"
     ///         votes: once every member has voted yes, its wait is skipped (not for Unfreeze or core).
     function vote(uint256 id, bool support, address signer, uint256 deadline, bytes calldata sig) external {
-        if (id >= _proposals.length) revert Invalid("no such proposal");
+        if (id >= _proposals.length) revert NoSuchProposal();
         Proposal storage p = _proposals[id];
         _auth(Kind.Vote, p.op, p.data, id, support, signer, deadline, sig);
         bool skipVote = p.status == Status.Queued && support && _skippable(p);
-        if (p.status != Status.Open && !skipVote) revert Invalid("voting closed");
-        if (hasVoted[id][signer]) revert Invalid("already voted");
+        if (p.status != Status.Open && !skipVote) revert VotingClosed();
+        if (hasVoted[id][signer]) revert AlreadyVoted();
         _count(id, signer, support);
     }
 
     /// @notice Anyone may execute a passed proposal once its wait is over.
     function execute(uint256 id) external {
-        if (id >= _proposals.length) revert Invalid("no such proposal");
+        if (id >= _proposals.length) revert NoSuchProposal();
         Proposal storage p = _proposals[id];
         if (p.status != Status.Queued || block.timestamp < p.eta) revert NotReady();
+        // A loosening proposed before an instant tightening of the same thing (a level drop, a cap
+        // cut, a Shield block, a freeze) would undo it without a vote that saw it: cancel instead.
+        bytes32 subject = _subjectOf[id];
+        if (subject != 0 && _tightenedAt[subject] > p.createdAt && !isTightening(p.op, p.data)) {
+            p.status = Status.Cancelled;
+            emit ProposalCancelled(id);
+            return;
+        }
         _validate(p.op, p.data); // re-check against today's state
         p.status = Status.Executed;
         _apply(p.op, p.data, p.proposer);
@@ -326,8 +379,14 @@ contract Dharma {
     }
 
     /// @notice Yes votes this proposal needs: every member for a core change, else a majority.
+    ///         Removing a member needs everyone but that member (at least a majority), so a bare
+    ///         majority can't vote out whoever stands in the way of an every-member change.
     function requiredFor(uint256 id) public view returns (uint32) {
-        return _proposals[id].core ? uint32(_members.length) : required();
+        Proposal storage p = _proposals[id];
+        uint32 n = uint32(_members.length);
+        if (p.core) return n;
+        uint32 m = required();
+        return p.op == Op.RemoveMember && n - 1 > m ? n - 1 : m;
     }
 
     /// @notice Core changes: removing a core rule, changing the core wait, upgrading this code.
@@ -340,13 +399,21 @@ contract Dharma {
         return false;
     }
 
-    /// @dev The every-member skip: normal changes only, never Unfreeze, and only in a team (2+).
+    /// @dev The every-member skip: normal changes only, never Unfreeze or removing a member, and only
+    ///      in a team (2+).
     function _skippable(Proposal storage p) private view returns (bool) {
-        return !p.core && p.op != Op.Unfreeze && _members.length >= 2;
+        return !p.core && p.op != Op.Unfreeze && p.op != Op.RemoveMember && _members.length >= 2;
     }
 
     function _count(uint256 id, address voter, bool support) private {
         Proposal storage p = _proposals[id];
+        uint64 e = _epochOf[id];
+        if (e != 0 && e != _teamEpoch + 1) {
+            // The team changed while it was waiting for votes: its count no longer matches who votes.
+            p.status = Status.Cancelled;
+            emit ProposalCancelled(id);
+            return;
+        }
         hasVoted[id][voter] = true;
         if (support) p.yes++;
         else p.no++;
@@ -355,9 +422,10 @@ contract Dharma {
         if (p.status == Status.Open) {
             if (p.yes >= need) {
                 // The wait is fixed now, from today's setting: a later change to the wait never moves it.
+                // Removing a member waits the core wait, so they have time to see it coming.
                 p.status = Status.Queued;
                 p.queuedAt = uint64(block.timestamp);
-                p.eta = uint64(block.timestamp) + (p.core ? coreTimelock : timelock);
+                p.eta = uint64(block.timestamp) + (p.core || p.op == Op.RemoveMember ? coreTimelock : timelock);
                 emit ProposalQueued(id, p.eta);
             } else if (p.no > _members.length - need) {
                 p.status = Status.Defeated;
@@ -394,17 +462,33 @@ contract Dharma {
             if (r < ROLE_MEMBER || r > MAX_ROLE || (del ? r == ROLE_MEMBER : perms > P_ALL)) revert BadRole();
             _rolePerms[r] = del ? 0 : perms | ROLE_EXISTS;
             emit RolePermsSet(r, perms, signer);
+            // Its holders go back to the default now, so a role made later with this id isn't theirs.
+            if (del) {
+                for (uint256 i; i < _members.length; i++) {
+                    if (roleOf[_members[i]] == r) {
+                        roleOf[_members[i]] = ROLE_DEFAULT;
+                        emit RoleSet(_members[i], ROLE_DEFAULT, signer);
+                    }
+                }
+            }
         } else {
             uint8 st = abi.decode(data, (uint8));
             if (st > STRUCTURE_TREE) revert BadRole();
-            structure = st;
-            // Whoever sets up a Tree becomes its Admin (unless they already have a role).
-            if (st == STRUCTURE_TREE && roleOf[signer] == ROLE_DEFAULT) {
-                roleOf[signer] = ROLE_ADMIN;
-                emit RoleSet(signer, ROLE_ADMIN, signer);
-            }
-            emit StructureSet(st, signer);
+            // In a flat team everyone has "team", so one member making it a tree (and themselves its
+            // Admin) would take the others' rights alone: with two or more members that's voted.
+            if (st == STRUCTURE_TREE && structure == STRUCTURE_FLAT && _members.length > 1) revert MembersMustPropose();
+            _setStructure(st, signer);
         }
+    }
+
+    function _setStructure(uint8 st, address by) private {
+        structure = st;
+        // Whoever sets up a Tree becomes its Admin (unless they already have a role).
+        if (st == STRUCTURE_TREE && roleOf[by] == ROLE_DEFAULT) {
+            roleOf[by] = ROLE_ADMIN;
+            emit RoleSet(by, ROLE_ADMIN, by);
+        }
+        emit StructureSet(st, by);
     }
 
     /// @notice What a member may do (0 for anyone else). There's always someone with "team": in a
@@ -448,7 +532,7 @@ contract Dharma {
     /// @notice Anchor the signed decision log. Length can only grow, so history can't be rewound.
     function anchorLog(bytes32 head, uint64 length) external {
         if (msg.sender != gatekeeper) revert NotGatekeeper();
-        if (length < logLength) revert Invalid("log cannot shrink");
+        if (length < logLength) revert LogCannotShrink();
         logHead = head;
         logLength = length;
         emit LogAnchored(head, length);
@@ -471,8 +555,8 @@ contract Dharma {
         external
     {
         if (msg.sender != gatekeeper) revert NotGatekeeper();
-        if (length < logLength) revert Invalid("log cannot shrink");
-        if (agents_.length != completed.length || agents_.length != denied.length) revert Invalid("length mismatch");
+        if (length < logLength) revert LogCannotShrink();
+        if (agents_.length != completed.length || agents_.length != denied.length) revert LengthMismatch();
         logHead = head;
         logLength = length;
         emit LogAnchored(head, length);
@@ -496,9 +580,12 @@ contract Dharma {
     /// @notice True when applying this change can only make the policy stricter.
     function isTightening(Op op, bytes memory data) public view returns (bool) {
         if (op == Op.AddRule) {
+            // Only a block. An approval rule can loosen: it turns a hard deny later in the order
+            // (unlisted domains, the default deny) into something a person can approve, and org
+            // settings are stored as approval rules.
             (bytes32 id, uint8 outcome,,,,) = abi.decode(data, (bytes32, uint8, bytes32, string, string, uint256));
             Outcome o = _ruleKnown[id] && _rules[id].builtin ? _rules[id].outcome : Outcome(outcome);
-            return o != Outcome.Allow;
+            return o == Outcome.Deny;
         }
         if (op == Op.RemoveRule) {
             bytes32 id = abi.decode(data, (bytes32));
@@ -529,54 +616,68 @@ contract Dharma {
     function _validate(Op op, bytes memory data) private view {
         if (op == Op.AddRule) {
             (bytes32 id, uint8 outcome,,,,) = abi.decode(data, (bytes32, uint8, bytes32, string, string, uint256));
-            if (id == bytes32(0) || outcome > uint8(Outcome.Approval)) revert Invalid("bad rule");
-            if (_ruleKnown[id] && _rules[id].active) revert Invalid("rule exists");
+            if (id == bytes32(0) || outcome > uint8(Outcome.Approval)) revert BadRule();
+            if (_ruleKnown[id] && _rules[id].active) revert RuleExists();
         } else if (op == Op.RemoveRule) {
             bytes32 id = abi.decode(data, (bytes32));
-            if (!_ruleKnown[id] || !_rules[id].active) revert Invalid("no such rule");
+            if (!_ruleKnown[id] || !_rules[id].active) revert NoSuchRule();
             // A core rule can be removed, but only as a core change (every member + the core wait):
             // propose() marks it core, and tighten() can never remove a deny rule.
         } else if (op == Op.SetTimelock) {
-            if (abi.decode(data, (uint64)) > MAX_TIMELOCK) revert Invalid("wait too long");
+            if (abi.decode(data, (uint64)) > MAX_TIMELOCK) revert WaitTooLong();
         } else if (op == Op.SetCoreTimelock) {
             uint64 w = abi.decode(data, (uint64));
-            if (w < MIN_CORE_TIMELOCK || w > MAX_CORE_TIMELOCK) revert Invalid("bad core wait");
+            if (w < MIN_CORE_TIMELOCK || w > MAX_CORE_TIMELOCK) revert BadCoreWait();
         } else if (op == Op.Upgrade) {
             address impl = abi.decode(data, (address));
-            if (impl.code.length == 0 || impl == implementation()) revert Invalid("bad implementation");
+            if (impl.code.length == 0 || impl == implementation()) revert BadImplementation();
         } else if (op == Op.SetPayee) {
             (address a,) = abi.decode(data, (address, string));
-            if (a == address(0)) revert Invalid("zero address");
+            if (a == address(0)) revert ZeroAddress();
         } else if (op == Op.RemovePayee) {
-            if (_payeeIdx[abi.decode(data, (address))] == 0) revert Invalid("no such payee");
+            if (_payeeIdx[abi.decode(data, (address))] == 0) revert NoSuchPayee();
         } else if (op == Op.SetAgent) {
             (bytes32 id,) = abi.decode(data, (bytes32, uint256));
-            if (id == bytes32(0)) revert Invalid("bad agent");
+            if (id == bytes32(0)) revert BadAgent();
         } else if (op == Op.RemoveAgent) {
-            if (_agentIdx[abi.decode(data, (bytes32))] == 0) revert Invalid("no such agent");
+            if (_agentIdx[abi.decode(data, (bytes32))] == 0) revert NoSuchAgent();
         } else if (op == Op.AddDomain) {
             string memory d = abi.decode(data, (string));
-            if (bytes(d).length == 0 || _domainIdx[keccak256(bytes(d))] != 0) revert Invalid("bad domain");
+            if (bytes(d).length == 0 || _domainIdx[keccak256(bytes(d))] != 0) revert BadDomain();
         } else if (op == Op.RemoveDomain) {
-            if (_domainIdx[keccak256(bytes(abi.decode(data, (string))))] == 0) revert Invalid("no such domain");
+            if (_domainIdx[keccak256(bytes(abi.decode(data, (string))))] == 0) revert NoSuchDomain();
         } else if (op == Op.Freeze) {
-            if (frozen) revert Invalid("already frozen");
+            if (frozen) revert AlreadyFrozen();
         } else if (op == Op.Unfreeze) {
-            if (!frozen) revert Invalid("not frozen");
+            if (!frozen) revert NotFrozen();
         } else if (op == Op.AddMember) {
             address m = abi.decode(data, (address));
-            if (m == address(0) || _memberIdx[m] != 0) revert Invalid("bad member");
+            if (m == address(0) || _memberIdx[m] != 0) revert BadMember();
         } else if (op == Op.RemoveMember) {
             address m = abi.decode(data, (address));
-            if (_memberIdx[m] == 0 || _members.length == 1) revert Invalid("cannot remove");
+            if (_memberIdx[m] == 0 || _members.length == 1) revert CannotRemove();
         } else if (op == Op.SetLevel) {
             (bytes32 id, uint8 level,) = abi.decode(data, (bytes32, uint8, string));
-            if (_agentIdx[id] == 0) revert Invalid("no such agent");
-            if (level > MAX_LEVEL || level == agentLevel[id]) revert Invalid("bad level");
+            if (_agentIdx[id] == 0) revert NoSuchAgent();
+            if (level > MAX_LEVEL || level == agentLevel[id]) revert BadLevel();
         } else if (op == Op.SetLevelLimits) {
             (uint8 level, uint256 per, uint256 daily) = abi.decode(data, (uint8, uint256, uint256));
-            if (level > MAX_LEVEL || per > daily) revert Invalid("bad level limits");
+            if (level > MAX_LEVEL || per > daily) revert BadLevelLimits();
+        } else if (op == Op.SetStructure) {
+            if (abi.decode(data, (uint8)) > STRUCTURE_TREE) revert BadRole();
         }
+    }
+
+    /// @dev What a change is about, for `_tightenedAt`: one key per rule, payee, agent (cap, level,
+    ///      removal), domain, level's limits, plus the threshold and the freeze. 0 = nothing tracked.
+    function _subject(Op op, bytes calldata data) private pure returns (bytes32 key) {
+        // Group by op: rules 1, payees 2, agents (cap, removal, level) 3, domains 4, threshold 5,
+        // freeze 6, a level's limits 7; 0 for the rest.
+        uint256 g = uint8(SUBJECT_GROUPS[uint8(op)]);
+        if (g == 0) return 0;
+        if (g == 4) key = keccak256(data); // a domain: the string, not its offset
+        else if ((g < 5 || g > 6) && data.length >= 32) key = bytes32(data[:32]); // rule id, payee, agent id, level
+        return keccak256(abi.encodePacked(key, g));
     }
 
     function _apply(Op op, bytes memory data, address actor) private {
@@ -679,6 +780,7 @@ contract Dharma {
         } else if (op == Op.RemoveMember) {
             address m = abi.decode(data, (address));
             _removeAddr(_members, _memberIdx, m);
+            _teamEpoch++;
             delete roleOf[m];
             emit MemberRemoved(m);
         } else if (op == Op.SetLevel) {
@@ -690,10 +792,13 @@ contract Dharma {
             _levelLimits[level] = LevelLimits(per, daily);
             _levelLimitsSet[level] = true;
             emit LevelLimitsSet(level, per, daily);
+        } else if (op == Op.SetStructure) {
+            _setStructure(abi.decode(data, (uint8)), actor); // voted: the proposer becomes Admin
         }
     }
 
     function _addMember(address m) private {
+        _teamEpoch++;
         _members.push(m);
         _memberIdx[m] = _members.length;
         emit MemberAdded(m);
@@ -767,12 +872,12 @@ contract Dharma {
 
     /// @notice The code version behind this org's address.
     function version() external pure virtual returns (uint256) {
-        return 4;
+        return 5;
     }
 
     /// @notice A level's payment limits: the members' values if they set them, else the defaults.
     function levelLimits(uint8 level) public view returns (LevelLimits memory) {
-        if (level > MAX_LEVEL) revert Invalid("bad level");
+        if (level > MAX_LEVEL) revert BadLevel();
         if (_levelLimitsSet[level]) return _levelLimits[level];
         if (level == 0) return LevelLimits(0.1e6, 1e6);
         if (level == 1) return LevelLimits(0.5e6, 5e6);
@@ -805,6 +910,11 @@ contract Dharma {
     function rules() external view returns (Rule[] memory out) {
         out = new Rule[](_ruleIds.length);
         for (uint256 i; i < _ruleIds.length; i++) out[i] = _rules[_ruleIds[i]];
+    }
+
+    /// @notice One payee check at constant cost (Escrow uses it on every open and release).
+    function isPayee(address a) external view returns (bool) {
+        return _payeeIdx[a] != 0;
     }
 
     function payees() external view returns (Payee[] memory out) {

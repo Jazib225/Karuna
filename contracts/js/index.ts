@@ -256,6 +256,12 @@ export function describeScope(scope: string, target: string, n: { agent?: (id: s
 }
 
 /** Plain-English description, shown to humans before they sign and in the proposal list. */
+/** Karuna's default rules, as every Dharma is created with them. */
+export const BUILTIN_RULE_IDS: readonly string[] = [
+  "core-boundary", "secrets-read", "unknown-recipient", "payment-within-allowance", "payment-approval", "destructive-shell",
+  "package-install", "human-approval-writes", "allowlisted-domain", "http-mutations", "unlisted-domain", "workspace-read", "default-deny",
+];
+
 export function describeChange(c: Change, l: Labels = {}): string {
   const m = (a: string) => l.member?.(a.toLowerCase()) ?? short(a);
   const ag = (id: string) => l.agent?.(id) ?? id;
@@ -263,7 +269,8 @@ export function describeChange(c: Change, l: Labels = {}): string {
   const r = (id: number) => l.role?.(id) ?? roleName(id);
   switch (c.op) {
     case "AddRule": {
-      if (!c.scope) return `Re-enable default rule ${c.id}`;
+      // A default rule's id re-enables that rule as it was: Dharma ignores the rest of the change.
+      if (!c.scope || BUILTIN_RULE_IDS.includes(c.id)) return `Re-enable default rule ${c.id}`;
       if (c.scope === "escrow") {
         return `Hold payments of ${usd(c.maxUsd ?? 0)} or more in escrow for ${waitText(Number(c.target))}${c.agent ? ` for ${ag(c.agent)}` : ""}; any member can cancel before release (${c.id})`;
       }
@@ -484,8 +491,9 @@ export interface PolicyShape {
 export function isTightening(c: Change, p: PolicyShape): boolean {
   switch (c.op) {
     case "AddRule": {
+      // Only a block (Dharma v5): an approval rule can turn a hard deny into something approvable.
       const known = p.rules.find((r) => r.id === c.id && r.builtin);
-      return (known ? known.outcome : c.outcome.toLowerCase()) !== "allow";
+      return (known ? known.outcome : c.outcome.toLowerCase()) === "deny";
     }
     case "RemoveRule":
       return p.rules.find((r) => r.id === c.id)?.outcome === "allow";

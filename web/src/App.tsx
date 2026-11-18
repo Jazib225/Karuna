@@ -1916,6 +1916,7 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
         return { change: { op: "SetThreshold", usd: amount }, text: `payments of ${usd(amount)} or more need two members to sign (now ${usd(pol.thresholdUsd)})` };
       case "escrow":
         if (!(amount > 0) || !(waitSec > 0)) return { error: "Enter an amount in USD and how long to hold it" };
+        if (waitSec < 120) return { error: "Hold payments for at least 2 minutes, so members have time to cancel" };
         return {
           change: { op: "AddRule", id: ruleId("escrow"), outcome: "Approval", scope: "escrow", target: String(waitSec), maxUsd: amount },
           text: `payments of ${usd(amount)} or more wait ${waitText(waitSec)} in escrow, and any member can cancel them`,
@@ -2363,7 +2364,14 @@ function RolesCard({ ctx }: { ctx: Ctx }) {
         : "Switch to a flat team? Every member without a set role can do everything.",
       { action: v === "tree" ? "Use a tree" : "Use a flat team" },
     );
-    if (ok) await ctx.manage({ op: "SetStructure", structure: v }, v === "tree" ? "The team is now a tree" : "The team is now flat");
+    if (!ok) return;
+    // A team of two or more votes on becoming a tree (Dharma v5): in a flat team everyone has
+    // "team", so one member doing it alone would take the others' rights.
+    if (v === "tree" && structure === "flat" && (s.policy?.members.length ?? 1) > 1 && (s.policy?.version ?? 0) >= 5) {
+      await ctx.change({ op: "SetStructure", structure: v }, undefined);
+      return;
+    }
+    await ctx.manage({ op: "SetStructure", structure: v }, v === "tree" ? "The team is now a tree" : "The team is now flat");
   };
   return (
     <div className="card">

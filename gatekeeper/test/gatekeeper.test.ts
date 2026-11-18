@@ -328,9 +328,14 @@ describe("team roles: on Dharma, changed at once, never a vote", () => {
     await propose(alice, { op: "AddMember", member: bob.address }, "Bob");
     await waitTimelock();
   };
+  // With two or more members, a flat team becomes a tree by a vote (Dharma v5): Alice proposes, Bob agrees.
   const tree = async () => {
     await addBob();
-    await manage(alice, { op: "SetStructure", structure: "tree" });
+    const c: Change = { op: "SetStructure", structure: "tree" };
+    await expect(manage(alice, c)).rejects.toThrow(/MembersMustPropose/);
+    const { proposalId } = await propose(alice, c);
+    await vote(bob, proposalId!, c);
+    await waitTimelock();
   };
 
   it("a new org is flat: every member can do everything, with no setup", async () => {

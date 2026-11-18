@@ -125,7 +125,8 @@ export function autoRule(agentId: string, category: string, outcome: "Deny" | "A
 
 /** Final check on whatever Auto-Shield is about to send. */
 export function assertShieldSafe(c: Change) {
-  if (c.op !== "AddRule" || (c.outcome !== "Deny" && c.outcome !== "Approval")) {
+  // Blocks only: Dharma treats an approval rule as a loosening (it can make a hard deny approvable).
+  if (c.op !== "AddRule" || c.outcome !== "Deny") {
     throw new ShieldGuardError(`Drills refused to write ${c.op}${"outcome" in c ? ` (${String(c.outcome)})` : ""}: it can only add blocks`);
   }
 }
