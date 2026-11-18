@@ -3706,10 +3706,17 @@ function LevelsCard({ ctx }: { ctx: Ctx }) {
 }
 
 /** Votes page: move an older org to the Dharma code this Karuna ships (a core change). */
+const DHARMA_LATEST = 5;
+/** What each Dharma version adds, for the upgrade card. */
+const DHARMA_ADDS: Record<number, string> = {
+  3: "trust levels, and each agent's record published onchain",
+  4: "team roles: what each member may do",
+  5: "safer votes: a vote can no longer undo a later automatic block, removing a member needs everyone else, and votes left open when the team changes start over",
+};
 function UpgradeCard({ ctx }: { ctx: Ctx }) {
   const { s, busy, run, me } = ctx;
   const pol = s.policy!;
-  if (pol.version >= 3) return null;
+  if (pol.version >= DHARMA_LATEST) return null;
   const open = pol.proposals.find((g) => (g.status === "open" || g.status === "queued") && g.change.op === "Upgrade");
   const propose = () =>
     run(async () => {
@@ -3718,11 +3725,13 @@ function UpgradeCard({ ctx }: { ctx: Ctx }) {
     }, `Upgrade proposed: needs every member's signature, then ${waitText(pol.coreTimelock)}`);
   return (
     <div className="card upgrade-card rise">
-      <div className="hd"><h2>Dharma v{pol.version} → v3</h2>{open && <span className="sub">proposal #{open.id}</span>}</div>
+      <div className="hd"><h2>Dharma v{pol.version} → v{DHARMA_LATEST}</h2>{open && <span className="sub">proposal #{open.id}</span>}</div>
       <div className="pad stack-sm">
-        <p>Version 3 adds trust levels and publishes each agent's record onchain. The address stays the same, and members, agents, payees and rules carry over.</p>
+        <p>
+          Adds {Array.from({ length: DHARMA_LATEST - pol.version }, (_, i) => DHARMA_ADDS[pol.version + 1 + i]).filter(Boolean).join("; ")}. The address stays the same, and members, agents, payees and rules carry over.
+        </p>
         <p className="muted small">An upgrade is a core change: every member signs, then it waits {waitText(pol.coreTimelock)}. Any freeze cancels it.</p>
-        {!open && <button className="btn btn-dark" disabled={busy} onClick={propose}><Icon name="pen" size={14} /> Propose upgrade to v3</button>}
+        {!open && <button className="btn btn-dark" disabled={busy} onClick={propose}><Icon name="pen" size={14} /> Propose upgrade to v{DHARMA_LATEST}</button>}
       </div>
     </div>
   );
