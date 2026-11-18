@@ -26,9 +26,21 @@ export interface OrgFile {
     payees: Record<string, string>; // lowercased address -> name
   };
   agentTokens: Record<string, string>; // agent id -> sha256(token)
-  enrollments: { address: string; name: string; requestedAt: string }[];
+  enrollments: { address: string; name: string; requestedAt: string; via?: "invite" }[];
+  /** Invite links: anyone with one can send a join request from their own Karuna (members still vote). */
+  invites?: Invite[];
   /** Newer Dharma code deployed for an Upgrade vote (the org moves only once the vote passes). */
   dharmaCode?: { implementation: string; version: number; txRef: string; deployedAt: string };
+}
+
+export interface Invite {
+  code: string;
+  createdAt: string;
+  expiresAt: string;
+  /** Join requests sent with this link (it stops working at maxUses). */
+  uses: number;
+  maxUses: number;
+  revoked?: boolean;
 }
 
 export const emptyOrg = (): OrgFile => ({

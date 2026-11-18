@@ -202,6 +202,9 @@ a:hover .nudge, button:hover .nudge { translate: 3px 0; }
   background: linear-gradient(180deg, var(--surface), var(--surface-2)); border: 1px solid var(--line); box-shadow: inset 0 1px 0 var(--highlight);
 }
 .member .who { min-width: 0; line-height: 1.3; }
+.logout-btn { margin-top: 8px; display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 8px; border-radius: 8px; border: 1px solid var(--line); background: none; color: var(--n500); font: inherit; font-size: 13px; cursor: pointer; }
+.logout-btn:hover { color: var(--danger); background: var(--danger-bg); }
+.logout-btn:focus-visible { outline: 2px solid var(--danger); outline-offset: 1px; }
 .member .who div:first-child { font-weight: 500; font-size: 14px; }
 .member .who div:last-child { font-family: var(--font-mono); font-size: 11.5px; color: var(--n500); }
 
@@ -939,10 +942,26 @@ html, body, * { scrollbar-width: none; }
 }
 .input-icon:has(.input-toggle) .plain-input { padding-right: 64px; }
 .input-icon:focus-within > svg { color: var(--ink); }
-.input-icon.bad .plain-input { border-color: var(--danger-line); }
+.input-icon.bad .plain-input { border-color: var(--danger); }
+.input-icon.bad .plain-input:focus { box-shadow: 0 0 0 4px var(--danger-bg); }
+.input-icon.bad > svg { color: var(--danger); }
+.field small.bad-text { color: var(--danger); }
 .input-toggle {
   position: absolute; right: 8px; height: 28px; padding: 0 10px; border-radius: 999px; border: 1px solid transparent; background: transparent;
   font-family: var(--font-mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--n500); cursor: pointer;
 }
 .input-toggle:hover { color: var(--ink); background: var(--surface-2); border-color: var(--line); }
 .email-signin .row-form { align-items: center; gap: 14px; }
+
+/* Create organization ↔ Ask to Join: the small pill at the top of the card. */
+.back-btn { display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px 6px 9px; border-radius: 999px; border: 1px solid var(--line); background: none; color: var(--n500); font: inherit; font-size: 13px; cursor: pointer; }
+.back-btn:hover:not(:disabled) { color: var(--ink); border-color: var(--line-strong); }
+.back-btn:disabled { opacity: .5; cursor: default; }
+.back-btn.back svg { transform: rotate(180deg); }
+
+/* Invite links: the Team card's rows, and the join page's sent requests. */
+.invite-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 10px; align-items: center; }
+.invite-row .token { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 640px) { .invite-row { grid-template-columns: 1fr auto auto; } .invite-row .token { grid-column: 1 / -1; } }
+.sent-join { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+.field small.ok-text { display: inline-flex; align-items: center; gap: 5px; }

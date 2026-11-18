@@ -2,7 +2,7 @@
 // (default gatekeeper/data, gitignored): org config, runtime state, the signed log, and the
 // log-signing key. Writes are atomic (temp file + rename).
 import {
-  appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync,
+  appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, type KeyObject } from "node:crypto";
@@ -41,6 +41,20 @@ export class Store {
 
   appendLog(entry: LogEntry) {
     appendFileSync(this.path("log.jsonl"), JSON.stringify(entry) + "\n", { mode: 0o600 });
+  }
+
+  /** Copy these files into archive/<time>-<name>/ (for starting a new organization). Returns the folder. */
+  archive(name: string, files: string[]): string {
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "organization";
+    const folder = join(this.dir, "archive", `${new Date().toISOString().replace(/[:.]/g, "-")}-${slug}`);
+    mkdirSync(folder, { recursive: true, mode: 0o700 });
+    for (const f of files) if (existsSync(this.path(f))) copyFileSync(this.path(f), join(folder, f));
+    return folder;
+  }
+
+  /** Start an empty decision log (after archiving the old one). */
+  resetLog() {
+    writeFileSync(this.path("log.jsonl"), "", { mode: 0o600 });
   }
 
   /** The ed25519 key that signs the decision log. Created once, never leaves this directory. */

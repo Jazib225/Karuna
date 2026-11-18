@@ -5,6 +5,7 @@
 //                         console access can't approve, loosen, or vote without a member.
 // An agent can never reach the console API, so it can't approve its own request.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { remoteInvite } from "./invite.ts";
 import { timingSafeEqual } from "node:crypto";
 import { defaultRules } from "@prekaruna/engine";
 import { ConfigError } from "./config.ts";
@@ -269,6 +270,12 @@ export function consoleApi(
       if (method === "POST" && (m = path.match(/^\/sandbox\/([\w-]+)\/stop$/))) return send(res, 200, (gk.stopSession(m[1]), { ok: true }));
       if (method === "POST" && path === "/pause") return send(res, 200, { paused: gk.pause(String(body.by ?? "console")) });
       if (method === "POST" && path === "/resume") return send(res, 200, { paused: gk.resume(String(body.by ?? "console")) });
+      // Invite links: make and revoke yours; use someone else's (this Gatekeeper reaches their Karuna).
+      if (method === "POST" && path === "/invites") return send(res, 200, gk.createInvite());
+      if (method === "DELETE" && (m = path.match(/^\/invites\/(inv_[\w-]+)$/))) return send(res, 200, (gk.revokeInvite(m[1]), { ok: true }));
+      if (method === "POST" && path === "/invites/lookup") return send(res, 200, await remoteInvite(body.link, ""));
+      if (method === "POST" && path === "/invites/send") return send(res, 200, await remoteInvite(body.link, "/request", { address: body.address, name: body.name, signature: body.signature }));
+      if (method === "POST" && path === "/invites/status") return send(res, 200, await remoteInvite(body.link, `/status?address=${encodeURIComponent(String(body.address ?? ""))}`));
       if (method === "POST" && path === "/access-request") return send(res, 200, (gk.requestAccess(body.address, body.name), { ok: true }));
       if (method === "POST" && (m = path.match(/^\/proposals\/([\w-]+)\/decide$/))) return send(res, 200, await gk.decide(m[1], body as unknown as SignedDecision));
 

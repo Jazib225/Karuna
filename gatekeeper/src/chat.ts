@@ -53,6 +53,14 @@ function baseUrl(req: IncomingMessage): string {
   return `${proto}://${req.headers.host ?? "127.0.0.1"}`;
 }
 
+/** Opened in a browser, an invite link says what to do with it. */
+function invitePage(org: string, link: string) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Join ${esc(org)} on Karuna</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;background:#0a0a0a;color:#f4f4f5;display:grid;place-items:center;min-height:100vh;margin:0;padding:16px;box-sizing:border-box}main{max-width:460px}h1{font-size:26px;margin:0 0 8px}code{display:block;background:#18181b;border:1px solid #27272a;border-radius:8px;padding:10px;word-break:break-all;margin:14px 0;font-size:13px}p{color:#a1a1aa}ol{color:#d4d4d8;padding-left:20px}</style></head>
+<body><main><h1>You're invited to join ${esc(org)}</h1><p>${esc(org)} uses Karuna to approve what its AI agents do.</p>
+<ol><li>Open the Karuna app on your computer.</li><li>Choose <b>Ask to Join</b> and paste this link:</li></ol><code>${esc(link)}</code><p>One of ${esc(org)}'s members then adds you after a vote.</p></main></body></html>`;
+}
+
 // ---------------------------------------------------------------- Karuna's own tools
 
 const KARUNA_TOOLS: Tool[] = [
@@ -184,6 +192,24 @@ export function publicApi(gk: Gatekeeper, store: Store): HttpServer {
           response_types_supported: ["code"], grant_types_supported: ["authorization_code"], code_challenge_methods_supported: ["S256"],
           token_endpoint_auth_methods_supported: ["none"],
         });
+      }
+
+      // ---- invite links: another Karuna (or a browser) looks up the org and sends a signed join request
+      let im: RegExpMatchArray | null;
+      if ((im = path.match(/^\/invite\/(inv_[\w-]{8,40})(\/request|\/status)?$/))) {
+        const [, code, sub] = im;
+        if (method === "GET" && !sub) {
+          const info = gk.inviteInfo(code);
+          if (!String(req.headers.accept ?? "").includes("text/html")) return send(res, 200, info);
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+          return res.end(invitePage(info.org, `${base}/invite/${code}`));
+        }
+        if (method === "POST" && sub === "/request") {
+          const body = JSON.parse((await readRaw(req)) || "{}") as { address?: unknown; name?: unknown; signature?: unknown };
+          return send(res, 200, await gk.requestWithInvite(code, body));
+        }
+        if (method === "GET" && sub === "/status") return send(res, 200, gk.inviteStatus(code, url.searchParams.get("address")));
+        return send(res, 405, { error: "Method not allowed" });
       }
 
       // ---- client registration (RFC 7591): chat apps register themselves
