@@ -1942,29 +1942,34 @@ export class Gatekeeper extends EventEmitter {
    * One tool call from Claude Code or Cursor, before it runs. Same engine, rules, levels, Tripwire,
    * freeze and log as any agent. "pending" means a member must approve it (waitHook).
    */
-  hookCall(agentId: string, call: HookCall): { decision: "allow" | "deny" | "pending"; proposalId?: string } {
+  hookCall(agentId: string, call: HookCall): { decision: "allow" | "deny" | "pending"; proposalId?: string; summary?: string } {
     const pol = this.requireReady();
     const device = (this.state.devices ?? []).find((d) => d.agentId === agentId && d.status === "approved");
     if (device) device.lastSeenAt = this.now().toISOString();
     const t = hookRequest(agentId, { tool: String(call.tool ?? ""), input: call.input && typeof call.input === "object" ? call.input : {}, cwd: String(call.cwd ?? "") });
     if (t.kind !== "request") return { decision: "allow" };
     const request = t.request;
+    const summary = t.summary;
     const base = {
       id: randomUUID(), agentId, createdAt: this.now().toISOString(),
       action: { type: "action" as const, tool: (request.tool === "tool" ? "http" : request.tool) as "shell" | "file" | "http", command: request.command, path: request.path, url: request.url, method: request.method },
       approvals: [],
     };
     const facts: Fact[] = [
-      { label: "From", value: `${this.org.labels.agents[agentId] ?? agentId} (${device?.tool === "cursor" ? "Cursor" : "Claude Code"}${device ? ` · ${device.name}` : ""})` },
+      // A Karuna-built agent's own tools come through here too (no computer connected for it).
+      { label: "From", value: `${this.org.labels.agents[agentId] ?? agentId} (${device ? `${device.tool === "cursor" ? "Cursor" : "Claude Code"} · ${device.name}` : "Karuna agent"})` },
       { label: "Tool", value: String(call.tool).slice(0, 80) },
       { label: "Action", value: t.summary || "(empty)" },
     ];
+    // What a save would write, so the person deciding can read it.
+    const content = typeof call.input?.content === "string" ? call.input.content : "";
+    if (request.tool === "file" && content) facts.push({ label: "Content", value: content.length > 600 ? `${content.slice(0, 600)}…` : content });
     const deny = (ruleId: string, reason: string) => {
       const decision: Decision = { outcome: "deny", ruleId, reason };
       this.logDecision(request, decision);
       this.state.proposals.push({ ...base, request, decision, facts, status: "denied" });
       this.save();
-      return { decision: "deny" as const, proposalId: base.id };
+      return { decision: "deny" as const, proposalId: base.id, summary };
     };
     if (!pol.agents.some((a) => a.id === agentId)) return deny("agent-inactive", "This computer's agent isn't on Dharma yet (waiting for the vote)");
 
@@ -1989,17 +1994,17 @@ export class Gatekeeper extends EventEmitter {
       this.logDecision(request, decision);
       this.emit("egress-allowed", { agentId, method: String(call.tool), url: t.summary });
       this.save();
-      return { decision: "allow" };
+      return { decision: "allow", summary };
     }
     if (decision.outcome === "deny") return deny(decision.ruleId, decision.reason);
     // Approval: the same call while one is waiting joins that card.
     const hash = sha256(`hook\n${String(call.tool)}\n${JSON.stringify(call.input ?? {})}\n${String(call.cwd ?? "")}`);
     const open = this.state.proposals.find((p) => p.status === "pending" && p.agentId === agentId && p.payloadHash === hash);
-    if (open) return { decision: "pending", proposalId: open.id };
+    if (open) return { decision: "pending", proposalId: open.id, summary };
     this.logDecision(request, decision);
     this.state.proposals.push({ ...base, request, decision, facts, payloadHash: hash, status: "pending" });
     this.save();
-    return { decision: "pending", proposalId: base.id };
+    return { decision: "pending", proposalId: base.id, summary };
   }
 
   // ================================================================ chat apps and connectors (ease 2b)
@@ -2324,6 +2329,11 @@ export class Gatekeeper extends EventEmitter {
       at: this.now().toISOString(), kind: "action", summary: summary.slice(0, 300), outcome,
       ruleId: p?.decision.ruleId, reason: p?.decision.reason, proposalId,
     });
+  }
+
+  /** A tool call a box's agent checked with Karuna (a file save): add it to the box's run. */
+  noteHookCall(token: string, r: { decision: "allow" | "deny" | "pending"; proposalId?: string; summary?: string }) {
+    this.recordAction(token, r.summary || "tool call", r.decision === "allow" ? "allowed" : r.decision === "deny" ? "denied" : "waiting", r.proposalId);
   }
 
   /** A proposal made from inside a box (payments, messages): add it to the box's run. */

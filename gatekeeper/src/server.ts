@@ -125,7 +125,9 @@ export function agentApi(gk: Gatekeeper, sandbox?: SandboxDeps): Server {
       // Claude Code / Cursor: decide one tool call before it runs; wait for a member when it's held.
       if (req.method === "POST" && url.pathname === "/v1/hook") {
         const body = await readBody(req);
-        return send(res, 200, gk.hookCall(agentId, body as never));
+        const r = gk.hookCall(agentId, body as never);
+        if (who.session) gk.noteHookCall(token, r);
+        return send(res, 200, r);
       }
       const hw = url.pathname.match(/^\/v1\/hook\/([\w-]+)\/wait$/);
       if (req.method === "GET" && hw) {
