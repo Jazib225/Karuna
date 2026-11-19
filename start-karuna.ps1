@@ -71,6 +71,13 @@ if (-not (Test-Path (Join-Path $root "web\dist\index.html"))) {
 }
 Start-KarunaService "console"    4173 "--dir web preview"
 
+# The desktop app: the installed copy if there is one, else the one built in this checkout.
 if (-not (Get-Process karuna-desktop -ErrorAction SilentlyContinue)) {
-    Start-Process (Join-Path $env:LOCALAPPDATA "Karuna\karuna-desktop.exe")
+    $desktop = @(
+        (Join-Path $env:LOCALAPPDATA "Karuna\karuna-desktop.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\Karuna\karuna-desktop.exe"),
+        (Join-Path $root "desktop\src-tauri\target\release\karuna-desktop.exe")
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($desktop) { Start-Process $desktop }
+    else { Write-Host "karuna: the desktop app isn't installed or built (pnpm --dir desktop tauri build); the console is at http://127.0.0.1:4173" }
 }
