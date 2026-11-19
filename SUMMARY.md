@@ -17,7 +17,7 @@ branches, from November 9 to November 19, by Jazib225, adichaudhary and Pixel.
 |---|---|---|
 | **Policy engine** | `engine/` | Decides every agent request by the first matching rule; keeps a signed, hash-chained log; computes the worst case if every agent were hijacked |
 | **Gatekeeper** | `gatekeeper/` | The only process that holds the wallet. Checks requests, runs approvals and payments, Exact Match, the egress proxy, Drills, Tripwire, the rule drafter, the chat-app connector and the fast relayer |
-| **Dharma** | `contracts/` | Each organization's rulebook on Arc: members, rules, payees, agents, trust levels, waits, freezes. Upgradeable (now v5), plus an Escrow contract for large payments |
+| **Dharma** | `contracts/` | Each organization's rulebook on Arc: members, rules, payees, agents, trust levels, waits, freezes. Upgradeable (now v7, split into `Dharma` + `DharmaExt` to fit the size limit), plus an Escrow contract for large payments |
 | **Relay** | `relay/` | Receives the QuickNode Stream, verifies it, and pushes Dharma events and wallet transfers live to every console and the Gatekeeper; reads Arc directly if the Stream goes quiet |
 | **Runner** | `runner/` | `pnpm karuna run`: starts agents in sandboxes whose only way out is the Gatekeeper; gVisor, remote machines, desktop boxes, per-run Undo |
 | **Console** | `web/` | The product's web app for members (React + Vite) |
@@ -56,7 +56,7 @@ branches, from November 9 to November 19, by Jazib225, adichaudhary and Pixel.
   and anything unmatched are denied.
 - **Plain-English rule drafting:** describe a policy in a sentence and a free model (Groq or Gemini)
   drafts the exact rules to vote on. The model never proposes anything itself.
-- **Upgradeable in place** (v2 → v3 → v5) with the same address; members, rules and payees carry over.
+- **Upgradeable in place** (v2 → v3 → v5 → v6 → v7) with the same address; members, rules and payees carry over.
 - **Team roles on Dharma**, invite links, and settings changed by proposal.
 - **Fast relayer:** proposals, votes and executions reach Arc in about a second.
 
@@ -98,7 +98,9 @@ branches, from November 9 to November 19, by Jazib225, adichaudhary and Pixel.
   deploys and Gateway, and Gateway nanopayments for per-request data.
 - **QuickNode:** one Stream (`karuna-events`) delivers Dharma's events and the wallet's USDC transfers,
   with HMAC-verified webhooks.
-- **Arc testnet:** the dev org's Dharma is at `0x1034316a026f18096c42346ae2e549856380d933`.
+- **Arc testnet:** the dev org's Dharma is at `0xb053a5dbc75b26ae1637f5a834dc59d0d5d8f13e` (see the README for every address).
+- **ElevenLabs:** Karuna Voice in the island and console: an ElevenLabs Agent with 16 client tools, streaming Text to Speech for spoken alerts, and Sound Effects for the chimes.
+- **Grok Bot:** connects at `/grok/mcp` as its own agent at Level 0, watches the team on Arc (`arc_activity`) and alerts every member (`alert_team`); chat export in `docs/GROK_BOT_CHAT.md`.
 
 ### Console (web app)
 - **Pages:** Home, Activity, Proposals, Agents, Safety, Team, Rules and Appearance.
@@ -133,7 +135,7 @@ branches, from November 9 to November 19, by Jazib225, adichaudhary and Pixel.
 | **Nov 16** | The fast relayer; Karuna's own dialogs; the scrolling decision log; connector re-checks; trust-level tests |
 | **Nov 17** | Escrow; the worst-case meter; Undo for runs; one proposal form; settings by vote; team roles and onboarding; log out and invite links |
 | **Nov 18** | Dharma v5 after a contract review; a bug sweep; Pre-flight Drills; expiring holds; the New agent card with Coding agents; the Trust levels popup; styled dropdowns |
-| **Nov 19** | Folding log and list cards |
+| **Nov 19** | Folding log and list cards; Dharma v6 (split) and v7 (host role); Karuna Voice with ElevenLabs (conversation, spoken alerts, wake phrase); Grok Bot as a governed agent and watcher on Arc |
 
 ---
 
