@@ -8,6 +8,8 @@
 //   approval_resolved   { id, result: "approved" | "denied" | "failed" | "expired" }
 //   agent_paused        { by, at }      agent_resumed {}
 //   error               { id?, error }  (a response we ignored, and why)
+//   vote_requested      { id, description, core, yes, no, needed, status, voters, eta }  (open Dharma vote; re-sent on change)
+//   vote_resolved       { id }          (it stopped taking votes: executed, defeated or cancelled)
 // In (app → Gatekeeper):
 //   approval_response   { id, payload_hash, decision: "approve" | "deny", signer, deadline, signature }
 //   pause { by }        resume { by }
@@ -111,7 +113,29 @@ export function pipeServer(gk: Gatekeeper): Server {
       send({ type: "approval_resolved", id, result: st === "denied" ? "denied" : st === "failed" ? "failed" : st === "expired" ? "expired" : "approved" });
     }
     if (seen.size > 5000) for (const id of [...seen].slice(0, 2500)) seen.delete(id);
+    syncVotes();
   });
+
+  // Open Dharma votes, so the island can show (and read out) the ones waiting on this member.
+  // Sent again whenever the count or voters change; `vote_resolved` once it stops taking votes.
+  const votes = new Map<number, string>();
+  const voteMsg = (v: ReturnType<Gatekeeper["openVotes"]>[number]) => ({ type: "vote_requested", ...v });
+  function syncVotes() {
+    const open = gk.openVotes();
+    const ids = new Set(open.map((v) => v.id));
+    for (const v of open) {
+      const key = `${v.status}:${v.yes}:${v.no}:${v.voters.join(",")}`;
+      if (votes.get(v.id) === key) continue;
+      votes.set(v.id, key);
+      send(voteMsg(v));
+    }
+    for (const id of [...votes.keys()]) {
+      if (ids.has(id)) continue;
+      votes.delete(id);
+      send({ type: "vote_resolved", id });
+    }
+  }
+  syncVotes();
 
   // Allowed requests out of a box don't create proposals; show them as "working" (max 1/s per agent).
   const lastEgress = new Map<string, number>();
@@ -188,6 +212,7 @@ export function pipeServer(gk: Gatekeeper): Server {
     c.on("error", () => clients.delete(c));
     // Catch a new client up: anything pending right now, and the pause state.
     for (const p of pending.values()) send(requested(p), c);
+    for (const v of gk.openVotes()) send(voteMsg(v), c);
     if (gk.paused) send({ type: "agent_paused", ...gk.paused }, c);
   });
   if (process.platform !== "win32") {

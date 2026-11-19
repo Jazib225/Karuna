@@ -1,5 +1,6 @@
 // `npm run tauri dev` runs this first: the island's dev server (:1420), plus the console's
-// (`web/`, :5173) unless it's already running. The main window loads the console from there.
+// (`web/`, :5173, or KARUNA_WEB_PORT) unless it's already running. The main window loads the
+// console from there. Both reload on save, so changes show up without rebuilding the app.
 import { spawn } from "node:child_process";
 import { request } from "node:http";
 import { dirname, resolve } from "node:path";
@@ -29,7 +30,8 @@ const run = (cmd, args, cwd) => {
   });
 };
 
-if (await up(5173)) console.log("karuna-desktop · console already running on :5173");
+const webPort = Number(process.env.KARUNA_WEB_PORT ?? 5173);
+if (await up(webPort)) console.log(`karuna-desktop · console already running on :${webPort}`);
 else run("npx", ["-y", "pnpm@9", "--dir", "web", "dev"], root);
 run("npx", ["vite"], resolve(here, ".."));
 

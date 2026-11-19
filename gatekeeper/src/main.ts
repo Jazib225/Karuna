@@ -9,6 +9,7 @@ import { Store } from "./store.ts";
 import { CircleCliWallet } from "./wallet.ts";
 import { Gatekeeper } from "./gatekeeper.ts";
 import { agentApi, consoleApi } from "./server.ts";
+import { Voice, voiceConfigFromEnv } from "./voice.ts";
 import { publicApi } from "./chat.ts";
 import { Accounts } from "./accounts.ts";
 import { CircleChainWriter, RelayedChainWriter, ViemChainWriter, publicClient, scrub } from "./chain.ts";
@@ -102,9 +103,14 @@ const consoleToken = store.loadOrCreateConsoleToken();
 
 const agentServer = agentApi(gk, { proxy: egress, caPem: ca.certPem, secrets });
 agentServer.listen(agentPort, agentHost, () => console.log(`gatekeeper · agent API    http://${agentHost}:${agentPort}`));
-consoleApi(gk, wallet, consoleToken, secrets, ca.certPem, new Accounts(store)).listen(consolePort, "127.0.0.1", () =>
+const voice = new Voice(voiceConfigFromEnv());
+consoleApi(gk, wallet, consoleToken, secrets, ca.certPem, new Accounts(store), voice).listen(consolePort, "127.0.0.1", () =>
   console.log(`gatekeeper · console API  http://127.0.0.1:${consolePort}  (data: ${dataDir})`),
 );
+{
+  const v = voice.status();
+  console.log(`gatekeeper · voice        ${v.configured ? `ElevenLabs · conversation ${v.conversation ? "on" : "off (no ELEVENLABS_AGENT_ID)"} · spoken alerts ${v.alerts ? "on" : "off (no ELEVENLABS_VOICE_ID)"}` : "off (no ELEVENLABS_API_KEY)"}`);
+}
 console.log(`gatekeeper · sandbox      egress proxy per run on 127.0.0.1 · sandbox ${gk.requireSandbox ? "required" : "optional"} · ${secrets.list().length} key(s)`);
 if (relay) {
   void client.getBalance({ address: relay.from }).then(

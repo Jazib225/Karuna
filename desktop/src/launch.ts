@@ -1,6 +1,8 @@
 // The main window's first page: wait for the console, then open it. Dev builds use the console's
 // dev server (:5173); the packaged app uses the built console (`vite preview`, :4173).
-// A different address can be given as ?console=… on this page.
+// A different address can be given as ?console=… on this page, or as VITE_KARUNA_CONSOLE_URL when
+// the island's dev server starts (live mode serves the console's dev server on :4173, so the
+// browser key saved for that address keeps working).
 import { createContour } from "../../web/src/site/contour.ts";
 import { mountGL } from "../../web/src/site/glrun.ts";
 
@@ -13,8 +15,11 @@ try {
   document.documentElement.dataset.theme = "dark";
 }
 
-const target = new URLSearchParams(location.search).get("console") ?? (import.meta.env.DEV ? "http://127.0.0.1:5173" : "http://127.0.0.1:4173");
-const dev = target.includes(":5173");
+const target =
+  new URLSearchParams(location.search).get("console") ??
+  (import.meta.env.VITE_KARUNA_CONSOLE_URL as string | undefined) ??
+  (import.meta.env.DEV ? "http://127.0.0.1:5173" : "http://127.0.0.1:4173");
+const dev = import.meta.env.DEV;
 
 mountGL(document.getElementById("marble")!, (g) => createContour(g, "marble"), { fallbackSrc: "/brand/contour.webp", dprCap: 1.5 }).start();
 

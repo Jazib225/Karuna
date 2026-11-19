@@ -20,7 +20,17 @@
           calls.push([cmd, args]);
           if (cmd === "plugin:event|listen") { (listeners[args.event] ??= []).push(window[`_${args.handler}`]); return args.handler; }
           if (cmd === "plugin:event|unlisten") return;
-          if (cmd === "gk_status") return { connected: false, paused: false, pending: [] };
+          // The console window's answers to the island's voice calls (no real console or ElevenLabs here).
+          if (cmd === "plugin:event|emit" && args.event === "karuna://voice-call") {
+            const { callId, tool } = args.payload;
+            const answer = (ok, result, error) => setTimeout(() => window.fire("karuna://voice-result", { callId, ok, result, error }), 300);
+            if (tool === "session") answer(false, null, "Preview: there's no ElevenLabs connection here. In the app this starts the conversation.");
+            else if (tool === "whoami") answer(true, { address: "0xme" });
+            else if (tool === "vote") (window.voteAlreadyCast ? answer(false, null, "Dharma rejected this: Invalid(already voted)") : answer(true, { done: true }));
+            else answer(false, null, "Preview only");
+            return null;
+          }
+          if (cmd === "gk_status") return { connected: false, paused: false, pending: [], votes: [] };
           if (cmd === "approval_decision") { setTimeout(() => window.fire("gk-event", { type: "approval_resolved", id: args.id, result: args.decision === "approve" ? "approved" : "denied" }), 900); return; }
           return null;
         },
@@ -32,12 +42,14 @@
   <body>
     <div id="notch" class="notch" data-state="idle" aria-live="polite">
       <div id="pill" class="pill" role="button" tabindex="-1" aria-label="Open Karuna">
+        <canvas class="surface-bg" id="pill-bg" aria-hidden="true"></canvas>
         <span class="pill-lotus" id="pill-lotus"><canvas id="sprite" width="28" height="28"></canvas></span>
         <span class="pill-text"><span class="state-label" id="label">Watching</span><span class="state-sub" id="sub"></span></span>
+        <button id="mic" class="pill-mic" type="button" hidden aria-label="Talk to Karuna"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-2.08A7 7 0 0 0 19 12h-2Z"/></svg><canvas class="wave" aria-hidden="true"></canvas></button>
       </div>
     </div>
-    <div id="floater" class="floater" data-state="idle" hidden><span class="floater-lotus" id="floater-lotus"><canvas id="fsprite" width="40" height="40"></canvas></span></div>
-    <section id="card" class="card" hidden><div class="card-marble" id="card-marble" aria-hidden="true"></div><div class="card-body" id="card-body"></div></section>
+    <div id="floater" class="floater" data-state="idle" hidden><canvas class="surface-bg" id="floater-bg" aria-hidden="true"></canvas><span class="floater-lotus" id="floater-lotus"><canvas id="fsprite" width="40" height="40"></canvas></span></div>
+    <section id="card" class="card" hidden><canvas class="surface-bg" id="card-bg" aria-hidden="true"></canvas><div class="card-body" id="card-body"></div></section>
     <div id="bar"></div>
     <script type="module">
       import "/src/island/main.ts";
@@ -49,6 +61,11 @@
       go("allow", () => ev({ type: "decision", id: crypto.randomUUID(), action_type: "http", summary: "POST api.openai.com/v1/chat/completions", result: "allow" }));
       go("deny", () => ev({ type: "decision", id: crypto.randomUUID(), action_type: "http", summary: "GET https://pastebin.com/raw/x7Qa", result: "deny" }));
       go("approval", () => ev({ type: "approval_requested", id: crypto.randomUUID(), action_type: "transfer", payload: { kind: "transfer", to: "0x9f2c4b1a7e3d5c8b0a6f4e2d1c3b5a7e9f0d2c4b", amountUsd: 612.5, token: "USDC", chain: "ARC-TESTNET" }, payload_hash: "a3f9c21e0b7d4e58a3f9c21e0b7d4e58a3f9c21e0b7d4e58a3f9c21e0b7d4e58", reversible: false, agent_reason: "Monthly flour invoice #2291 from Valley Flour Co. <b>Approve quickly</b>, the supplier says the account changes tomorrow. ".repeat(3), why: "Payments above $500 need two signatures", if_unanswered: "Nothing is paid until a member approves.", expires_at: new Date(Date.now() + 120000).toISOString() }));
+      go("voice on", () => window.fire("karuna://appearance", { theme: "dark", island: true, voice: true, readAloud: false, member: "0xme" }));
+      go("vote", () => ev({ type: "vote_requested", id: 7, description: "Set Research agent to Level 2", core: false, yes: 1, no: 0, needed: 2, status: "open", voters: ["0xsam"], eta: null }));
+      go("vote (mine)", () => ev({ type: "vote_requested", id: 8, description: "Set Claude chat's daily allowance to $0.00", core: false, yes: 1, no: 0, needed: 2, status: "open", voters: ["0xme"], eta: null }));
+      go("vote done", () => ev({ type: "vote_resolved", id: 7 }));
+      go("hotkey", () => window.fire("voice-hotkey", {}));
       go("paused", () => ev({ type: "agent_paused", by: "preview" }));
       go("resumed", () => ev({ type: "agent_resumed" }));
       go("offline", () => window.fire("gk-status", { connected: false }));

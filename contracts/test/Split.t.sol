@@ -100,7 +100,7 @@ contract SplitTest is Test {
         DharmaCore impl = DharmaCore(payable(dharma.implementation()));
         assertEq(dharma.ext(), impl.ext());
         assertGt(dharma.ext().code.length, 0);
-        assertEq(dharma.version(), 6);
+        assertEq(dharma.version(), 7);
     }
 
     function test_the_core_refuses_an_extension_without_code() public {
@@ -204,7 +204,7 @@ contract SplitTest is Test {
         DharmaCore next = v6();
         passBoth(Dharma.Op.Upgrade, abi.encode(address(next)));
 
-        assertEq(dharma.version(), 6);
+        assertEq(dharma.version(), 7);
         assertEq(dharma.implementation(), address(next));
         assertEq(dharma.ext(), next.ext());
         // Same address, same org.

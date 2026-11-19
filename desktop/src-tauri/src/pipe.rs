@@ -25,6 +25,8 @@ pub struct Gatekeeper {
     pub pending: Mutex<HashMap<String, String>>,
     /// The full approval_requested events, so an island page that loads late can catch up.
     pub pending_events: Mutex<HashMap<String, Value>>,
+    /// Open Dharma votes (vote_requested), so a late island page can catch up too.
+    pub open_votes: Mutex<HashMap<String, Value>>,
     pub connected: AtomicBool,
     pub paused: AtomicBool,
     tx: Mutex<Option<mpsc::UnboundedSender<String>>>,
@@ -64,6 +66,16 @@ fn track(gk: &Gatekeeper, ev: &Value) {
                 gk.pending_events.lock().unwrap().remove(id);
             }
         }
+        Some("vote_requested") => {
+            if let Some(id) = ev.get("id").map(|v| v.to_string()) {
+                gk.open_votes.lock().unwrap().insert(id, ev.clone());
+            }
+        }
+        Some("vote_resolved") => {
+            if let Some(id) = ev.get("id").map(|v| v.to_string()) {
+                gk.open_votes.lock().unwrap().remove(&id);
+            }
+        }
         Some("agent_paused") => gk.paused.store(true, Ordering::SeqCst),
         Some("agent_resumed") => gk.paused.store(false, Ordering::SeqCst),
         _ => {}
@@ -76,6 +88,7 @@ fn set_connected(app: &AppHandle, gk: &Gatekeeper, on: bool) {
             // Whatever was pending can't be answered over a dead connection; the island clears it.
             gk.pending.lock().unwrap().clear();
             gk.pending_events.lock().unwrap().clear();
+            gk.open_votes.lock().unwrap().clear();
             // The Gatekeeper sends its pause state again on connect; don't keep a stale one.
             gk.paused.store(false, Ordering::SeqCst);
         }

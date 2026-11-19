@@ -25,6 +25,8 @@ import {DharmaBase} from "./DharmaBase.sol";
 ///         v6: the code is two contracts. Dharma (this one) runs proposals, votes, execution and
 ///         instant tightening. Anything else (setup, roles, the Gatekeeper's reports, every view)
 ///         is in DharmaExt: a call Dharma doesn't recognize is forwarded to it, on this storage.
+///         v7: the host (the member who set the org up) may remove a teammate without a vote. It still
+///         waits the core wait in public, can't start while frozen, and any member's Freeze cancels it.
 /// @dev    Runs behind DharmaProxy (ERC-1967): the proxy holds the address and all storage, and
 ///         `Upgrade` (a core change) points it at new code. Each Dharma names its DharmaExt in its
 ///         code (an immutable), so one Upgrade moves both halves. Storage lives in DharmaBase:
@@ -92,6 +94,27 @@ contract Dharma is DharmaBase {
         if (p.status != Status.Open && !skipVote) revert VotingClosed();
         if (hasVoted[id][signer]) revert AlreadyVoted();
         _count(id, signer, support);
+    }
+
+    /// @notice v7: the host removes a teammate without a vote. Not instant: it's queued for the core
+    ///         wait, in public, so everyone sees it coming; any member's Freeze cancels it (and while
+    ///         frozen the host can't start one). Signed with Kind.Manage + Op.RemoveMember, which
+    ///         `manage` itself never accepts, so no other signature can be replayed here.
+    function hostRemove(address member, address signer, uint256 deadline, bytes calldata sig) external returns (uint256 id) {
+        bytes memory data = abi.encode(member);
+        _auth(Kind.Manage, Op.RemoveMember, data, 0, false, signer, deadline, sig);
+        if (signer != _hostOf()) revert NoPermission();
+        if (member == signer) revert CannotRemove();
+        if (frozen) revert AlreadyFrozen();
+        _validate(Op.RemoveMember, data);
+        _pinHost();
+        uint64 eta = uint64(block.timestamp) + coreTimelock;
+        id = _proposals.length;
+        _proposals.push(Proposal(Op.RemoveMember, data, signer, uint64(block.timestamp), uint64(block.timestamp), 1, 0, Status.Queued, true, eta));
+        hasVoted[id][signer] = true;
+        _pendingCore.push(id); // a Freeze cancels it, like every core change
+        emit ProposalCreated(id, Op.RemoveMember, signer, data);
+        emit ProposalQueued(id, eta);
     }
 
     /// @notice Anyone may execute a passed proposal once its wait is over.
@@ -322,6 +345,7 @@ contract Dharma is DharmaBase {
             _addMember(abi.decode(data, (address)));
         } else if (op == Op.RemoveMember) {
             address m = abi.decode(data, (address));
+            _pinHost();
             _removeAddr(_members, _memberIdx, m);
             _teamEpoch++;
             delete roleOf[m];
@@ -344,7 +368,7 @@ contract Dharma is DharmaBase {
 
     /// @notice The code version behind this org's address.
     function version() external pure virtual returns (uint256) {
-        return 6;
+        return 7;
     }
 
     /// @dev Everything not above runs in DharmaExt, on this storage, as if it were here.

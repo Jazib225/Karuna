@@ -9,10 +9,14 @@
     "build": "vite build",
     "tauri": "tauri",
     "mock": "node scripts/mock-gatekeeper.mjs",
-    "typecheck": "tsc --noEmit -p ."
+    "typecheck": "tsc --noEmit -p .",
+    "test": "node --test src/island/code.test.ts src/island/text.test.ts src/island/wake-match.test.ts",
+    "wake:model": "node scripts/wake-model.mjs"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.5.0"
+    "@elevenlabs/client": "1.37.1",
+    "@tauri-apps/api": "^2.5.0",
+    "vosk-browser": "0.0.8"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.5.0",
