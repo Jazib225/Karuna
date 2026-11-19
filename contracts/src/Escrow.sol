@@ -12,6 +12,7 @@ interface IDharmaView {
     function isMember(address a) external view returns (bool);
     function permissionsOf(address a) external view returns (uint16);
     function payees() external view returns (Payee[] memory);
+    function isPayee(address a) external view returns (bool); // v5
     function frozen() external view returns (bool);
 }
 
@@ -28,9 +29,10 @@ interface IERC20Min {
 ///         `releaseAt`, anyone can release it, and it can only ever go to the payee recorded at open.
 ///         Each hold settles exactly once.
 /// @dev    One Escrow per org. No owner and no upgrades: the only mutable setting is the opener,
-///         which any one member may rotate by signature. One member is enough because the opener's
-///         power is narrow: it can only earmark USDC already sent here, only for payees on Dharma's
-///         list, and every hold it opens can still be cancelled by any member before release.
+///         which one member whose role may manage the wallet may rotate by signature. One is enough
+///         because the opener's power is narrow: it can only earmark USDC already sent here, only for
+///         payees on Dharma's list, never releasable sooner than MIN_HOLD, and every hold it opens
+///         can still be cancelled by a member before release.
 contract Escrow {
     // ------------------------------------------------------------------ types
 
@@ -70,6 +72,10 @@ contract Escrow {
 
     bytes32 public constant CANCEL_TYPEHASH = keccak256("CancelEscrow(uint256 id)");
     bytes32 public constant SET_OPENER_TYPEHASH = keccak256("SetOpener(address opener,uint256 nonce,uint256 deadline)");
+    /// A hold always leaves members at least this long to cancel it.
+    uint64 public constant MIN_HOLD = 60;
+    uint16 internal constant P_CANCEL_ESCROW = 2;
+    uint16 internal constant P_WALLET = 32;
 
     IDharmaView public immutable dharma;
     IERC20Min public immutable usdc;
@@ -101,7 +107,7 @@ contract Escrow {
     function open(address payee, uint256 amount, uint64 releaseAt, bytes32 ref) external returns (uint256 id) {
         if (msg.sender != opener) revert NotOpener();
         if (amount == 0) revert Invalid("zero amount");
-        if (releaseAt <= block.timestamp) revert Invalid("release time passed");
+        if (releaseAt < block.timestamp + MIN_HOLD) revert Invalid("release too soon");
         if (ref == bytes32(0) || _refId[ref] != 0) revert Invalid("bad ref");
         if (!_isPayee(payee)) revert NotPayee();
         if (unaccounted() < amount) revert Unfunded();
@@ -118,10 +124,15 @@ contract Escrow {
         _cancel(id, msg.sender);
     }
 
-    /// @dev On Dharma v4, only members whose role may cancel escrow; on older Dharma, any member.
+    /// @dev On Dharma v4+, only members whose role may cancel escrow; on older Dharma, any member.
     function _mayCancel(address a) private view returns (bool) {
+        return _can(a, P_CANCEL_ESCROW);
+    }
+
+    /// @dev Members whose role has this permission (Dharma v4+), or any member on older Dharma.
+    function _can(address a, uint16 perm) private view returns (bool) {
         try dharma.permissionsOf(a) returns (uint16 p) {
-            return p & 2 != 0;
+            return p & perm != 0;
         } catch {
             return dharma.isMember(a);
         }
@@ -152,7 +163,7 @@ contract Escrow {
 
     /// @notice Return USDC sent here but never put on hold to the org's wallet. Holds are untouched.
     function sweep() external {
-        if (msg.sender != opener && !dharma.isMember(msg.sender)) revert NotMember();
+        if (msg.sender != opener && !_can(msg.sender, P_WALLET)) revert NotMember();
         uint256 amount = unaccounted();
         if (amount == 0) revert Invalid("nothing to sweep");
         emit Swept(amount, msg.sender);
@@ -175,6 +186,9 @@ contract Escrow {
 
     function _isPayee(address a) private view returns (bool) {
         if (a == address(0)) return false;
+        try dharma.isPayee(a) returns (bool yes) {
+            return yes; // Dharma v5: one lookup
+        } catch {}
         IDharmaView.Payee[] memory ps = dharma.payees();
         for (uint256 i; i < ps.length; i++) if (ps[i].account == a) return true;
         return false;
@@ -187,13 +201,14 @@ contract Escrow {
 
     // ------------------------------------------------------------------ opener
 
-    /// @notice Rotate the opener with one member's signed `SetOpener`. Anyone may relay it.
+    /// @notice Rotate the opener with the signed `SetOpener` of one member whose role may manage the
+    ///         wallet (any member on Dharma before v4). Anyone may relay it.
     function setOpener(address newOpener, uint256 deadline, bytes calldata sig) external {
         if (block.timestamp > deadline) revert Expired();
         if (newOpener == address(0)) revert Invalid("zero address");
         address signer = _recover(setOpenerDigest(newOpener, openerNonce, deadline), sig);
         if (signer == address(0)) revert BadSignature();
-        if (!dharma.isMember(signer)) revert NotMember();
+        if (!_can(signer, P_WALLET)) revert NotMember();
         openerNonce++;
         opener = newOpener;
         emit OpenerSet(newOpener, signer);

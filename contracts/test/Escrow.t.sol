@@ -65,6 +65,19 @@ contract EscrowTest is Test {
         dharma.execute(id);
     }
 
+    /// Alice proposes, bob agrees (two members: both are needed).
+    function passBoth(Dharma.Op op, bytes memory data) internal {
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 digest = dharma.actionDigest(Dharma.Kind.Propose, op, data, 0, false, dharma.nonces(alice), deadline);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(aliceKey, digest);
+        uint256 id = dharma.propose(op, data, alice, deadline, abi.encodePacked(r, s, v));
+        Dharma.Proposal memory p = dharma.proposal(id);
+        digest = dharma.actionDigest(Dharma.Kind.Vote, p.op, p.data, id, true, dharma.nonces(bob), deadline);
+        (v, r, s) = vm.sign(bobKey, digest);
+        dharma.vote(id, true, bob, deadline, abi.encodePacked(r, s, v));
+        dharma.execute(id); // every member said yes: no wait
+    }
+
     function manage(uint256 pk, Dharma.Op op, bytes memory data) internal {
         uint256 deadline = block.timestamp + 1 hours;
         bytes32 digest = dharma.actionDigest(Dharma.Kind.Manage, op, data, 0, false, dharma.nonces(vm.addr(pk)), deadline);
@@ -150,7 +163,7 @@ contract EscrowTest is Test {
         vm.startPrank(opener);
         vm.expectRevert(abi.encodeWithSelector(Escrow.Invalid.selector, "zero amount"));
         escrow.open(PAYEE, 0, uint64(block.timestamp + WINDOW), REF);
-        vm.expectRevert(abi.encodeWithSelector(Escrow.Invalid.selector, "release time passed"));
+        vm.expectRevert(abi.encodeWithSelector(Escrow.Invalid.selector, "release too soon"));
         escrow.open(PAYEE, 500e6, uint64(block.timestamp), REF);
         vm.stopPrank();
     }
@@ -217,7 +230,7 @@ contract EscrowTest is Test {
 
     function test_a_role_without_cancel_escrow_cannot_cancel() public {
         uint256 id = openHold(800e6, REF);
-        manage(aliceKey, Dharma.Op.SetStructure, abi.encode(uint8(1))); // alice Admin, bob Member
+        passBoth(Dharma.Op.SetStructure, abi.encode(uint8(1))); // voted (two members): alice Admin, bob Member
         manage(aliceKey, Dharma.Op.SetRolePerms, abi.encode(uint8(2), uint16(15 & ~uint16(2))));
         vm.prank(bob);
         vm.expectRevert(Escrow.NotMember.selector);
@@ -359,5 +372,46 @@ contract EscrowTest is Test {
     function test_constructor_rejects_zero_addresses() public {
         vm.expectRevert(abi.encodeWithSelector(Escrow.Invalid.selector, "zero address"));
         new Escrow(address(dharma), address(usdc), address(0), opener);
+    }
+
+    // ------------------------------------------------------------- v5 fixes
+
+    /// Bob in a role with approve and propose only: no wallet, no cancelling.
+    function bobWithoutWallet() internal {
+        passBoth(Dharma.Op.SetStructure, abi.encode(uint8(1))); // alice Admin, bob Member
+        manage(aliceKey, Dharma.Op.SetRolePerms, abi.encode(uint8(3), uint16(1 | 4)));
+        manage(aliceKey, Dharma.Op.SetRole, abi.encode(bob, uint8(3)));
+    }
+
+    function test_only_a_member_who_may_manage_the_wallet_rotates_the_opener() public {
+        bobWithoutWallet();
+        address next = makeAddr("next-opener");
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = signDigest(bobKey, escrow.setOpenerDigest(next, 0, deadline));
+        vm.expectRevert(Escrow.NotMember.selector);
+        escrow.setOpener(next, deadline, sig);
+        sig = signDigest(aliceKey, escrow.setOpenerDigest(next, 0, deadline));
+        escrow.setOpener(next, deadline, sig);
+        assertEq(escrow.opener(), next);
+    }
+
+    function test_only_the_opener_or_a_wallet_member_sweeps() public {
+        bobWithoutWallet();
+        deposit(50e6);
+        vm.prank(bob);
+        vm.expectRevert(Escrow.NotMember.selector);
+        escrow.sweep();
+        vm.prank(alice);
+        escrow.sweep();
+        assertEq(usdc.balanceOf(address(escrow)), 0);
+    }
+
+    function test_a_hold_always_leaves_time_to_cancel() public {
+        deposit(500e6);
+        vm.startPrank(opener);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.Invalid.selector, "release too soon"));
+        escrow.open(PAYEE, 500e6, uint64(block.timestamp + 59), REF);
+        escrow.open(PAYEE, 500e6, uint64(block.timestamp + 60), REF);
+        vm.stopPrank();
     }
 }

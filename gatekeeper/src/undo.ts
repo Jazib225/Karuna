@@ -1,14 +1,16 @@
 // Undo a sandbox run's file changes on this machine: runs `karuna undo` (runner/src/cli.ts), which
 // restores the run's snapshot of its writable mounts. Used for runs started on this machine.
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import type { GatekeeperDeps } from "./gatekeeper.ts";
 
 export function runnerUndo(repoRoot: string): NonNullable<GatekeeperDeps["undo"]> {
   return ({ runId, path }) => new Promise((done) => {
-    const win = process.platform === "win32";
-    const args = ["tsx", resolve(repoRoot, "runner/src/cli.ts"), "undo", "--run", runId, ...(path ? ["--path", path] : [])];
-    const p = spawn(win ? "npx.cmd" : "npx", win ? args.map((a) => (/\s/.test(a) ? `"${a}"` : a)) : args, { shell: win, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    // Node runs tsx directly: no shell, so a file path the box reported can never become a command.
+    const tsx = createRequire(import.meta.url).resolve("tsx/cli");
+    const args = [tsx, resolve(repoRoot, "runner/src/cli.ts"), "undo", "--run", runId, ...(path ? ["--path", path] : [])];
+    const p = spawn(process.execPath, args, { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     let err = "";
     p.stdout!.on("data", (b: Buffer) => (out += b.toString("utf8")));

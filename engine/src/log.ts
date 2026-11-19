@@ -128,6 +128,28 @@ export class SignedLog {
     return { ok: true };
   }
 
+  private checked = { upTo: 0, prev: GENESIS };
+
+  /**
+   * Same result as verify(), checking only the entries appended since the last call (the chain up
+   * to there was already checked). For callers that ask often, like the console's live view.
+   */
+  verifyNew(publicKey: KeyObject = this.publicKey): { ok: boolean; brokenAt?: number; reason?: string } {
+    if (this.checked.upTo > this.entries.length) this.checked = { upTo: 0, prev: GENESIS };
+    let prev = this.checked.prev;
+    for (let i = this.checked.upTo; i < this.entries.length; i++) {
+      const e = this.entries[i];
+      if (e.seq !== i) return { ok: false, brokenAt: i, reason: "sequence out of order" };
+      if (e.prevHash !== prev) return { ok: false, brokenAt: i, reason: "broken chain link" };
+      const recomputed = hashBody({ seq: e.seq, timestamp: e.timestamp, request: e.request, decision: e.decision, event: e.event, prevHash: e.prevHash });
+      if (recomputed !== e.hash) return { ok: false, brokenAt: i, reason: "hash mismatch (entry edited)" };
+      if (!edVerify(null, Buffer.from(e.hash, "hex"), publicKey, Buffer.from(e.signature, "hex"))) return { ok: false, brokenAt: i, reason: "bad signature" };
+      prev = e.hash;
+      this.checked = { upTo: i + 1, prev };
+    }
+    return { ok: true };
+  }
+
   /** Export the public key so anyone can verify the log independently. */
   publicKeyPem(): string {
     return this.publicKey.export({ type: "spki", format: "pem" }).toString();

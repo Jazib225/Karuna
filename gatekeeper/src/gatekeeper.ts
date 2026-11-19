@@ -61,7 +61,7 @@ export type AgentAction =
       body?: string;
     };
 
-export type ProposalStatus = "pending" | "executing" | "executed" | "allowed" | "denied" | "failed";
+export type ProposalStatus = "pending" | "executing" | "executed" | "allowed" | "denied" | "failed" | "expired";
 
 export interface Fact {
   label: string;
@@ -153,6 +153,8 @@ interface State {
   paused?: { at: string; by: string } | null; // local pause: instant on/off, never onchain (unlike Freeze)
   /** Running totals per agent, published onchain with each log anchor (ActionsRecorded). */
   record?: Record<string, { completed: number; denied: number }>;
+  /** Today's allowed and denied decisions (local date), including allowed requests that never get a card. */
+  today?: { date: string; allowed: number; denied: number };
   /** Agents' records as the relay rebuilt them from the QuickNode Stream (Dharma's own events). */
   chainRecords?: { at: string; source: string; records: Record<string, AgentRecord> } | null;
   /** The wallet watchdog: every USDC transfer that left the org's wallet, and what it matched. */
@@ -345,6 +347,8 @@ export interface BuiltAgent {
   lastRunAt?: string;
   inboxWaiting?: boolean;
   model?: string;
+  /** The model it runs on: Claude (default) or Groq's free tier. */
+  provider?: "anthropic" | "groq";
 }
 
 const MAX_RUNS = 200;
@@ -439,6 +443,8 @@ export class Gatekeeper extends EventEmitter {
   private lastSyncKey = "";
   private lastFingerprint = "";
   private lastFullRead = 0;
+  private syncStarted = 0; // full policy reads begun
+  private syncApplied = 0; // the newest one applied
   private timer: NodeJS.Timeout | null = null;
   private readonly now: () => Date;
   /** Live sandbox runs, by session token. In memory: a Gatekeeper restart ends every run. */
@@ -479,7 +485,13 @@ export class Gatekeeper extends EventEmitter {
   /** Load the onchain policy, then keep it fresh and run governance housekeeping. */
   async start(intervalMs = 4000) {
     await this.sync().catch((e) => console.error("dharma sync:", scrub(e)));
-    this.timer = setInterval(() => void this.housekeeping().catch((e) => console.error("gatekeeper:", scrub(e))), intervalMs);
+    // One housekeeping pass at a time: a slow chain read must not stack passes (and duplicate anchors).
+    let busy = false;
+    this.timer = setInterval(() => {
+      if (busy) return;
+      busy = true;
+      void this.housekeeping().catch((e) => console.error("gatekeeper:", scrub(e))).finally(() => (busy = false));
+    }, intervalMs);
   }
 
   stop() {
@@ -490,7 +502,13 @@ export class Gatekeeper extends EventEmitter {
   // ------------------------------------------------ persistence helpers
 
   private save() {
-    if (this.state.proposals.length > MAX_PROPOSALS_KEPT) this.state.proposals = this.state.proposals.slice(-MAX_PROPOSALS_KEPT);
+    if (this.state.proposals.length > MAX_PROPOSALS_KEPT) {
+      // Drop the oldest finished ones only: a held request, a payment being sent or money in escrow
+      // stays however many cards come after it.
+      const live = (p: Proposal) => p.status === "pending" || p.status === "executing" || p.escrow?.status === "held" || p.escrow?.status === "opening";
+      let extra = this.state.proposals.length - MAX_PROPOSALS_KEPT;
+      this.state.proposals = this.state.proposals.filter((p) => live(p) || extra-- <= 0);
+    }
     this.deps.store.writeJson("org.json", this.org);
     this.deps.store.writeJson("state.json", this.state);
     this.emit("change");
@@ -504,8 +522,21 @@ export class Gatekeeper extends EventEmitter {
     if (request.agent && decision.ruleId !== "human-approved") {
       if (decision.outcome === "allow") this.countRecord(request.agent, "completed");
       else if (decision.outcome === "deny") this.countRecord(request.agent, "denied");
+      if (decision.outcome === "allow" || decision.outcome === "deny") this.countToday(decision.outcome === "allow" ? "allowed" : "denied");
     }
     return e;
+  }
+
+  private countToday(what: "allowed" | "denied") {
+    const date = this.now().toDateString();
+    if (this.state.today?.date !== date) this.state.today = { date, allowed: 0, denied: 0 };
+    this.state.today[what]++;
+  }
+
+  /** Today's allowed / denied decision counts, for the console's Actions today tile. */
+  todayCounts() {
+    const t = this.state.today;
+    return t && t.date === this.now().toDateString() ? { allowed: t.allowed, denied: t.denied } : { allowed: 0, denied: 0 };
   }
 
   private countRecord(agentId: string, what: "completed" | "denied") {
@@ -522,8 +553,21 @@ export class Gatekeeper extends EventEmitter {
         allowlistedDomains: pol.domains,
         levelLimits: pol.levelLimits ?? undefined,
       },
-      this.spentToday(),
+      this.spentIncludingInFlight(),
     );
+  }
+
+  /**
+   * Today's spend plus payments still being sent: a payment counts against the allowance from the
+   * moment it's decided, so simultaneous payments can't each see the full allowance.
+   */
+  private spentIncludingInFlight(): Record<string, number> {
+    const spent = this.spentToday();
+    for (const id of this.executing) {
+      const p = this.state.proposals.find((x) => x.id === id);
+      if (p?.payload) spent[p.agentId] = (spent[p.agentId] ?? 0) + p.payload.amountUsd;
+    }
+    return spent;
   }
 
   private logEvent(event: LogEvent): LogEntry {
@@ -594,7 +638,12 @@ export class Gatekeeper extends EventEmitter {
       const live = this.policy.proposals.some((x) => x.status === "open" || x.status === "queued");
       if (fp === this.lastFingerprint && !live && Date.now() - this.lastFullRead < 30_000) return;
     }
+    const seq = ++this.syncStarted;
     const p = await readPolicy(this.deps.client, this.dharmaAddress());
+    // Reads overlap (housekeeping, and sync(true) after each write). One that started earlier but
+    // finished later is stale: applying it could undo a freeze or drop a just-added block.
+    if (seq < this.syncApplied) return;
+    this.syncApplied = seq;
     this.lastFullRead = Date.now();
     this.lastFingerprint = `${p.policyVersion}:${p.proposals.length ? Math.max(...p.proposals.map((x) => x.id)) + 1 : 0}:${p.frozen}:${p.logLength}`;
     this.policy = p;
@@ -618,6 +667,7 @@ export class Gatekeeper extends EventEmitter {
 
   /** Refresh policy, execute proposals whose timelock passed, anchor the log when due. */
   async housekeeping() {
+    this.expireHeldRequests(); // first: it needs no chain, so a slow RPC never leaves a card past its time
     await this.sync();
     await this.executeReady();
     await this.anchorIfDue();
@@ -633,7 +683,9 @@ export class Gatekeeper extends EventEmitter {
   settings(): SettingValues {
     const out = this.settingDefaults();
     for (const r of this.policy?.rules ?? []) {
-      if (!r.active || r.builtin || !r.scope.startsWith("setting:")) continue;
+      // Org-wide rules only: Dharma v5 lets the Gatekeeper add one agent's approval rule at once,
+      // so an agent-scoped "setting" must never change the org's settings.
+      if (!r.active || r.builtin || r.agent || !r.scope.startsWith("setting:")) continue;
       const name = r.scope.slice("setting:".length);
       if (!isSettingName(name)) continue;
       const v = parseSetting(name, r.target);
@@ -1106,7 +1158,16 @@ export class Gatekeeper extends EventEmitter {
     } else if (a.kind === Kind.Tighten) {
       this.requirePermission(signer, opName(Number(a.op)) === "Freeze" ? "freeze" : "agents");
     } else if (a.kind === Kind.Propose) {
-      if (isRoleOp(Number(a.op))) throw new GatekeeperError("Role changes apply at once; they aren't proposals", 409);
+      // Dharma v5 votes on one role change: a flat team of two or more switching to a tree.
+      let toTree = false;
+      try {
+        const c = decodeChange(Number(a.op), a.data);
+        toTree = c.op === "SetStructure" && c.structure === "tree";
+      } catch {
+        /* not a structure change */
+      }
+      const votedStructure = toTree && (this.policy?.version ?? 0) >= 5 && this.structure() === "flat" && (this.policy?.members.length ?? 1) > 1;
+      if (isRoleOp(Number(a.op)) && !votedStructure) throw new GatekeeperError("Role changes apply at once; they aren't proposals", 409);
       this.requirePermission(signer, "propose");
     }
 
@@ -1622,7 +1683,9 @@ export class Gatekeeper extends EventEmitter {
       } else if (this.escrowFor(p.agentId, pay.amountUsd)) {
         const e = this.escrowFor(p.agentId, pay.amountUsd)!;
         const escrow = await this.ensureEscrow();
-        const releaseAt = Math.floor(this.now().getTime() / 1000) + e.waitSeconds;
+        // Escrow never releases sooner than a minute after the hold opens (MIN_HOLD); leave room for
+        // the transfer to land first.
+        const releaseAt = Math.floor(this.now().getTime() / 1000) + Math.max(e.waitSeconds, 120);
         // Marked before the USDC moves, so the watchdog knows the transfer into the Escrow is ours.
         p.escrow = { address: escrow, status: "opening", releaseAt: new Date(releaseAt * 1000).toISOString() };
         this.save();
@@ -1904,11 +1967,30 @@ export class Gatekeeper extends EventEmitter {
     return { verdict: "pending", proposalId: base.id };
   }
 
+  /** A held request out of a sandbox that no member answered within the Approval hold. */
+  private isSandboxHold(p: Readonly<Proposal>) {
+    return p.request.tool === "http" && !p.payload && p.facts.some((f) => f.label === "From" && f.value.startsWith("sandbox run"));
+  }
+
+  /** Mark held sandbox requests nobody answered in time as expired: the agent was already refused. */
+  expireHeldRequests() {
+    const cutoff = this.now().getTime() - this.holdMs;
+    let changed = false;
+    for (const p of this.state.proposals) {
+      if (p.status !== "pending" || !this.isSandboxHold(p) || Date.parse(p.createdAt) > cutoff) continue;
+      p.status = "expired";
+      p.resolvedAt = this.now().toISOString();
+      this.countRecord(p.agentId, "denied");
+      this.logEvent({ type: "approval-expired", proposalId: p.id, agent: p.agentId });
+      changed = true;
+    }
+    if (changed) this.save();
+  }
+
   /** What happens to a held action if no member answers: shown on its card and in the island. */
   ifUnanswered(p: Readonly<Proposal>): string | null {
     if (p.status !== "pending") return null;
-    const sandbox = p.request.tool === "http" && !p.payload && p.facts.some((f) => f.label === "From" && f.value.startsWith("sandbox run"));
-    if (sandbox) return `Refused after ${waitText(this.holdMs / 1000)}. An approval after that lets the agent's next try through.`;
+    if (this.isSandboxHold(p)) return `Refused if no one answers within ${waitText(this.holdMs / 1000)}.`;
     if (p.payload) {
       const held = p.payload.kind === "transfer" ? this.escrowFor(p.agentId, p.payload.amountUsd) : null;
       return held ? `Nothing is paid. Once approved, it's held in escrow for ${waitText(held.waitSeconds)} and any member can cancel.` : "Nothing is paid until a member approves.";
@@ -1990,9 +2072,16 @@ export class Gatekeeper extends EventEmitter {
     return this.state.paused ?? null;
   }
 
-  /** Recent proposals, newest last (cheap: no log verification, unlike snapshot()). */
+  /**
+   * Recent proposals, newest last (cheap: no log verification, unlike snapshot()). Older ones still
+   * waiting on a person, being paid, or held in escrow are always included, so a burst of new cards
+   * can't push an open approval out of view (or make it look resolved).
+   */
   recentProposals(n = 300): Readonly<Proposal>[] {
-    return this.state.proposals.slice(-n);
+    const all = this.state.proposals;
+    const cut = Math.max(0, all.length - n);
+    const older = all.slice(0, cut).filter((p) => p.status === "pending" || p.status === "executing" || p.escrow?.status === "held" || p.escrow?.status === "opening");
+    return older.length ? [...older, ...all.slice(cut)] : all.slice(cut);
   }
 
   /** How long a held sandbox request waits before the box gets "pending" back. */
@@ -2033,7 +2122,7 @@ export class Gatekeeper extends EventEmitter {
   agentView(agentId: string, proposalId: string): AgentResponse | null {
     const p = this.state.proposals.find((x) => x.id === proposalId && x.agentId === agentId);
     if (!p) return null;
-    const status: AgentResponse["status"] = p.status === "executed" ? "done" : p.status === "executing" ? "pending" : p.status;
+    const status: AgentResponse["status"] = p.status === "executed" ? "done" : p.status === "executing" ? "pending" : p.status === "expired" ? "denied" : p.status;
     return status === "done" ? { id: p.id, status, result: p.result } : { id: p.id, status };
   }
 
@@ -2701,8 +2790,9 @@ export class Gatekeeper extends EventEmitter {
     }
     const outcome = await this.waitForDecision(open.id, 20_000);
     if (outcome === "allowed") {
-      this.grants.delete(hash);
-      return run();
+      // One approval, one call: only the first waiter takes the pass (like the egress proxy's takeGrant).
+      if (this.takeGrant(open.id)) return run();
+      return { content: [{ type: "text" as const, text: "This approval was already used for the same call. Ask again if it should run twice." }] };
     }
     if (outcome === "denied") return blocked;
     return { content: [{ type: "text" as const, text: `Waiting for your team to approve this in Karuna (request ${open.id}). Try again once it's approved.` }] };
@@ -2812,6 +2902,7 @@ export class Gatekeeper extends EventEmitter {
     run.changes = (body.changes as Record<string, unknown>[]).slice(0, MAX_RUN_CHANGES).flatMap((c) => {
       if (!c || typeof c.mount !== "string" || typeof c.path !== "string" || !KINDS.includes(c.kind as string)) return [];
       if (c.path.split("/").includes("..")) return [];
+      if (/[\x00-\x1f]/.test(c.mount + c.path)) return []; // a box reports file paths, never control characters
       const diff = typeof c.diff === "string" ? (c.diff.length > MAX_DIFF_CHARS ? `${c.diff.slice(0, MAX_DIFF_CHARS)}\n… (cut)` : c.diff) : null;
       return [{ mount: c.mount.slice(0, 500), path: c.path.slice(0, 500), kind: c.kind as RunFileChange["kind"], diff, binary: c.binary === true }];
     });
@@ -2898,11 +2989,11 @@ export class Gatekeeper extends EventEmitter {
   }
 
   /** Create a built agent locally (its existence, payees and rules go to Dharma from the console). */
-  buildAgent(input: { name?: unknown; instructions?: unknown; schedule?: unknown }) {
+  buildAgent(input: { name?: unknown; instructions?: unknown; schedule?: unknown; provider?: unknown }) {
     const instructions = requireText(input.instructions, "Instructions", 6000);
     const schedule = parseSchedule(input.schedule);
     const { id } = this.prepareAgent(input.name); // its token is never kept: each run gets a fresh one
-    (this.state.builtAgents ??= {})[id] = { instructions, schedule, paused: false, createdAt: this.now().toISOString() };
+    (this.state.builtAgents ??= {})[id] = { instructions, schedule, paused: false, createdAt: this.now().toISOString(), ...(input.provider === "groq" ? { provider: "groq" as const } : {}) };
     this.logEvent({ type: "agent-built", agent: id, schedule: scheduleText(schedule) });
     this.save();
     return { id };
@@ -2926,7 +3017,7 @@ export class Gatekeeper extends EventEmitter {
     const b = this.state.builtAgents?.[s.agentId];
     if (!b) throw new GatekeeperError("Not an agent Karuna runs", 404);
     const run = this.runOf(token);
-    return { agentId: s.agentId, name: this.org.labels.agents[s.agentId] ?? s.agentId, instructions: b.instructions, trigger: run?.trigger ?? "Run now", runId: run?.id ?? null, model: b.model ?? null };
+    return { agentId: s.agentId, name: this.org.labels.agents[s.agentId] ?? s.agentId, instructions: b.instructions, trigger: run?.trigger ?? "Run now", runId: run?.id ?? null, model: b.model ?? null, provider: b.provider ?? "anthropic" };
   }
 
   /** Start a built agent now (Run now, its schedule, or a message in its inbox). */
@@ -3580,7 +3671,7 @@ export class Gatekeeper extends EventEmitter {
   snapshot() {
     const pol = this.policy;
     const spent = this.spentToday();
-    const v = this.log.verify();
+    const v = this.log.verifyNew(); // the console asks on every change: check only what's new
     const L = this.labels();
     const frozen = this.isFrozen();
     const worst = pol ? this.exposureNow(pol) : null;
@@ -3615,7 +3706,7 @@ export class Gatekeeper extends EventEmitter {
               level, record, localRecord: this.state.record?.[a.id] ?? { completed: 0, denied: 0 },
               built: (() => {
                 const b = this.state.builtAgents?.[a.id];
-                return b ? { instructions: b.instructions, schedule: b.schedule, scheduleText: scheduleText(b.schedule), paused: b.paused, lastRunAt: b.lastRunAt ?? null } : null;
+                return b ? { instructions: b.instructions, schedule: b.schedule, scheduleText: scheduleText(b.schedule), paused: b.paused, lastRunAt: b.lastRunAt ?? null, provider: b.provider ?? "anthropic" } : null;
               })(),
               eligibility: level === null ? null : levelUpEligibility(record, level),
               preflight: this.preflightView(a.id),
@@ -3685,7 +3776,8 @@ export class Gatekeeper extends EventEmitter {
         const t = this.state.tests.find((x) => x.messageId === m.id);
         return { ...m, test: t ? { id: t.id, status: t.status, template: t.template } : null };
       }),
-      proposals: this.state.proposals.slice(-300).reverse().map((p) => ({ ...p, approvalsNeeded: this.approvalsNeeded(p), ifUnanswered: this.ifUnanswered(p) })),
+      today: this.todayCounts(),
+      proposals: this.recentProposals(300).slice().reverse().map((p) => ({ ...p, approvalsNeeded: this.approvalsNeeded(p), ifUnanswered: this.ifUnanswered(p) })),
       sandbox: this.sandboxView(),
       connectors: this.connectorDefs().map((c) => ({
         name: c.name, url: c.url, hasKey: !!c.key, error: this.connectorErrors.get(c.name) ?? null,

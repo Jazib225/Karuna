@@ -30,7 +30,6 @@ export interface RelayOptions {
   /** Agents' records, rebuilt from Dharma's events (trust levels). */
   records?: RecordBook;
   notifyRecords?: (records: Record<string, AgentRecord>, source: string) => Promise<void>;
-  quietMs?: number; // show "rpc" for this long after the safety net caught a missed event
   lagBlocks?: number; // with a Stream, the safety net trails the chain by this many blocks
   pollMs?: number;
 }
@@ -57,30 +56,33 @@ export class Relay extends EventEmitter {
     super();
   }
 
-  private lastRpcCatchAt = 0;
+  /** The RPC safety net caught an event the Stream never delivered, and the Stream hasn't delivered since. */
+  private streamMissed = false;
 
   /**
-   * Where events come from. With a Stream configured it's QuickNode — unless the RPC safety net
-   * recently caught an event QuickNode never delivered, which means the Stream is unhealthy.
+   * Where events come from. With a Stream configured it's QuickNode, unless the RPC safety net
+   * caught an event QuickNode never delivered: then it's Arc RPC until the Stream delivers again.
    * (Dharma events are rare, so "no delivery lately" alone says nothing about health.)
    */
   mode(): "quicknode" | "rpc" | "none" {
-    if (this.opts.securityToken && Date.now() - this.lastRpcCatchAt > (this.opts.quietMs ?? 120_000)) return "quicknode";
+    if (this.opts.securityToken && !this.streamMissed) return "quicknode";
     return this.opts.client ? "rpc" : "none";
   }
 
   /** De-duplicate (QuickNode and RPC may both see an event), keep, broadcast, nudge the Gatekeeper. */
   ingest(events: DharmaEvent[]) {
+    if (events.some((e) => e.source === "quicknode")) this.streamMissed = false; // the Stream delivers, even a repeat
     const fresh = events.filter((e) => !this.seen.has(e.id));
     for (const e of fresh) {
       this.seen.add(e.id);
       this.seenOrder.push(e.id);
       if (this.seenOrder.length > 5000) this.seen.delete(this.seenOrder.shift()!);
       this.recent.unshift(e);
-      if (e.source === "quicknode") this.stats.quickNodeEvents++;
-      else {
+      if (e.source === "quicknode") {
+        this.stats.quickNodeEvents++;
+      } else {
         this.stats.rpcEvents++;
-        if (this.opts.securityToken) this.lastRpcCatchAt = Date.now(); // QuickNode missed this one
+        if (this.opts.securityToken) this.streamMissed = true; // QuickNode missed this one
       }
     }
     this.recent.splice(100);
@@ -137,7 +139,9 @@ export class Relay extends EventEmitter {
     if (!this.opts.securityToken) return { status: 503, body: { error: "QUICKNODE_SECURITY_TOKEN not configured" } };
     let payload: string;
     try {
-      payload = (headers["content-encoding"] === "gzip" ? gunzipSync(rawBody) : rawBody).toString("utf8");
+      // Bounded: the body is unzipped before its signature can be checked, so a small zip bomb
+      // can't exhaust memory.
+      payload = (headers["content-encoding"] === "gzip" ? gunzipSync(rawBody, { maxOutputLength: 32 * 1024 * 1024 }) : rawBody).toString("utf8");
     } catch {
       this.stats.rejected++;
       return { status: 400, body: { error: "bad body" } };
@@ -159,6 +163,7 @@ export class Relay extends EventEmitter {
 
     this.stats.deliveries++;
     this.stats.lastQuickNodeAt = Date.now();
+    this.streamMissed = false; // the Stream is reaching us again
     let parsed: unknown;
     try {
       parsed = JSON.parse(payload);
@@ -194,8 +199,11 @@ export class Relay extends EventEmitter {
     const latest = this.opts.securityToken ? head - BigInt(this.opts.lagBlocks ?? 40) : head;
     if (this.lastBlock === null) this.lastBlock = latest - 20n;
     if (latest <= this.lastBlock) return;
-    const from = latest - this.lastBlock > 2000n ? latest - 2000n : this.lastBlock + 1n;
-    const logs = await client.getLogs({ address: dharma as Address, fromBlock: from, toBlock: latest });
+    // At most 2000 blocks a pass, from where the last pass ended: after an outage the net catches
+    // up over a few polls instead of skipping the gap.
+    const from = this.lastBlock + 1n;
+    const to = latest - from >= 2000n ? from + 1999n : latest;
+    const logs = await client.getLogs({ address: dharma as Address, fromBlock: from, toBlock: to });
     this.stats.lastRpcPollAt = Date.now();
     this.ingest(decodeDharmaLogs(logs.map(toRaw), this.allowed(), "rpc"));
     // The watchdog's safety net: USDC out of the wallet, from either emitter.
@@ -204,11 +212,11 @@ export class Relay extends EventEmitter {
       const from32 = `0x${"0".repeat(24)}${wallet.toLowerCase().slice(2)}` as `0x${string}`;
       const out = await client.request({
         method: "eth_getLogs",
-        params: [{ address: Object.keys(USDC_EMITTERS) as `0x${string}`[], topics: [TRANSFER_TOPIC as `0x${string}`, from32], fromBlock: `0x${from.toString(16)}`, toBlock: `0x${latest.toString(16)}` }],
+        params: [{ address: Object.keys(USDC_EMITTERS) as `0x${string}`[], topics: [TRANSFER_TOPIC as `0x${string}`, from32], fromBlock: `0x${from.toString(16)}`, toBlock: `0x${to.toString(16)}` }],
       } as never) as { address: string; topics: string[]; data: string; blockNumber: string; transactionHash: string; logIndex: string }[];
       this.ingestTransfers(decodeWalletTransfers(out, wallet, "rpc"));
     }
-    this.lastBlock = latest;
+    this.lastBlock = to;
   }
 
   /**

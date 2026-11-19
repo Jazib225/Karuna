@@ -3,7 +3,9 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
-const SKIP_DIRS = new Set(["node_modules", ".git", ".venv", "venv", "__pycache__", "dist", "build", ".next"]);
+// Only folders the generated .dockerignore leaves out: build output (dist, build, .next) is copied
+// into the image, so it is scanned like source.
+const SKIP_DIRS = new Set(["node_modules", ".git", ".venv", "venv", "__pycache__"]);
 const MAX_FILE = 2 * 1024 * 1024;
 
 export const SECRET_PATTERNS: [string, RegExp][] = [

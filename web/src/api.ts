@@ -5,7 +5,7 @@ import { consoleSessionTypedData, type Permission, type RoleDef, type SettingVal
 import type { Address } from "viem";
 
 export type Outcome = "allow" | "deny" | "approval";
-export type Status = "pending" | "executing" | "executed" | "allowed" | "denied" | "failed";
+export type Status = "pending" | "executing" | "executed" | "allowed" | "denied" | "failed" | "expired";
 
 export interface Fact { label: string; value: string; tone?: "warn" | "ok" }
 
@@ -108,7 +108,7 @@ export interface AgentView {
   record?: AgentRecord | null;
   eligibility?: { eligible: boolean; target: number | null; needed: number; have: number } | null;
   /** An agent Karuna builds and runs (instructions and schedule live in the Gatekeeper). */
-  built?: { instructions: string; schedule: Schedule; scheduleText: string; paused: boolean; lastRunAt: string | null } | null;
+  built?: { instructions: string; schedule: Schedule; scheduleText: string; paused: boolean; lastRunAt: string | null; provider?: "anthropic" | "groq" } | null;
   /** Pre-flight: three Drills sent when the agent first activated (or on Run again), and their results. */
   preflight?: PreflightView | null;
 }
@@ -256,6 +256,8 @@ export interface Snapshot {
     can: Record<string, Permission[]>; viewers: { address: string; name: string | null }[];
   };
   inbox: (InboxMessage & { test: { id: string; status: ShieldTest["status"]; template: string } | null })[];
+  /** Today's allowed and denied decisions, including allowed requests that never get a card. */
+  today?: { allowed: number; denied: number };
   proposals: Proposal[];
   log: { length: number; head: string; verified: boolean; brokenAt: number | null; publicKeyPem: string };
   sandbox: SandboxView;
@@ -387,8 +389,15 @@ export function useGatekeeper() {
     return running.current;
   }, []);
 
+  // A burst of changes (a backfill, a run's steps) asks for the wallet many times: one read at a time.
+  const walletBusy = useRef(false);
   const refreshWallet = useCallback(() => {
-    api<WalletInfo | null>("/wallet").then(setWallet).catch(() => undefined);
+    if (walletBusy.current) return;
+    walletBusy.current = true;
+    api<WalletInfo | null>("/wallet")
+      .then(setWallet)
+      .catch(() => undefined)
+      .finally(() => (walletBusy.current = false));
   }, []);
 
   useEffect(() => {
@@ -403,13 +412,19 @@ export function useGatekeeper() {
     let backoff = 1000;
     let closed = false;
     let lastSeen = Date.now();
+    let reopening = false;
     const reopen = () => {
+      // One reopen at a time: the watchdog must not keep cancelling a scheduled retry (with a 15 s
+      // backoff it fires first every time, and the stream would never come back).
+      if (reopening) return;
+      reopening = true;
       es?.close();
       clearTimeout(retry);
       retry = setTimeout(open, backoff);
       backoff = Math.min(backoff * 2, 15_000);
     };
     const open = () => {
+      reopening = false;
       if (closed) return;
       lastSeen = Date.now();
       es = new EventSource("/api/events");

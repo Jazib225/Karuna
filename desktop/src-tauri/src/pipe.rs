@@ -76,6 +76,8 @@ fn set_connected(app: &AppHandle, gk: &Gatekeeper, on: bool) {
             // Whatever was pending can't be answered over a dead connection; the island clears it.
             gk.pending.lock().unwrap().clear();
             gk.pending_events.lock().unwrap().clear();
+            // The Gatekeeper sends its pause state again on connect; don't keep a stale one.
+            gk.paused.store(false, Ordering::SeqCst);
         }
         let _ = app.emit("gk-status", json!({ "connected": on }));
         crate::tray::refresh(app);

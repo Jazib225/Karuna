@@ -3,8 +3,9 @@
 // Karuna like any agent's: payments and messages are proposals, web reads go through the egress
 // proxy, and the model call itself is a request Karuna decides (and reads into the run's timeline).
 //
-// It holds no key and no wallet: the Anthropic key is a placeholder Karuna's proxy swaps on the way
-// to api.anthropic.com (Keys page: a key named `anthropic`, bound to api.anthropic.com).
+// It holds no key and no wallet: the model key is a placeholder Karuna's proxy swaps on the way to
+// the model's host. Claude: a key named `anthropic`, bound to api.anthropic.com. Groq (free tier):
+// a key named `groq`, bound to api.groq.com.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
@@ -25,8 +26,9 @@ async function get<T>(path: string): Promise<T> {
   return j;
 }
 
-const job = await get<{ name: string; instructions: string; trigger: string; model: string | null }>("/v1/job");
-const MODEL = job.model || process.env.KARUNA_AGENT_MODEL || "claude-sonnet-5-5";
+const job = await get<{ name: string; instructions: string; trigger: string; model: string | null; provider?: "anthropic" | "groq" }>("/v1/job");
+const GROQ = job.provider === "groq";
+const MODEL = job.model || (GROQ ? process.env.KARUNA_GROQ_MODEL || "openai/gpt-oss-20b" : process.env.KARUNA_AGENT_MODEL || "claude-sonnet-5-5");
 const claude = new Anthropic({ apiKey: "karuna_key_anthropic", maxRetries: 1, timeout: 240_000 });
 
 const SYSTEM = `You are "${job.name}", an AI agent run by Karuna, a permission layer your team uses. Do your job with the tools you have, one step at a time.
@@ -62,10 +64,13 @@ const answer = (r: { status: string; id: string; result?: unknown }) =>
   : "Karuna blocked this.";
 
 function inWorkspace(p: string) {
-  const full = normalize(join(WORKSPACE, p.replace(/^\/?workspace\/?/, "")));
-  if (!full.startsWith(WORKSPACE)) throw new Error("only files in your workspace");
+  const full = normalize(join(WORKSPACE, p.replace(/^\/?workspace\/?/, ""))).replace(/\\/g, "/");
+  if (full !== WORKSPACE && !full.startsWith(`${WORKSPACE}/`)) throw new Error("only files in your workspace");
   return full;
 }
+
+/** The path as Karuna should judge it: the file that will actually be written, not what the model typed (`a/../finance/x`). */
+const workspacePath = (full: string) => full.slice(WORKSPACE.length + 1);
 
 /** How long a save waits for a person before the run gives up on it. */
 const WRITE_WAIT_MS = Number(process.env.KARUNA_WRITE_WAIT_SECONDS ?? 600) * 1000;
@@ -123,7 +128,7 @@ async function run(name: string, input: Record<string, unknown>): Promise<string
       // approves or denies it (the card shows what would be written); this run waits for them.
       const f = inWorkspace(String(input.path));
       const content = String(input.content ?? "");
-      const verdict = await checkWrite(String(input.path), content);
+      const verdict = await checkWrite(workspacePath(f), content);
       if (verdict !== "allowed") return verdict === "denied" ? "Karuna blocked this." : "Not saved: nobody approved it in time.";
       mkdirSync(dirname(f), { recursive: true });
       writeFileSync(f, content);
@@ -133,7 +138,61 @@ async function run(name: string, input: Record<string, unknown>): Promise<string
   return `No tool named ${name}.`;
 }
 
+/** One run on Groq's OpenAI-compatible API (free tier). Its reasoning comes back with each reply. */
+async function runGroq(first: string): Promise<string> {
+  type Msg = { role: "system" | "user" | "assistant" | "tool"; content: string | null; tool_calls?: { id: string; type: "function"; function: { name: string; arguments: string } }[]; tool_call_id?: string };
+  const fns = tools.map((t) => ({ type: "function" as const, function: { name: t.name, description: t.description, parameters: t.input_schema } }));
+  const msgs: Msg[] = [{ role: "system", content: SYSTEM }, { role: "user", content: first }];
+  for (let turn = 1; turn <= MAX_TURNS; turn++) {
+    const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: "Bearer karuna_key_groq", "content-type": "application/json" },
+      body: JSON.stringify({ model: MODEL, messages: msgs, tools: fns, tool_choice: "auto", max_tokens: 2000, reasoning_effort: "low" }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    const j = (await r.json().catch(() => ({}))) as { choices?: { message: Msg & { reasoning?: string }; finish_reason: string }[]; error?: { message?: string } | string };
+    if (!r.ok || !j.choices?.length) {
+      const why = typeof j.error === "string" ? j.error : j.error?.message ?? `HTTP ${r.status}`;
+      say("error", `model call failed: ${why}`);
+      say("hint", "is a key named `groq` on the Keys page, bound to api.groq.com, and POST to it allowed?");
+      process.exit(1);
+    }
+    const m = j.choices[0]!.message;
+    if (m.reasoning) say("thinks", m.reasoning.replace(/\s+/g, " ").slice(0, 300));
+    msgs.push({ role: "assistant", content: m.content ?? "", ...(m.tool_calls?.length ? { tool_calls: m.tool_calls } : {}) });
+    if (!m.tool_calls?.length) return (m.content ?? "").trim() || "(no report)";
+    let report = "";
+    for (const c of m.tool_calls) {
+      let input: Record<string, unknown> = {};
+      try {
+        input = JSON.parse(c.function.arguments || "{}") as Record<string, unknown>;
+      } catch {
+        /* the tool sees no arguments */
+      }
+      let out: string;
+      if (c.function.name === "finish") {
+        report = String(input.report ?? "");
+        out = "Finished.";
+      } else {
+        try {
+          out = await run(c.function.name, input);
+        } catch (e) {
+          out = `error: ${e instanceof Error ? e.message : String(e)}`;
+        }
+        say("tool", `${c.function.name} → ${out.split("\n")[0]!.slice(0, 140)}`);
+      }
+      msgs.push({ role: "tool", tool_call_id: c.id, content: out });
+    }
+    if (report) return report;
+  }
+  return `stopped after ${MAX_TURNS} model calls`;
+}
+
 say("start", `${job.name} · ${job.trigger} · ${MODEL}`);
+if (GROQ) {
+  say("report", await runGroq(`Run started: ${job.trigger}.\n\nYour instructions:\n${job.instructions}`));
+  process.exit(0);
+}
 const messages: Anthropic.MessageParam[] = [{ role: "user", content: `Run started: ${job.trigger}.\n\nYour instructions:\n${job.instructions}` }];
 let report = "";
 for (let turn = 1; turn <= MAX_TURNS && !report; turn++) {

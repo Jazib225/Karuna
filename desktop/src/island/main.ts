@@ -23,6 +23,7 @@ type GkEvent =
   | Decision
   | ApprovalRequested
   | { type: "approval_resolved"; id: string; result: string }
+  | { type: "approval_progress"; id: string; approvals: number; needed: number }
   | { type: "agent_paused"; by?: string }
   | { type: "agent_resumed" }
   | { type: "error"; id?: string; error: string };
@@ -82,6 +83,8 @@ darkMedia.addEventListener("change", applyAppearance);
 let connected = false;
 let paused = false;
 let hovering = false;
+/** The approval the user already looked at and hovered away from: it stays in the pill, not open. */
+let dismissed: string | null = null;
 let visible = false;
 let dragging = false;
 let transient: { state: State; until: number } | null = null;
@@ -91,6 +94,7 @@ const FEED_MAX = 3;
 const feed: { at: number; e: Decision }[] = [];
 const cardStatus = new Map<string, { text: string; err: boolean }>();
 let reasonOpen = false;
+let cardKey = "";
 
 type Mode = { mode: "notch" } | { mode: "floating"; x: number; y: number };
 const loadMode = (): Mode => {
@@ -444,18 +448,40 @@ function render() {
     floater.style.top = `${mode.y}px`;
   }
 
-  // Open: hovering, or an approval waiting (never auto-retracts while pending), or dragging.
-  const open = hovering || st === "pending" || dragging;
+  // Open: hovering, dragging, or a new approval waiting. Once the user hovers away from that
+  // approval it retracts to the pill (which still says it's waiting); hovering opens it again.
+  const fresh = st === "pending" && queue[0].id !== dismissed;
+  const open = hovering || fresh || dragging;
   notch.classList.toggle("open", open && !floating);
   const showCard = open && !dragging && (st === "pending" || hovering);
-  card.hidden = !showCard;
+  clearTimeout(hideTimer);
   if (showCard) {
-    cardBody.replaceChildren(st === "pending" ? approvalCard(queue[0]) : feedView());
+    card.hidden = false;
+    // Rebuild only when what the card shows changed: rebuilding on every event (a feed decision, a
+    // hover) swapped the buttons out from under a click in progress.
+    const a = queue[0];
+    const s = a && cardStatus.get(a.id);
+    const key =
+      st === "pending"
+        ? `a:${a.id}:${s?.err ? 1 : 0}:${s?.text ?? ""}:${expired(a)}`
+        : `f:${st}:${paused}:${feed.length}:${feed[0]?.at ?? 0}:${Math.floor(Date.now() / 30_000)}`;
+    if (key !== cardKey || !cardBody.firstChild) {
+      cardKey = key;
+      cardBody.replaceChildren(st === "pending" ? approvalCard(a) : feedView());
+    }
     placeCard();
-    requestAnimationFrame(() => card.classList.add("show"));
+    requestAnimationFrame(() => {
+      card.classList.add("show");
+      reportRects();
+    });
     tickExpiry();
-  } else {
+  } else if (!card.hidden) {
+    // Fade and lift out with the pill, then take it out of the layout.
     card.classList.remove("show");
+    hideTimer = window.setTimeout(() => {
+      card.hidden = true;
+      reportRects();
+    }, CARD_OUT_MS);
   }
   reportRects();
 }
@@ -482,6 +508,27 @@ function placeCard() {
   card.style.top = `${Math.round(y)}px`;
 }
 
+let hideTimer = 0;
+const CARD_OUT_MS = 340; // the card's fade-out (island.css .card transition)
+
+/** Drop approvals whose hold ran out: the Gatekeeper already refused them. */
+function dropExpired() {
+  const now = Date.now();
+  const before = queue.length;
+  for (let i = queue.length - 1; i >= 0; i--) {
+    const at = queue[i].expires_at ? Date.parse(queue[i].expires_at!) : NaN;
+    if (!Number.isNaN(at) && at + 1500 < now) {
+      cardStatus.delete(queue[i].id);
+      queue.splice(i, 1);
+    }
+  }
+  if (queue.length !== before) {
+    flash("denied", 1600);
+    render();
+  }
+}
+setInterval(dropExpired, 1000);
+
 let expiryTimer = 0;
 function tickExpiry() {
   clearTimeout(expiryTimer);
@@ -505,7 +552,7 @@ function tickExpiry() {
 let lastRects = "";
 function reportRects() {
   if (!visible) return;
-  const rects: { x: number; y: number; w: number; h: number }[] = [];
+  const rects: { x: number; y: number; w: number; h: number; hoverOnly?: boolean }[] = [];
   if (!appearance.island) {
     if (lastRects !== "[]") {
       lastRects = "[]";
@@ -518,12 +565,12 @@ function reportRects() {
     const p = pill.getBoundingClientRect();
     // Retracted, the hover target is the strip at the top edge (a little taller to be easy to find).
     if (notch.classList.contains("open")) add(p);
-    else rects.push({ x: p.left, y: 0, w: p.width, h: 12 });
+    else rects.push({ x: p.left, y: 0, w: p.width, h: 12, hoverOnly: true }); // hover opens it; clicks pass through
   } else {
     add(floater.getBoundingClientRect(), 4);
   }
-  if (!card.hidden) add(card.getBoundingClientRect(), 6);
-  const key = JSON.stringify(rects.map((r) => [r.x, r.y, r.w, r.h].map(Math.round)));
+  if (!card.hidden && card.classList.contains("show")) add(card.getBoundingClientRect(), 6);
+  const key = JSON.stringify(rects.map((r) => [...[r.x, r.y, r.w, r.h].map(Math.round), r.hoverOnly ? 1 : 0]));
   if (key === lastRects) return;
   lastRects = key;
   void invoke("island_rects", { rects });
@@ -545,6 +592,7 @@ function setHover(inside: boolean) {
   }
   retractTimer = window.setTimeout(() => {
     hovering = false;
+    if (queue.length) dismissed = queue[0].id;
     render();
   }, RETRACT_MS);
 }
@@ -656,6 +704,13 @@ function onEvent(ev: GkEvent) {
       flash(ev.result === "approved" ? "approved" : "denied", 2400);
       break;
     }
+    case "approval_progress": {
+      // My approval counted; another member still has to approve. Say so and retract the card.
+      const left = Math.max(1, ev.needed - ev.approvals);
+      cardStatus.set(ev.id, { text: `Your approval is in. ${left === 1 ? "One more member needs" : `${left} more members need`} to approve.`, err: false });
+      if (queue[0]?.id === ev.id) dismissed = ev.id;
+      break;
+    }
     case "agent_paused":
       paused = true;
       break;
@@ -676,6 +731,7 @@ void listen<{ connected: boolean }>("gk-status", (e) => {
   if (!connected) {
     queue.length = 0;
     cardStatus.clear();
+    paused = false; // the Gatekeeper re-sends its pause state when it reconnects
   }
   render();
 });
