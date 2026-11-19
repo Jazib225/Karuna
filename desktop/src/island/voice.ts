@@ -126,6 +126,18 @@ async function say(call: VoiceCall, body: { id?: string; vote?: number; reason?:
   await speaking.play().catch(() => undefined);
 }
 
+/** Hang up a call for good: mute both ways first, so nothing more is heard or sent while the
+ *  connection closes, and don't wait forever on a connection that won't close. */
+async function hangUp(c: VoiceConversation) {
+  try {
+    c.setVolume({ volume: 0 });
+    c.setMicMuted(true);
+  } catch {
+    /* already closed */
+  }
+  await Promise.race([c.endSession().catch(() => undefined), new Promise((r) => setTimeout(r, 3000))]);
+}
+
 // ------------------------------------------------------------------ the voice controller
 export class IslandVoice {
   enabled = false;
@@ -135,6 +147,8 @@ export class IslandVoice {
   error: string | null = null;
   readonly votes = new Map<number, OpenVote>();
   private conv: VoiceConversation | null = null;
+  /** Which conversation is current; End moves it on (see start). */
+  private session = 0;
   private lines: Line[] = [];
   private actions: Action[] = [];
   private drafts: { id: string; rule: string }[] = [];
@@ -269,6 +283,11 @@ export class IslandVoice {
       this.hooks.render();
       return;
     }
+    // Each conversation gets its own number. End (or a newer conversation) moves the number on, and
+    // everything from an older conversation is ignored from then on: a connection that finishes
+    // after End is hung up at once, and its late messages or disconnect can't switch anything back on.
+    const session = ++this.session;
+    const current = () => session === this.session;
     this.mode = "connecting";
     this.error = null;
     this.lines = [];
@@ -276,26 +295,39 @@ export class IslandVoice {
     this.hooks.render();
     try {
       const { token } = await this.call<{ token: string }>("session");
+      if (!current()) return;
       speaking?.pause();
       // Loaded on first use: the WebRTC client is most of the island's code, and most days nobody talks.
       const { VoiceConversation } = await import("@elevenlabs/client");
-      this.conv = await VoiceConversation.startSession({
+      if (!current()) return;
+      const conv = await VoiceConversation.startSession({
         conversationToken: token,
         connectionType: "webrtc",
         clientTools: this.tools(),
-        onMessage: (m: MessagePayload) => this.onMessage(m),
+        onMessage: (m: MessagePayload) => {
+          if (current()) this.onMessage(m);
+        },
         onModeChange: ({ mode }: { mode: string }) => {
-          if (!this.conv) return;
+          if (!current() || !this.conv) return;
           this.mode = mode === "speaking" ? "speaking" : "listening";
           this.bump();
           this.hooks.render();
         },
-        onDisconnect: () => this.ended(),
+        onDisconnect: () => {
+          if (current()) this.ended();
+        },
         onError: (message: string) => {
+          if (!current()) return;
           this.error = message;
           this.hooks.render();
         },
       });
+      if (!current()) {
+        // End was pressed while it was connecting: hang up the call that just opened.
+        hangUp(conv);
+        return;
+      }
+      this.conv = conv;
       this.mode = "listening";
       // A short status up front, so "how are things?" gets a real answer straight away.
       void this.call<{ agents: { name: string; level: number | null; spentToday: string }[]; paused: boolean; frozen: boolean; wallet: { usdc: string } | null }>("status")
@@ -309,6 +341,7 @@ export class IslandVoice {
       }
       this.bump();
     } catch (e) {
+      if (!current()) return;
       this.conv = null;
       this.mode = "off";
       this.error = e instanceof Error ? e.message : String(e);
@@ -317,21 +350,26 @@ export class IslandVoice {
     this.hooks.render();
   }
 
+  /** End: final. Silences Karuna at once, hangs up, and ignores anything the old call still sends. */
   async stop() {
     const c = this.conv;
+    this.session++;
     this.conv = null;
     this.codes.clear();
     clearTimeout(this.idleTimer);
     clearTimeout(this.codeTimer);
+    speaking?.pause();
     this.mode = "off";
     this.hooks.render();
-    await c?.endSession().catch(() => undefined);
+    if (c) await hangUp(c);
   }
 
   private ended() {
+    this.session++;
     this.conv = null;
     this.codes.clear();
     clearTimeout(this.idleTimer);
+    clearTimeout(this.codeTimer);
     this.mode = "off";
     this.hooks.render();
   }
