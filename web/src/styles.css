@@ -1130,3 +1130,7 @@ html, body, * { scrollbar-width: none; }
 .alert.bad .alert-timer { background: var(--danger); }
 .alert:hover .alert-timer, .alert:focus-within .alert-timer { animation-play-state: paused; }
 @keyframes alert-timer { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+
+/* New agent card: one line under the switch saying what this mode does, and the not-connected dot. */
+.mode-note { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 12px; color: var(--n500); }
+.live-dot.off { background: var(--n300); animation: none; }

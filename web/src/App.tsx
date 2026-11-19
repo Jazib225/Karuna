@@ -1759,7 +1759,6 @@ function Agents({ ctx }: { ctx: Ctx }) {
           <button className="btn btn-ghost btn-sm" type="submit" disabled={busy}>Propose and get a token</button>
         </form>
       } />
-      <ChatSetup ctx={ctx} />
       <Computers ctx={ctx} />
       <Connectors ctx={ctx} />
       {s.sandbox.remote && <RemoteRuns ctx={ctx} />}
@@ -3057,7 +3056,7 @@ const CHAT_OFF = [
   { id: "direct", label: "Connectors added in Claude directly", note: "add them under Connectors instead" },
 ] as const;
 
-/** Connect Claude chat: Karuna's address, then the built-in tools to turn off. */
+/** Connect Claude chat: Karuna's address, then the built-in tools to turn off (the New agent card's "Claude chat" mode). */
 function ChatSetup({ ctx }: { ctx: Ctx }) {
   const { s } = ctx;
   const url = s.chatUrl ?? null;
@@ -3081,9 +3080,9 @@ function ChatSetup({ ctx }: { ctx: Ctx }) {
   };
   const off = CHAT_OFF.filter((x) => done[x.id]).length;
   return (
-    <div className="card chat-setup">
-      <div className="hd"><h2>Claude chat</h2><span className="sub">{connected ? `connected · ${off}/${CHAT_OFF.length} built-in tools off` : "not connected"}</span></div>
+    <div className="chat-setup">
       <div className="pad stack-sm">
+        <div className="mode-note"><span className={`live-dot${connected ? "" : " off"}`} aria-hidden /> {connected ? `Connected · ${off}/${CHAT_OFF.length} built-in tools off` : "Not connected yet"}</div>
         <div className="chat-step">
           <span className="step-n">1</span>
           <div className="grow">
@@ -3200,8 +3199,27 @@ const CLAUDE_KEY = "anthropic";
 const CLAUDE_HOST = "api.anthropic.com";
 
 /** Describe a job; Karuna drafts the agent; members review and propose it; Karuna runs it. */
+type NewAgentMode = "agent" | "chat";
+const NEW_AGENT_MODES: { v: NewAgentMode; label: string }[] = [{ v: "agent", label: "New agent" }, { v: "chat", label: "Claude chat" }];
+
 function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
   const { s, run, busy, me } = ctx;
+  // Two ways to add an agent: one Karuna builds and runs, or Claude chat as a connector. Remembered per browser.
+  const [mode, setModeState] = useState<NewAgentMode>(() => {
+    try {
+      return localStorage.getItem("karuna.newAgentMode") === "chat" ? "chat" : "agent";
+    } catch {
+      return "agent";
+    }
+  });
+  const setMode = (m: NewAgentMode) => {
+    setModeState(m);
+    try {
+      localStorage.setItem("karuna.newAgentMode", m);
+    } catch {
+      /* per-browser convenience only */
+    }
+  };
   const [job, setJob] = useState("");
   const [drafting, setDrafting] = useState(false);
   const [err, setErr] = useState("");
@@ -3243,8 +3261,15 @@ function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
     }, `Proposed. Karuna runs it once the vote passes (${s.policy!.timelock}s), starting at Level 0`);
   return (
     <div className="card new-agent">
-      <div className="hd"><h2>New agent</h2><span className="sub">Karuna builds and runs it</span></div>
+      <div className="hd">
+        <h2>{mode === "chat" ? "Claude chat" : "New agent"}</h2>
+        <span className="filters" role="tablist" aria-label="How to add an agent">
+          {NEW_AGENT_MODES.map((o) => <button key={o.v} type="button" role="tab" aria-selected={mode === o.v} className={mode === o.v ? "on" : ""} onClick={() => setMode(o.v)}>{o.label}</button>)}
+        </span>
+      </div>
+      {mode === "chat" ? <ChatSetup ctx={ctx} /> : (
       <div className="pad stack-sm">
+        <div className="mode-note">Karuna builds and runs it</div>
         {!d ? (
           <>
             <DrafterKeyField ctx={ctx} />
@@ -3281,6 +3306,7 @@ function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
           </>
         )}
       </div>
+      )}
     </div>
   );
 }
