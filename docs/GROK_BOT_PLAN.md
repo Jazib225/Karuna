@@ -1,6 +1,6 @@
 # Grok Bot as a governed agent
 
-> **Status (Nov 19, 2026):** not started. Optional: targets the Grok Bot bounty. Split out of
+> **Status (Nov 19, 2026):** built: see [`GROK_BOT.md`](GROK_BOT.md). Left: the Grok Bot chat export. Optional: targets the Grok Bot bounty. Split out of
 > [`VOICE_PLAN.md`](VOICE_PLAN.md).
 
 ## The idea

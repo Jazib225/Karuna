@@ -21,7 +21,7 @@ import { Kind, actionTypedData, encodeChange, paymentDecisionTypedData, type Cha
 import { Store } from "../src/store.ts";
 import { Gatekeeper, type SignedAction } from "../src/gatekeeper.ts";
 import { ViemChainWriter } from "../src/chain.ts";
-import { publicApi } from "../src/chat.ts";
+import { grokPath, okRedirect, publicApi, tokenFrom } from "../src/chat.ts";
 import { ConnectorClients } from "../src/connectors.ts";
 import type { WalletBackend } from "../src/wallet.ts";
 import { WebTools } from "../src/web.ts";
@@ -345,3 +345,107 @@ describe("tools in the chat", () => {
   }, 90_000);
 });
 
+
+// ---------------------------------------------------------------- Grok Bot (docs/GROK_BOT.md)
+describe("Grok Bot", () => {
+  const GROK_REDIRECT = "grok://oauth/callback";
+
+  it("app links and header tokens: a Bot's own link scheme signs in, scripts and local files never do; every header form is read", () => {
+    for (const ok of ["https://grok.com/oauth/callback", "http://127.0.0.1:5173/cb", GROK_REDIRECT, "cursor://anysphere.cursor-mcp/oauth/callback"]) expect(okRedirect(ok), ok).toBe(true);
+    for (const bad of ["javascript://x/alert(1)", "data://text/html,x", "file:///C:/x", "http://evil.example/cb", "ftp://x/y", "", "notaurl", "grok://a b"]) expect(okRedirect(bad), bad).toBe(false);
+    expect(tokenFrom({ authorization: "Bearer kag_a" })).toBe("kag_a");
+    expect(tokenFrom({ authorization: "ApiKey kag_a" })).toBe("kag_a");
+    expect(tokenFrom({ authorization: "kag_a" })).toBe("kag_a");
+    expect(tokenFrom({ "x-karuna-token": "kag_a" })).toBe("kag_a");
+    expect(tokenFrom({})).toBe("");
+    expect(grokPath("/grok/mcp")).toEqual({ grok: true, path: "/mcp" });
+    expect(grokPath("/.well-known/oauth-authorization-server/grok")).toEqual({ grok: true, path: "/.well-known/oauth-authorization-server" });
+    expect(grokPath("/.well-known/oauth-protected-resource/grok/mcp")).toEqual({ grok: true, path: "/.well-known/oauth-protected-resource/mcp" });
+    expect(grokPath("/mcp")).toEqual({ grok: false, path: "/mcp" });
+  });
+
+  it("connects at its own address as its own agent, watches the team on Arc, and alerts the members without acting", async () => {
+    const g = `${base}/grok`;
+    // Discovery points Grok Bot at its own sign-in.
+    const r401 = await fetch(`${g}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(r401.status).toBe(401);
+    expect(r401.headers.get("www-authenticate")).toContain(`${base}/.well-known/oauth-protected-resource/grok/mcp`);
+    expect(await (await fetch(`${base}/.well-known/oauth-protected-resource/grok/mcp`)).json()).toMatchObject({ resource: `${g}/mcp`, authorization_servers: [g] });
+    expect(await (await fetch(`${base}/.well-known/oauth-authorization-server/grok`)).json()).toMatchObject({ issuer: g, authorization_endpoint: `${g}/authorize`, registration_endpoint: `${g}/register` });
+
+    // Sign-in: register with the Bot's app link, Karuna shows a code, a member approves, the team votes.
+    const reg = (await (await fetch(`${g}/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: "Grok", redirect_uris: [GROK_REDIRECT, "javascript://x"] }) })).json()) as { client_id: string; redirect_uris: string[] };
+    expect(reg.redirect_uris).toEqual([GROK_REDIRECT]);
+    const verifier = randomBytes(32).toString("base64url");
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const page = await (await fetch(`${g}/authorize?${new URLSearchParams({ response_type: "code", client_id: reg.client_id, redirect_uri: GROK_REDIRECT, code_challenge: challenge, code_challenge_method: "S256", state: "g1" })}`)).text();
+    const dev = gk.snapshot().devices.find((d) => d.status === "pending")!;
+    expect(dev).toMatchObject({ name: "Grok Bot", tool: "grok-bot" });
+    expect(page).toContain(dev.code);
+    expect(page).toContain("New agent → Grok Bot");
+    const req = /const id = "([^"]+)"/.exec(page)![1];
+    const { agentId } = gk.approveDevice(dev.id, { by: member.address });
+    for (const c of [
+      { op: "SetAgent", id: agentId, capUsd: 0 },
+      { op: "AddRule", id: `unsandboxed-${agentId}`.slice(0, 31), outcome: "Allow", scope: "unsandboxed", target: agentId },
+    ] as Change[]) await gk.submitAction(await sign(Kind.Propose, c));
+    expect(await (await fetch(`${base}/authorize/status?req=${req}`)).json()).toEqual({ status: "voting" });
+    await passTimelock();
+    const st = (await (await fetch(`${base}/authorize/status?req=${req}`)).json()) as { status: string; redirect: string };
+    expect(st.redirect.startsWith(`${GROK_REDIRECT}?`)).toBe(true);
+    const code = new URL(st.redirect).searchParams.get("code")!;
+    const tok = (await (await fetch(`${g}/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", code, code_verifier: verifier, client_id: reg.client_id, redirect_uri: GROK_REDIRECT }) })).json()) as { access_token: string };
+    expect(tok.access_token).toMatch(/^kag_/);
+
+    const c = new Client({ name: "grok-bot", version: "1" });
+    await c.connect(new StreamableHTTPClientTransport(new URL(`${g}/mcp`), { requestInit: { headers: { authorization: `Bearer ${tok.access_token}` } } }));
+    const text = async (name: string, args: Record<string, unknown> = {}) => ((await c.callTool({ name, arguments: args })).content as { text: string }[])[0].text;
+    const names = (await c.listTools()).tools.map((t) => t.name);
+    expect(names).toEqual(expect.arrayContaining(["pay", "balance", "check_request", "arc_activity", "alert_team"]));
+    expect(await text("balance")).toMatch(/Level 0/);
+
+    // From X ("@bot pay Grain Feed"): Grok Bot can only propose. Over its level, a member decides.
+    const t0 = new Date(Date.now() - 1000).toISOString();
+    expect(await text("pay", { payee: "Grain Feed", amount_usd: 3, reason: "@bot asked on X: weekly flour" })).toMatch(/Waiting for your team/);
+    expect(await text("pay", { payee: "0x00000000000000000000000000000000000000b2", amount_usd: 1 })).toMatch(/isn't one of your team's payees/);
+    let seen = await text("arc_activity", { since: t0 });
+    expect(seen).toContain("Chat Org on Arc");
+    expect(seen).toContain("Waiting for a member's approval (1):");
+    expect(seen).toMatch(/\$3\.00 to Grain Feed, asked by .* just now/);
+    expect(seen).toContain("Agents are running (not frozen).");
+    expect(seen).not.toMatch(/weekly flour/); // the agent's own words aren't echoed back as facts
+
+    const next = /pass since: "([^"]+)"/.exec(seen)![1];
+    expect((await approve(await pendingFor(agentId))).status).toBe("executed");
+    seen = await text("arc_activity", { since: next });
+    expect(seen).toContain("No payments waiting for approval.");
+    expect(seen).toMatch(/Paid \$3\.00 to Grain Feed for /);
+
+    // USDC leaves the wallet outside Karuna: the watchdog freezes everything; Grok Bot sees it and tells the team.
+    const t1 = new Date(Date.now() - 1000).toISOString();
+    gk.watchdogTransfer({ txHash: `0x${"ab".repeat(32)}`, to: "0x00000000000000000000000000000000000000c3", amountUsd: 250 });
+    await gk.idle();
+    seen = await text("arc_activity", { since: t1 });
+    expect(seen).toContain("FROZEN: every agent is stopped");
+    expect(seen).toContain("MATCHES NO PAYMENT KARUNA MADE");
+    expect(seen).toContain(`/tx/0x${"ab".repeat(32)}`);
+    expect(seen).not.toMatch(/scam test|trap|shield/i); // nothing that would give away Karuna's tests
+
+    expect(await text("alert_team", { title: "$250 left the wallet without approval", detail: "tx 0xabab", suggest: "freeze" })).toMatch(/Only a member can act on it/);
+    const alert = gk.snapshot().shield.alerts.find((a) => a.kind === "bot-alert")!;
+    expect(alert).toMatchObject({ agentId, go: "freeze" });
+    expect(alert.title).toContain("$250 left the wallet without approval");
+    expect(alert.body).toContain("check it before acting");
+    for (let i = 0; i < 5; i++) await text("alert_team", { title: `more ${i}` });
+    expect(await text("alert_team", { title: "one too many" })).toMatch(/^Not sent/);
+
+    // Other header forms reach the same agent (a routine set up with a key); Disconnect cuts it off.
+    const raw = async (h: Record<string, string>) =>
+      (await fetch(`${g}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...h }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) })).status;
+    expect(await raw({ authorization: tok.access_token })).toBe(200);
+    expect(await raw({ "x-karuna-token": tok.access_token })).toBe(200);
+    await c.close();
+    gk.revokeDevice(dev.id);
+    expect(await raw({ authorization: `Bearer ${tok.access_token}` })).toBe(401);
+  }, 120_000);
+});

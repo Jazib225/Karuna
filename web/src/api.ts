@@ -287,7 +287,7 @@ export interface ShieldTest {
   sentAt: string; status: "pending" | "passed" | "failed"; resolvedAt?: string; resolution?: string; proposalIds: string[]; ruleId?: string;
 }
 export interface TrapSet { id: string; agentId: string | null; createdAt: string; secrets: { name: string; value: string }[] }
-export interface ShieldAlert { id: string; kind: "shield-failed" | "shield-passed" | "changed-bank-account" | "agent-reported" | "trap-touched" | "swarm-stopped" | "watchdog" | "level-lowered"; agentId: string; title: string; body: string; at: string }
+export interface ShieldAlert { id: string; kind: "shield-failed" | "shield-passed" | "changed-bank-account" | "agent-reported" | "trap-touched" | "swarm-stopped" | "watchdog" | "level-lowered" | "bot-alert"; agentId: string; title: string; body: string; at: string; go?: "approvals" | "votes" | "freeze" }
 
 export interface LogEntry {
   seq: number;

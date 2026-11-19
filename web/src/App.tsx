@@ -1049,6 +1049,12 @@ function Console({ s, log, wallet, refreshWallet, run, busy, me, offline, refres
     if (fresh.length) {
       setAlerts((prev) => [
         ...fresh.map((a): Alert => {
+          if (a.kind === "bot-alert") {
+            return {
+              id: a.id, title: a.title, body: a.body, source: "rpc", at: Date.now(), sticky: true, tone: a.go === "freeze" ? "bad" : "warn", via: "From an agent",
+              ...(a.go === "freeze" ? { act: "freeze" as const, cta: "Freeze all agents" } : a.go === "votes" ? { go: "votes" as View, cta: "Votes" } : { go: "approvals" as View, cta: "Approvals" }),
+            };
+          }
           const swarm = a.kind === "swarm-stopped" || a.kind === "trap-touched";
           const bad = swarm || a.kind === "changed-bank-account";
           return {
@@ -1178,10 +1184,15 @@ function Console({ s, log, wallet, refreshWallet, run, busy, me, offline, refres
               <span className="alert-icon"><Icon name={a.tone === "bad" ? "alert" : a.tone === "ok" ? "check" : a.go === "approvals" ? "approvals" : a.go === "dharma" ? "votes" : "signal"} size={15} /></span>
               <div className="alert-top">
                 <b>{a.title}</b>
-                <span className="via">{a.source === "quicknode" ? "via QuickNode" : a.source === "rpc" && (a.go === "shield" || a.go === "swarm") ? "Gatekeeper" : "via Arc RPC"}</span>
+                <span className="via">{a.via ? a.via : a.source === "quicknode" ? "via QuickNode" : a.source === "rpc" && (a.go === "shield" || a.go === "swarm") ? "Gatekeeper" : "via Arc RPC"}</span>
               </div>
               <button className="alert-x" aria-label="Dismiss" onClick={() => dismiss(a.id)}><Icon name="x" size={14} /></button>
               <div className="alert-body">{a.body}</div>
+              {a.act === "freeze" && !frozen && role.can("freeze") && (
+                <button className="alert-cta" onClick={() => void askConfirm("Freeze every agent now? Unfreezing needs a vote.", { action: "Freeze all agents", danger: true, icon: "stop" }).then((ok) => { if (ok) { dismiss(a.id); void ctx.change({ op: "Freeze" }); } })}>
+                  {a.cta} <span className="nudge"><Icon name="arrow" size={14} /></span>
+                </button>
+              )}
               {a.go && <button className="alert-cta" onClick={() => { setView(a.go!); dismiss(a.id); }}>{a.cta ?? "Open"} <span className="nudge"><Icon name="arrow" size={14} /></span></button>}
               {/* The card's clock: it closes when this bar runs out. Hovering or focusing the card pauses the bar where it is. */}
               <span className="alert-timer" aria-hidden style={{ animationDuration: `${alertReadMs(a)}ms` }} onAnimationEnd={() => dismiss(a.id)} />
@@ -2634,6 +2645,10 @@ interface Alert {
   proposalId?: number;
   /** For a freeze alert: it clears once agents are unfrozen. */
   whileFrozen?: boolean;
+  /** Who raised it, when it isn't the chain (an agent's alert says so). */
+  via?: string;
+  /** An agent suggested freezing: the button asks the member, then freezes. */
+  act?: "freeze";
 }
 
 function toAlert(e: ChainEvent, s: Snapshot, name: (a?: string | null) => string): Omit<Alert, "at"> | null {
@@ -3334,6 +3349,80 @@ function ChatSetup({ ctx }: { ctx: Ctx }) {
   );
 }
 
+// ============================================================== Grok Bot
+
+/** What to give a Grok Bot routine: watch the team on Arc through Karuna, and tell the members what matters. */
+const GROK_ROUTINE = `Every 5 minutes, check my team through the Karuna connector:
+1. Call karuna arc_activity with the "since" time it gave you last time (none the first time).
+2. If a payment is waiting for approval, look up the payee and say in one line whether it looks right.
+3. If something looks wrong (a wallet transfer that matches no payment, an agent frozen, a vote to loosen a rule, a payee whose account changed, many payments to a new address), call karuna alert_team with the facts and explorer links, and suggest "approvals", "votes" or "freeze".
+4. If nothing changed, do nothing and don't message me.
+Never pay or try to approve anything yourself from this routine. Use only Karuna's tools for money.`;
+
+/** The New agent card's "Grok Bot" mode: Grok Bot connects to Karuna as its own agent and watches the team on Arc. */
+function GrokSetup({ ctx }: { ctx: Ctx }) {
+  const { s } = ctx;
+  const url = s.chatUrl ? s.chatUrl.replace(/\/mcp$/, "/grok/mcp") : null;
+  const devices = (s.devices ?? []).filter(isGrokDevice);
+  const live = devices.find((d) => d.status === "approved");
+  const seen = live?.lastSeenAt ? Date.now() - Date.parse(live.lastSeenAt) : null;
+  const [copied, setCopied] = useState<string | null>(null);
+  const copy = (id: string, text: string) => {
+    navigator.clipboard?.writeText(text);
+    setCopied(id);
+    setTimeout(() => setCopied((c) => (c === id ? null : c)), 2000);
+  };
+  return (
+    <div className="chat-setup">
+      <div className="pad stack-sm">
+        <div className="mode-note">
+          <span className={`live-dot${live ? "" : " off"}`} aria-hidden />{" "}
+          {live ? (seen !== null && seen < 15 * 60_000 ? `Watching · last check ${ago(live.lastSeenAt!)}` : `Connected · ${live.lastSeenAt ? `last check ${ago(live.lastSeenAt)}` : "no checks yet"}`) : "Not connected yet"}
+        </div>
+        <div className="chat-step">
+          <span className="step-n">1</span>
+          <div className="grow">
+            <b>Add Karuna to your Grok Bot</b>
+            <div className="small muted">In Grok Bot: add a custom MCP server (or tell your Bot "add this custom MCP server") with this address. Grok Bot opens Karuna's sign-in, which shows a code.</div>
+            {url ? (
+              <div className="row-form">
+                <span className="mono small chat-url">{url}</span>
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => copy("url", url)}><Icon name={copied === "url" ? "check" : "copy"} size={13} /> {copied === "url" ? "Copied" : "Copy"}</button>
+              </div>
+            ) : (
+              <div className="small muted">No public address yet. Point a tunnel at port 8792, set <span className="mono">KARUNA_CHAT_URL</span> to its address, and restart Karuna.</div>
+            )}
+          </div>
+        </div>
+        <div className="chat-step">
+          <span className="step-n">2</span>
+          <div className="grow">
+            <b>Approve its code</b>
+            <div className="small muted">It becomes its own agent at Level 0 after your team's vote: payments only to saved payees, anything over its limits waits for a member, and the wallet and keys stay in Karuna.</div>
+            <DeviceList ctx={ctx} kind="grok" />
+          </div>
+        </div>
+        <div className="chat-step">
+          <span className="step-n">3</span>
+          <div className="grow">
+            <b>Give it a routine</b>
+            <div className="small muted">Paste this into a new Grok Bot routine. It watches your team on Arc and alerts every member here, with a button to act.</div>
+            <pre className="grok-routine mono small">{GROK_ROUTINE}</pre>
+            <div className="row-form"><button type="button" className="btn btn-ghost btn-sm" onClick={() => copy("routine", GROK_ROUTINE)}><Icon name={copied === "routine" ? "check" : "copy"} size={13} /> {copied === "routine" ? "Copied" : "Copy routine"}</button></div>
+          </div>
+        </div>
+        <div className="chat-step">
+          <span className="step-n">4</span>
+          <div className="grow">
+            <b>Use it from X</b>
+            <div className="small muted">Reply to a post with <span className="mono">@bot</span> and ask, for example, "pay Valley Flour's $40 invoice through Karuna" or "what's waiting for approval on Karuna?". Grok Bot can only propose: Karuna decides, and a member approves anything over its limits.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** The New agent card's "Coding agents" mode: connect Claude Code or Cursor through Karuna's plugin. */
 const CODING_STEPS = [
   { tool: "Claude Code", lines: ["/plugin marketplace add <this project's folder>", "/plugin install karuna@karuna"] },
@@ -3341,7 +3430,7 @@ const CODING_STEPS = [
 ] as const;
 
 function CodingSetup({ ctx }: { ctx: Ctx }) {
-  const devices = (ctx.s.devices ?? []).filter((d) => d.tool !== "chat");
+  const devices = (ctx.s.devices ?? []).filter((d) => deviceKind(d) === "coding");
   const connected = devices.filter((d) => d.status === "approved").length;
   const waiting = devices.filter((d) => d.status === "pending").length;
   const [copied, setCopied] = useState<string | null>(null);
@@ -3389,17 +3478,19 @@ function CodingSetup({ ctx }: { ctx: Ctx }) {
 
 /** Coding tools (Claude Code, Cursor) or chat apps: waiting requests to approve or deny, and connections to disconnect. */
 const isChatDevice = (d: { tool: string }) => d.tool === "chat";
+const isGrokDevice = (d: { tool: string }) => d.tool === "grok-bot";
+const deviceKind = (d: { tool: string }): "chat" | "grok" | "coding" => (isChatDevice(d) ? "chat" : isGrokDevice(d) ? "grok" : "coding");
 
 /**
  * The connections of one kind, shown inside the New agent card's Claude chat and Coding agents modes
  * (this used to be the separate "Computers & chats" card). Approve, Deny and Disconnect work as before.
  */
-function DeviceList({ ctx, kind }: { ctx: Ctx; kind: "chat" | "coding" }) {
+function DeviceList({ ctx, kind }: { ctx: Ctx; kind: "chat" | "coding" | "grok" }) {
   const { s, run, busy, me } = ctx;
-  const devices = (s.devices ?? []).filter((d) => (kind === "chat" ? isChatDevice(d) : !isChatDevice(d)));
+  const devices = (s.devices ?? []).filter((d) => deviceKind(d) === kind);
   const pending = devices.filter((d) => d.status === "pending");
   const connected = devices.filter((d) => d.status === "approved");
-  const toolName = (t: string) => (t === "cursor" ? "Cursor" : t === "chat" ? "Chat app" : "Claude Code");
+  const toolName = (t: string) => (t === "cursor" ? "Cursor" : t === "chat" ? "Chat app" : t === "grok-bot" ? "Grok Bot" : "Claude Code");
   const approve = (d: (typeof devices)[number]) =>
     run(async () => {
       const dharma = s.org.dharma!.address as Address;
@@ -3410,7 +3501,7 @@ function DeviceList({ ctx, kind }: { ctx: Ctx; kind: "chat" | "coding" }) {
     }, `Approved. ${d.name} works after ${votesText(s.policy!.required, s.policy!.timelock)}, starting at Level 0`);
   return (
     <div className="device-list">
-      <span className="field-label">{kind === "chat" ? "Chat apps" : "Coding agents"} · {connected.length} connected{pending.length ? ` · ${pending.length} waiting` : ""}</span>
+      <span className="field-label">{kind === "chat" ? "Chat apps" : kind === "grok" ? "Grok Bot" : "Coding agents"} · {connected.length} connected{pending.length ? ` · ${pending.length} waiting` : ""}</span>
       {!devices.length ? (
         <div className="small muted">Nothing connected yet. Its code shows up here to approve.</div>
       ) : (
@@ -3418,7 +3509,7 @@ function DeviceList({ ctx, kind }: { ctx: Ctx; kind: "chat" | "coding" }) {
           {pending.map((d) => (
             <div className="res" key={d.id}>
               <Badge v="approval">wants to connect</Badge>
-              <span className="small"><b>{d.name}</b> · {toolName(d.tool)} · code <span className="mono">{d.code}</span> · {ago(d.requestedAt)}</span>
+              <span className="small"><b>{d.name}</b>{toolName(d.tool) !== d.name && ` · ${toolName(d.tool)}`} · code <span className="mono">{d.code}</span> · {ago(d.requestedAt)}</span>
               <span className="ballot-actions">
                 <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => run(() => api(`/devices/${d.id}/deny`, {}), "Denied")}>Deny</button>
                 <button className="btn btn-approve btn-sm" disabled={busy} title="Check the code matches the one on that computer" onClick={() => approve(d)}><Icon name="pen" size={14} /> Approve</button>
@@ -3430,7 +3521,7 @@ function DeviceList({ ctx, kind }: { ctx: Ctx; kind: "chat" | "coding" }) {
             return (
               <div className="res" key={d.id}>
                 <Badge v={seen !== null && seen < 10 * 60_000 ? "allow" : "approval"}>{seen !== null && seen < 10 * 60_000 ? "active" : "connected"}</Badge>
-                <span className="small"><b>{d.agentName ?? d.name}</b> · {toolName(d.tool)} · {d.lastSeenAt ? `last call ${ago(d.lastSeenAt)}` : "no calls yet"}</span>
+                <span className="small"><b>{d.agentName ?? d.name}</b>{toolName(d.tool) !== (d.agentName ?? d.name) && ` · ${toolName(d.tool)}`} · {d.lastSeenAt ? `last call ${ago(d.lastSeenAt)}` : "no calls yet"}</span>
                 <button className="btn btn-ghost btn-sm" disabled={busy} onClick={async () => (await askConfirm(`Disconnect ${d.name}? Its tool calls stop working at once.`, { action: "Disconnect", danger: true })) && run(() => api(`/devices/${d.id}/revoke`, {}), "Disconnected")}>Disconnect</button>
               </div>
             );
@@ -3472,9 +3563,9 @@ const GROQ_HOST = "api.groq.com";
 type AgentModel = "groq" | "anthropic";
 
 /** Describe a job; Karuna drafts the agent; members review and propose it; Karuna runs it. */
-type NewAgentMode = "agent" | "chat" | "coding";
-const NEW_AGENT_MODES: { v: NewAgentMode; label: string }[] = [{ v: "agent", label: "New agent" }, { v: "chat", label: "Claude chat" }, { v: "coding", label: "Coding agents" }];
-const NEW_AGENT_TITLES: Record<NewAgentMode, string> = { agent: "New agent", chat: "Claude chat", coding: "Coding agents" };
+type NewAgentMode = "agent" | "chat" | "coding" | "grok";
+const NEW_AGENT_MODES: { v: NewAgentMode; label: string }[] = [{ v: "agent", label: "New agent" }, { v: "grok", label: "Grok Bot" }, { v: "chat", label: "Claude chat" }, { v: "coding", label: "Coding agents" }];
+const NEW_AGENT_TITLES: Record<NewAgentMode, string> = { agent: "New agent", chat: "Claude chat", coding: "Coding agents", grok: "Grok Bot" };
 
 function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
   const { s, run, busy, me } = ctx;
@@ -3549,7 +3640,7 @@ function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
         <span className="filters" role="tablist" aria-label="How to add an agent">
           {NEW_AGENT_MODES.map((o) => {
             // Requests waiting for a member's approval, so one isn't missed while the card shows another mode.
-            const waiting = o.v === "agent" ? 0 : (s.devices ?? []).filter((d) => d.status === "pending" && (o.v === "chat" ? isChatDevice(d) : !isChatDevice(d))).length;
+            const waiting = o.v === "agent" ? 0 : (s.devices ?? []).filter((d) => d.status === "pending" && deviceKind(d) === o.v).length;
             return (
               <button key={o.v} type="button" role="tab" aria-selected={mode === o.v} className={mode === o.v ? "on" : ""} onClick={() => setMode(o.v)}
                 aria-label={waiting ? `${o.label}, ${waiting} waiting for approval` : undefined}>
@@ -3559,7 +3650,7 @@ function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
           })}
         </span>
       </div>
-      {mode === "chat" ? <ChatSetup ctx={ctx} /> : mode === "coding" ? <CodingSetup ctx={ctx} /> : (
+      {mode === "chat" ? <ChatSetup ctx={ctx} /> : mode === "coding" ? <CodingSetup ctx={ctx} /> : mode === "grok" ? <GrokSetup ctx={ctx} /> : (
       <div className="pad stack-sm">
         <div className="mode-note-row">
           <div className="mode-note">Karuna builds and runs it</div>

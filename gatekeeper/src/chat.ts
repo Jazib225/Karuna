@@ -7,6 +7,10 @@
 // Served on its own port (KARUNA_PUBLIC_PORT), reached through a tunnel; the console API stays on
 // 127.0.0.1. The access token a chat app receives is that connection's agent token, so
 // Disconnect in the console (which rotates it) cuts the chat off at once.
+//
+// Grok Bot has its own address, `https://<karuna>/grok/mcp`: the same connector, with its own
+// sign-in (issuer `/grok`), so its connections show as Grok Bot (Agents → New agent → Grok Bot).
+// It also gets two tools for watching the org on Arc from a routine: arc_activity and alert_team.
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -18,7 +22,7 @@ import type { Store } from "./store.ts";
 const CODE_TTL_MS = 10 * 60_000;
 const AUTH_TTL_MS = 30 * 60_000;
 
-interface OAuthClient { client_id: string; client_name: string; redirect_uris: string[]; created_at: number }
+interface OAuthClient { client_id: string; client_name: string; redirect_uris: string[]; created_at: number; kind?: "grok-bot" }
 interface PendingAuth {
   id: string; deviceId: string; secret: string; clientId: string; redirectUri: string; challenge: string; state?: string; createdAt: number;
   /** Approved: the connection's token, held until its agent's votes have passed. */
@@ -28,6 +32,36 @@ interface PendingAuth {
 interface AuthCode { code: string; token: string; clientId: string; redirectUri: string; challenge: string; createdAt: number }
 
 const b64url = (b: Buffer) => b.toString("base64url");
+
+/**
+ * Where a chat app may send the sign-in back to: https, a loopback http address, or an app's own
+ * link scheme (`grok://…`, `cursor://…`; RFC 8252), all protected by PKCE. Never a scheme a browser
+ * would run or read locally.
+ */
+export function okRedirect(u: unknown): boolean {
+  const s = String(u ?? "");
+  if (s.length > 500 || /\s/.test(s)) return false;
+  if (/^https:\/\/[^/]+/.test(s) || /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?\//.test(s)) return true;
+  const m = s.match(/^([a-z][a-z0-9+.-]{1,40}):\/\/.+$/i);
+  return !!m && !/^(https?|javascript|data|file|vbscript|blob|about|ftp|wss?)$/i.test(m[1]);
+}
+
+/** The agent token from whichever header the app sends (Bearer, ApiKey, Token, bare, or X-Karuna-Token). */
+export function tokenFrom(headers: IncomingMessage["headers"]): string {
+  const auth = String(headers.authorization ?? "").trim();
+  return (auth ? auth.replace(/^(Bearer|ApiKey|Token)\s+/i, "") : String(headers["x-karuna-token"] ?? "")).trim();
+}
+
+/**
+ * Grok Bot's own address: `/grok/...` and the well-known documents for it (RFC 8414 and 9728 put
+ * an issuer's path after the well-known name). Returns the path without the Grok part.
+ */
+export function grokPath(path: string): { grok: boolean; path: string } {
+  if (path === "/grok" || path.startsWith("/grok/")) return { grok: true, path: path.slice(5) || "/" };
+  const w = path.match(/^(\/\.well-known\/[a-z-]+)\/grok(\/mcp)?$/);
+  if (w) return { grok: true, path: `${w[1]}${w[2] ?? ""}` };
+  return { grok: false, path };
+}
 const s256 = (verifier: string) => b64url(createHash("sha256").update(verifier).digest());
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
@@ -112,6 +146,30 @@ const KARUNA_TOOLS: Tool[] = [
     annotations: { title: "Spending left today", readOnlyHint: true },
   },
   {
+    name: "arc_activity",
+    description:
+      "What happened on Arc for your team since a time: payments (with explorer links), payments waiting for approval, votes on Dharma, " +
+      "wallet transfers the watchdog saw, freezes, and how much of the signed log is anchored onchain. Call it on a schedule and pass the `since` it gives you back.",
+    inputSchema: { type: "object", properties: { since: { type: "string", description: "ISO time from the last call (default: the last 24 hours)" } } },
+    annotations: { title: "Watch the team on Arc", readOnlyHint: true },
+  },
+  {
+    name: "alert_team",
+    description:
+      "Tell every member of your team about something they should look at (it shows on their screens, labelled as your words). " +
+      "You can't approve, vote or freeze; suggest where a member should act instead. Up to 6 an hour, so combine findings.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "One line: what's wrong or new" },
+        detail: { type: "string", description: "The facts, with explorer links" },
+        suggest: { type: "string", enum: ["approvals", "votes", "freeze"], description: "Where a member should act" },
+      },
+      required: ["title"],
+    },
+    annotations: { title: "Alert the team" },
+  },
+  {
     name: "check_request",
     description: "The status of something waiting for your team's approval.",
     inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
@@ -158,6 +216,8 @@ async function callKarunaTool(gk: Gatekeeper, agentId: string, name: string, arg
   if (name === "web_search" || name === "web_fetch") return gk.callWebTool(agentId, name, args);
   if (name === "balance") return say(gk.balanceText(agentId));
   if (name === "check_request") return say(answer(gk.agentView(agentId, String(args.id ?? ""))));
+  if (name === "arc_activity") return say(gk.arcActivity(args.since));
+  if (name === "alert_team") return say(gk.teamAlert(agentId, args));
   return null;
 }
 
@@ -178,13 +238,14 @@ export function publicApi(gk: Gatekeeper, store: Store): HttpServer {
     try {
       sweep();
       const url = new URL(req.url ?? "/", "http://x");
-      const base = baseUrl(req);
+      const host = baseUrl(req);
       const method = req.method ?? "GET";
-      const path = url.pathname.replace(/\/+$/, "") || "/";
+      const { grok, path } = grokPath(url.pathname.replace(/\/+$/, "") || "/");
+      const base = grok ? `${host}/grok` : host; // Grok Bot's sign-in lives under /grok
 
       // ---- discovery (RFC 9728, RFC 8414)
       if (method === "GET" && (path === "/.well-known/oauth-protected-resource" || path === "/.well-known/oauth-protected-resource/mcp")) {
-        return send(res, 200, { resource: `${base}/mcp`, authorization_servers: [base], bearer_methods_supported: ["header"], resource_name: "Karuna" });
+        return send(res, 200, { resource: `${base}/mcp`, authorization_servers: [base], bearer_methods_supported: ["header"], resource_name: grok ? "Karuna for Grok Bot" : "Karuna" });
       }
       if (method === "GET" && (path === "/.well-known/oauth-authorization-server" || path === "/.well-known/openid-configuration")) {
         return send(res, 200, {
@@ -202,7 +263,7 @@ export function publicApi(gk: Gatekeeper, store: Store): HttpServer {
           const info = gk.inviteInfo(code);
           if (!String(req.headers.accept ?? "").includes("text/html")) return send(res, 200, info);
           res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-          return res.end(invitePage(info.org, `${base}/invite/${code}`));
+          return res.end(invitePage(info.org, `${host}/invite/${code}`));
         }
         if (method === "POST" && sub === "/request") {
           const body = JSON.parse((await readRaw(req)) || "{}") as { address?: unknown; name?: unknown; signature?: unknown };
@@ -215,10 +276,13 @@ export function publicApi(gk: Gatekeeper, store: Store): HttpServer {
       // ---- client registration (RFC 7591): chat apps register themselves
       if (method === "POST" && path === "/register") {
         const body = JSON.parse((await readRaw(req)) || "{}") as { client_name?: string; redirect_uris?: string[] };
-        const redirect_uris = (Array.isArray(body.redirect_uris) ? body.redirect_uris : []).filter((u) => /^https:\/\/|^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(String(u))).slice(0, 10);
+        const redirect_uris = (Array.isArray(body.redirect_uris) ? body.redirect_uris : []).filter(okRedirect).map(String).slice(0, 10);
         if (!redirect_uris.length) return send(res, 400, { error: "invalid_redirect_uri" });
         if (clients.size >= 200) return send(res, 429, { error: "too_many_clients" });
-        const c: OAuthClient = { client_id: `kc_${randomUUID()}`, client_name: String(body.client_name ?? "Chat app").slice(0, 60), redirect_uris, created_at: Date.now() };
+        const c: OAuthClient = {
+          client_id: `kc_${randomUUID()}`, client_name: String(body.client_name ?? (grok ? "Grok Bot" : "Chat app")).slice(0, 60), redirect_uris, created_at: Date.now(),
+          ...(grok ? { kind: "grok-bot" as const } : {}),
+        };
         clients.set(c.client_id, c);
         saveClients();
         return send(res, 201, { ...c, token_endpoint_auth_method: "none", grant_types: ["authorization_code"], response_types: ["code"] });
@@ -233,14 +297,15 @@ export function publicApi(gk: Gatekeeper, store: Store): HttpServer {
         if (q.get("response_type") !== "code" || q.get("code_challenge_method") !== "S256" || !q.get("code_challenge")) {
           return page(res, 400, "This chat app's request isn't supported", "<p>Karuna needs PKCE (S256).</p>");
         }
-        const d = gk.requestDevice({ name: `${client.client_name} chat`, tool: "chat" });
+        const isGrok = client.kind === "grok-bot";
+        const d = isGrok ? gk.requestDevice({ name: "Grok Bot", tool: "grok-bot" }) : gk.requestDevice({ name: `${client.client_name} chat`, tool: "chat" });
         const p: PendingAuth = {
           id: randomUUID(), deviceId: d.deviceId, secret: d.secret, clientId: client.client_id, redirectUri,
           challenge: q.get("code_challenge")!, state: q.get("state") ?? undefined, createdAt: Date.now(),
         };
         pending.set(p.id, p);
         return page(res, 200, `Connect ${esc(client.client_name)} to Karuna`, `
-          <p>Ask a member of your team to approve this connection in Karuna: <b>Agents → New agent → Claude chat</b>.</p>
+          <p>Ask a member of your team to approve this connection in Karuna: <b>Agents → New agent → ${isGrok ? "Grok Bot" : "Claude chat"}</b>.</p>
           <p class="code">${esc(d.code)}</p>
           <p class="muted">Check the code matches. This page continues on its own once it's approved.</p>
           <p id="st" class="muted">Waiting for approval…</p>
@@ -300,10 +365,10 @@ export function publicApi(gk: Gatekeeper, store: Store): HttpServer {
 
       // ---- MCP
       if (path === "/mcp") {
-        const token = String(req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+        const token = tokenFrom(req.headers);
         const who = token ? gk.authAgent(token) : null;
         if (!who) {
-          return send(res, 401, { error: "invalid_token" }, { "www-authenticate": `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource"` });
+          return send(res, 401, { error: "invalid_token" }, { "www-authenticate": `Bearer resource_metadata="${host}/.well-known/oauth-protected-resource${grok ? "/grok/mcp" : ""}"` });
         }
         if (gk.requireSandbox && !gk.isUnsandboxed(who.agentId)) {
           return send(res, 403, { error: "This connection's agent needs your team's vote to run outside a sandbox" });
