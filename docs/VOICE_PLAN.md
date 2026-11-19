@@ -1,8 +1,9 @@
 # Karuna Voice: island expansion + ElevenLabs
 
-> **Status (Nov 19, 2026):** built on the `eleven-labs` branch (steps 1–5 below); the demo
-> recording (step 6) and Grok Bot are still to do. Targets the ElevenLabs bounty (voice central,
-> not an add-on). Main track is unchanged: Agentic Payments and AI on Arc.
+> **Status (Nov 19, 2026):** steps 1–5 below are built and on `main`; the demo recording
+> (step 6) is still to do. Targets the ElevenLabs bounty (voice central, not an add-on). Main
+> track is unchanged: Agentic Payments and AI on Arc. Grok Bot moved to
+> [`GROK_BOT_PLAN.md`](GROK_BOT_PLAN.md).
 >
 > **Built differently from this plan, on purpose:**
 > - The model is never told the spoken code. `approve` puts the code on screen and tells the model
@@ -189,13 +190,4 @@ The ElevenLabs key lives in the Gatekeeper's `.env` (`ELEVENLABS_API_KEY`, `ELEV
    - "Approve 4 7 2"
    - "Freeze every agent"
 
-## Optional: Grok Bot as a governed agent
-
-Grok Bot can call remote MCP servers, and Karuna already serves one (`/mcp` on port 8792 through
-the tunnel). Connecting Grok Bot there makes it one more Karuna agent: its own agent at Level 0,
-payments only to saved payees, the team's connectors only through Karuna. The keys and the wallet
-stay in Karuna. A Grok Bot routine can watch Arc for the org's activity and act through those
-tools. Anything over its limits is held, and the island reads it aloud. Karuna can't govern what
-Grok does on its own computer or on X (its browser, its posts); it governs everything that needs
-your money or your keys. Check before building: that Grok Bot's MCP setup supports Karuna's
-connect flow (a member approves a code), or else add a token header option.
+Grok Bot as a governed agent is its own plan now: [`GROK_BOT_PLAN.md`](GROK_BOT_PLAN.md).
