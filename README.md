@@ -1,4 +1,4 @@
-# PreKaruna
+# Karuna
 
 The Karuna **Organizations layer**: Dharma (the org's rulebook on
 Arc), Drills, Tripwire, live approvals, sandboxed agents and the desktop island.
