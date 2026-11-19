@@ -3871,12 +3871,13 @@ function LevelsCard({ ctx, onClose }: { ctx: Ctx; onClose: () => void }) {
 }
 
 /** Votes page: move an older org to the Dharma code this Karuna ships (a core change). */
-const DHARMA_LATEST = 5;
+const DHARMA_LATEST = 6;
 /** What each Dharma version adds, for the upgrade card. */
 const DHARMA_ADDS: Record<number, string> = {
   3: "trust levels, and each agent's record published onchain",
   4: "team roles: what each member may do",
   5: "safer votes: a vote can no longer undo a later automatic block, removing a member needs everyone else, and votes left open when the team changes start over",
+  6: "room for new features: the rulebook's code now spans two contracts, with no change to how it works",
 };
 function UpgradeCard({ ctx }: { ctx: Ctx }) {
   const { s, busy, run, me } = ctx;

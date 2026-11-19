@@ -55,7 +55,7 @@ Karuna makes sure no agent, and no group of agents, can be tricked into misusing
    agent or freeze every agent instantly. Only a member vote loosens things again.
 
 ## Dharma: who can change what
-Dharma (`contracts/src/Dharma.sol`) is one contract per organization. Every member action is an
+Dharma (`contracts/src/Dharma.sol` and `DharmaExt.sol`) is one contract per organization. Every member action is an
 EIP-712 signature from that member's own key; the Gatekeeper relays it and pays gas but can't forge
 or alter it.
 

@@ -2,7 +2,10 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
-import {Dharma} from "../src/Dharma.sol";
+import {Dharma as DharmaCore} from "../src/Dharma.sol";
+import {DharmaBase as Dharma} from "../src/DharmaBase.sol";
+import {DharmaExt} from "../src/DharmaExt.sol";
+import {DharmaAbi} from "../src/DharmaAbi.sol";
 import {DharmaProxy} from "../src/DharmaProxy.sol";
 import {Escrow} from "../src/Escrow.sol";
 
@@ -23,7 +26,7 @@ contract MockUSDC {
 }
 
 contract EscrowTest is Test {
-    Dharma dharma;
+    DharmaAbi dharma;
     Escrow escrow;
     MockUSDC usdc;
     address gk = makeAddr("gatekeeper");
@@ -44,9 +47,9 @@ contract EscrowTest is Test {
     function setUp() public {
         alice = vm.addr(aliceKey);
         bob = vm.addr(bobKey);
-        Dharma impl = new Dharma();
+        DharmaCore impl = new DharmaCore(address(new DharmaExt()));
         string[] memory d = new string[](0);
-        dharma = Dharma(address(new DharmaProxy(address(impl), abi.encodeCall(Dharma.initialize, (gk, alice, TIMELOCK, 1 days, 500e6, d)))));
+        dharma = DharmaAbi(address(new DharmaProxy(address(impl), abi.encodeCall(DharmaExt.initialize, (gk, alice, TIMELOCK, 1 days, 500e6, d)))));
         pass(Dharma.Op.SetPayee, abi.encode(PAYEE, "supplies"));
         pass(Dharma.Op.AddMember, abi.encode(bob));
         usdc = new MockUSDC();
