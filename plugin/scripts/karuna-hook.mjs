@@ -99,7 +99,7 @@ async function ensureConnected(cfg) {
       return next;
     }
     if (p.status === 200 && p.body.status === "pending") {
-      finish("deny", `Karuna: this computer is waiting to connect. Ask a member to approve code ${cfg.code} in Karuna (Agents → Computers), then try again.`);
+      finish("deny", `Karuna: this computer is waiting to connect. Ask a member to approve code ${cfg.code} in Karuna (Agents → New agent → Coding agents), then try again.`);
     }
     // denied, expired, or unknown: ask again
   }
@@ -113,7 +113,7 @@ async function ensureConnected(cfg) {
   const d = await api("POST", "/v1/devices", { name, tool: client });
   if (d.status !== 200) finish("deny", `Karuna: couldn't ask to connect this computer (${d.body.error ?? d.status}).`);
   saveCfg({ gatekeeper: GATEKEEPER, deviceId: d.body.deviceId, secret: d.body.secret, code: d.body.code });
-  finish("deny", `Karuna: connect this computer first. Ask a member to approve code ${d.body.code} in Karuna (Agents → Computers), then try again.`);
+  finish("deny", `Karuna: connect this computer first. Ask a member to approve code ${d.body.code} in Karuna (Agents → New agent → Coding agents), then try again.`);
 }
 
 async function main() {

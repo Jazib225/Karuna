@@ -52,8 +52,9 @@ fn island_error(app: &AppHandle, id: &str, error: &str) {
     let _ = app.emit_to(island::LABEL, "gk-event", json!({ "type": "error", "id": id, "error": error }));
 }
 
-/// Sites the console may open in the default browser: the Arc block explorers and Circle.
-const EXTERNAL_HOSTS: &[&str] = &["arcscan.app", "arc.io", "arc.network", "circle.com"];
+/// Sites the console may open in the default browser: the Arc block explorers, Circle, and where the
+/// drafting key comes from (Groq's and Google AI Studio's key pages).
+const EXTERNAL_HOSTS: &[&str] = &["arcscan.app", "arc.io", "arc.network", "circle.com", "console.groq.com", "aistudio.google.com"];
 
 /// An https link to one of EXTERNAL_HOSTS (or a subdomain), with nothing a shell could misread.
 fn external_link_allowed(url: &str) -> bool {
@@ -187,7 +188,7 @@ pub fn run() {
             });
 
             // The console asks to open a link in the default browser (its window can't open tabs).
-            // Only Arc explorer and Circle pages: nothing the console shows can open anything else.
+            // Only the EXTERNAL_HOSTS pages: nothing the console shows can open anything else.
             app.listen_any("karuna://open-url", move |event| {
                 let Ok(msg) = serde_json::from_str::<Value>(event.payload()) else { return };
                 if let Some(url) = msg.get("url").and_then(Value::as_str).filter(|u| external_link_allowed(u)) {
@@ -235,6 +236,10 @@ mod tests {
         assert!(ok("https://testnet.arcscan.app/address/0xe49fb1e8bbd7f8154e5a90c4275128965b7defe8"));
         assert!(ok("https://explorer.testnet.arc.io/tx/0xabc"));
         assert!(ok("https://faucet.circle.com"));
+        assert!(ok("https://console.groq.com")); // drafting key pages
+        assert!(ok("https://aistudio.google.com"));
+        assert!(!ok("https://google.com")); // only AI Studio, not every Google site
+        assert!(!ok("https://evil.groq.com.example/"));
         assert!(!ok("http://testnet.arcscan.app/tx/0xabc")); // https only
         assert!(!ok("https://evil.example/tx/0xabc"));
         assert!(!ok("https://arcscan.app.evil.example/"));

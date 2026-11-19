@@ -1,7 +1,7 @@
 // Karuna as a connector for chat apps (claude.ai, Claude Desktop, ChatGPT): an MCP server at /mcp,
 // with the OAuth sign-in those apps expect. Nothing to install and nothing to copy: the person adds
 // `https://<karuna>/mcp`, the chat app opens Karuna's connect page, which shows a code, and a member
-// approves it in the console (Agents → Computers & chats). The chat then acts as its own agent,
+// approves it in the console (Agents → New agent → Claude chat). The chat then acts as its own agent,
 // under the team's rules, levels and approvals, like any agent.
 //
 // Served on its own port (KARUNA_PUBLIC_PORT), reached through a tunnel; the console API stays on
@@ -240,7 +240,7 @@ export function publicApi(gk: Gatekeeper, store: Store): HttpServer {
         };
         pending.set(p.id, p);
         return page(res, 200, `Connect ${esc(client.client_name)} to Karuna`, `
-          <p>Ask a member of your team to approve this connection in Karuna: <b>Agents → Computers &amp; chats</b>.</p>
+          <p>Ask a member of your team to approve this connection in Karuna: <b>Agents → New agent → Claude chat</b>.</p>
           <p class="code">${esc(d.code)}</p>
           <p class="muted">Check the code matches. This page continues on its own once it's approved.</p>
           <p id="st" class="muted">Waiting for approval…</p>

@@ -223,7 +223,7 @@ password can't be reset (nothing is emailed): a teammate adds the person back.
 /plugin install karuna@karuna
 ```
 (Cursor: `node plugin/scripts/install-cursor.mjs`.) The first time Claude tries a tool, it shows a
-code; a member approves it in Agents → Computers & chats, which gives that computer its own agent at
+code; a member approves it in Agents → New agent → Coding agents, which gives that computer its own agent at
 Level 0. From then on, before Claude runs a shell command, reads or edits a file, fetches a page or
 calls an MCP tool, Karuna decides: it runs, it's refused ("Karuna blocked this."), or it waits while a
 member approves. Coding defaults: reading the project runs; at Level 1 edits and commands in the
