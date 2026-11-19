@@ -94,6 +94,19 @@
       ],
       "port": 5174,
       "url": "http://127.0.0.1:5174"
+    },
+    {
+      "name": "island",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "-y",
+        "pnpm@9",
+        "--dir",
+        "desktop",
+        "dev:island"
+      ],
+      "port": 1420,
+      "url": "http://127.0.0.1:1420"
     }
   ]
 }

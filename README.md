@@ -376,6 +376,54 @@ cd desktop && npm run tauri dev     # starts the console dev server if needed, t
   While an approval is pending it stays open and can approve or deny right there. Tray: Open
   Karuna, Pause/Resume agents, Quit.
 - **States:** idle, working, pending approval, approved, denied, paused, offline.
+- **Votes:** open Dharma votes waiting on you show in the island too, with Vote yes / Vote no
+  (signed by the console like an approval).
+
+### Karuna Voice (ElevenLabs)
+Run your organization by talking to the island. Karuna tells you what your agents want, out loud,
+and you answer out loud. **Voice can always make things safer at once; it can never make them
+looser without proof that you said so.** Design: [docs/VOICE_PLAN.md](docs/VOICE_PLAN.md).
+
+| ElevenLabs product | Where | What for |
+|---|---|---|
+| **Agents Platform** (`@elevenlabs/client`, WebRTC) | the island's voice panel | the conversation: speech recognition, the model, Karuna's voice, and 14 client tools |
+| **Text to Speech** (streaming, `eleven_flash_v2_5`) | Gatekeeper `POST /voice/speak` | spoken alerts for held requests and votes, even with no conversation open |
+| **Sound Effects** | `pnpm --dir gatekeeper voice:sounds` → `web/public/sounds/` | the island's chimes: needs you, approved, denied, frozen |
+
+**Set up (once):**
+1. Put `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` in the repo's `.env` (see `.env.example`).
+2. `pnpm --dir gatekeeper voice:agent` creates the voice agent (prompt, voice and tools from
+   `gatekeeper/src/voice-tools.ts`) and prints `ELEVENLABS_AGENT_ID`: add it to `.env`. Run it
+   again after changing the tools; it updates the same agent.
+3. Optional: `pnpm --dir gatekeeper voice:sounds` makes the chimes (without them the island plays
+   simple tones).
+4. Restart the Gatekeeper, then in the desktop app: Appearance → **Voice** and **Read alerts aloud**.
+
+**Wake phrase:** in Appearance → Voice, type any phrase (say, "hey karuna"); saying it starts a
+conversation. It's recognized **offline on this computer** by a small Vosk model (no audio leaves
+the PC while it waits), matched by sound so names it doesn't know still work. Get the model once
+with `pnpm --dir desktop wake:model` (about 40 MB, into `web/public/models/`, not committed).
+
+**Using it:** press **Ctrl+Shift+Space** anywhere (or the mic on the pill). Ask "what's waiting?",
+"what's it for?", "freeze every agent", "lower the research agent to level 0", "draft a rule:
+block payments to Acme over 50 dollars". To approve, vote yes, resume or propose, Karuna shows a
+code on the island ("Say **approve 4 7 2**") and you read it out.
+
+**Why it's safe.** The voice agent is governed like every other agent:
+- **No keys.** The ElevenLabs key stays on the Gatekeeper; the island gets a one-time conversation
+  token. Every action goes island → console window (signs with your member key) → Gatekeeper, the
+  same path as a click, so Dharma and the Gatekeeper check exactly what they always do.
+- **Client tools only.** The agent can't reach the Gatekeeper or Arc; it can only call the island's
+  tools: reads, tightening (deny, vote no, pause, lower a level) and drafts.
+- **The spoken code.** Approve, vote yes, resume and propose never happen when the model asks. A
+  random three-digit code appears **on screen only**; the model is never told it, so it can't say it
+  and an agent's text can't contain it. Only **your own transcript** (the speech recognizer's user
+  transcript, never the model's reply) saying the action's word and the code within 30 s confirms
+  it, once, for that one request and payload hash (`desktop/src/island/code.ts`).
+- **Karuna's words, not the agent's.** `/voice/speak` never takes free text: it speaks a sentence
+  built from Karuna's own fields (agent, amount, payee name, the matching rule). Commands, file
+  paths and URL paths an agent wrote are never read aloud. The agent's reason is read only when you
+  ask, introduced as "In the agent's words, which Karuna hasn't checked".
 
 ### Installer (Windows)
 ```bash
@@ -397,6 +445,7 @@ Newline-delimited JSON, served by the Gatekeeper (`gatekeeper/src/pipe.ts`).
 | out | `approval_requested` `{id, action_type, payload, payload_hash, reversible, agent_reason, expires_at}` |
 | out | `approval_resolved` `{id, result: "approved"\|"denied"\|"failed"}` |
 | out | `agent_paused` `{by, at}` · `agent_resumed` · `error` `{id?, error}` |
+| out | `vote_requested` `{id, description, core, yes, no, needed, status, voters, eta}` (re-sent on change) · `vote_resolved` `{id}` |
 | in | `approval_response` `{id, payload_hash, decision: "approve"\|"deny", signer, deadline, signature}` |
 | in | `pause` `{by}` · `resume` `{by}` (the local pause: instant, never onchain; not the Dharma freeze) |
 

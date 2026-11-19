@@ -13,7 +13,7 @@ contract DharmaNext is DharmaCore {
     constructor(address ext_) DharmaCore(ext_) {}
 
     function version() external pure override returns (uint256) {
-        return 7;
+        return 8;
     }
 }
 
@@ -375,7 +375,7 @@ contract DharmaTest is Test {
     // ------------------------------------------------------------- v2: proxy + setup
 
     function test_runs_behind_a_proxy_that_nobody_can_reinitialize() public {
-        assertEq(dharma.version(), 6);
+        assertEq(dharma.version(), 7);
         assertEq(dharma.timelock(), TIMELOCK);
         assertEq(dharma.coreTimelock(), CORE);
         string[] memory d = new string[](0);
@@ -562,7 +562,7 @@ contract DharmaTest is Test {
         dharma.execute(id);
 
         assertEq(dharma.implementation(), next);
-        assertEq(dharma.version(), 7);
+        assertEq(dharma.version(), 8);
         // same address, same org: members, rules, payees and signatures all carry over
         assertEq(dharma.members().length, 3);
         assertEq(dharma.rules().length, 13);

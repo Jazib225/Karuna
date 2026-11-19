@@ -7,13 +7,14 @@ import { Kind, SignerUnavailable, cancelEscrow, decidePayment, loadSigner, signe
 import { accountEmail, createAccount, signIn as accountSignIn, signOut as accountSignOut } from "./account.ts";
 import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
 import { Palette, type Command } from "./palette.tsx";
+import { TopVoice } from "./voice.tsx";
 import { keccak256, stringToHex } from "viem";
 import { PREVIEW, previewLog, previewRun, previewSigner, previewSnapshot, previewWallet } from "./preview.ts";
 import { Badge, Icon, type IconName } from "./icons.tsx";
 import { askConfirm } from "./confirm.tsx";
 import { ProposalToaster, type GovEvent, type ProposalToast } from "./proposalToasts.ts";
 import { inviteCode, joinStatus, lookupInvite, sendJoin, sentJoins, type SentJoin } from "./invites.ts";
-import { IN_APP, getIslandEnabled, setDesktopSigner, setIslandEnabled } from "./desktop.ts";
+import { IN_APP, getIslandEnabled, getReadAloud, getVoiceEnabled, getWakeOn, getWakePhrase, getWakeState, requestWakeStatus, setDesktopSigner, setIslandEnabled, setReadAloud, setVoiceEnabled, setWakeOn, setWakePhrase } from "./desktop.ts";
 import { setThemePref, useThemePref, type ThemePref } from "./theme.ts";
 import { eventName, NAMED_KEYS } from "./eventNames.ts";
 import { Picker, Select } from "./picker.tsx";
@@ -1145,6 +1146,7 @@ function Console({ s, log, wallet, refreshWallet, run, busy, me, offline, refres
             <kbd>Ctrl K</kbd>
           </button>
           <div className="right">
+            <TopVoice s={s} me={me} />
             <LiveBadge mode={live.mode} />
             <span className={`status ${frozen || offline ? "frozen" : ""}`}>
               <span className="d" /> {offline ? "gatekeeper offline" : frozen ? "all agents frozen" : (() => {
@@ -2363,6 +2365,19 @@ function Team({ ctx }: { ctx: Ctx }) {
   const roleName = (id: string | null | undefined) => roles.find((r) => r.id === id)?.name ?? "No role";
   const tree = s.roles?.structure === "tree";
   const setRole = (address: string, role: string) => ctx.manage({ op: "SetRole", member: address as Address, role: roleNumber(role)! }, `Role set to ${roleName(role)}`);
+  // Dharma v7: the host (who set the org up) removes a teammate without a vote, after the core
+  // wait, in public; any member's freeze stops it.
+  const host = pol.host ?? null;
+  const iAmHost = !!host && host === myAddr;
+  const leaving = (addr: string) => pol.proposals.find((g) => g.change?.op === "RemoveMember" && String(g.change.member).toLowerCase() === addr && (g.status === "open" || g.status === "queued"));
+  const hostRemove = async (addr: string, name: string) => {
+    const ok = await askConfirm(
+      `Remove ${name} from the team? No vote is needed, but it isn't instant: ${name} leaves in ${waitText(pol.coreTimelock)}. Everyone sees it now, and any member can stop it by freezing.`,
+      { action: `Remove ${name}`, danger: true },
+    );
+    if (!ok) return;
+    await run(() => submitChange(me, s.org.dharma!.address as Address, { kind: Kind.Manage, change: { op: "RemoveMember", member: addr as Address } }), `${name} leaves in ${waitText(pol.coreTimelock)}`);
+  };
   return (
     <div className="stack">
       {s.enrollments.length > 0 && (
@@ -2395,7 +2410,11 @@ function Team({ ctx }: { ctx: Ctx }) {
             return (
               <div className="tr team-tr" key={m.address}>
                 <span className="av">{(m.name ?? "?")[0]?.toUpperCase()}</span>
-                <span className="b">{m.name ?? "Unnamed"}{m.address === myAddr ? <span className="tag" style={{ marginLeft: 8 }}>you</span> : ""}</span>
+                <span className="b">
+                  {m.name ?? "Unnamed"}
+                  {m.address === host && <span className="tag" style={{ marginLeft: 8 }} title="Set the organization up. Can remove a teammate without a vote (after the core wait).">Host</span>}
+                  {m.address === myAddr ? <span className="tag" style={{ marginLeft: 8 }}>you</span> : ""}
+                </span>
                 <span className="mono small">{m.address}</span>
                 <span className="team-actions">
                   {!tree ? (
@@ -2403,7 +2422,15 @@ function Team({ ctx }: { ctx: Ctx }) {
                   ) : admin ? (
                     <Select small label={`${m.name ?? "Member"}'s role`} value={r} disabled={busy} onChange={(v) => void setRole(m.address, v)} options={roles.filter((d) => d.id !== "viewer").map((d) => ({ value: d.id, label: d.name }))} />
                   ) : <span className="tag">{roleName(r)}</span>}
-                  <button className="btn btn-deny btn-sm" disabled={busy || pol.members.length <= 1} onClick={() => ctx.change({ op: "RemoveMember", member: m.address as Address })}>Propose removal</button>
+                  {(() => {
+                    const out = leaving(m.address);
+                    if (out) {
+                      const label = out.status === "queued" && out.eta ? (out.eta <= pol.chainTime ? "leaving now" : `leaves in ${waitText(out.eta - pol.chainTime)}`) : "removal proposed";
+                      return <span title="Any member can stop a removal by freezing"><Badge v="approval">{label}</Badge></span>;
+                    }
+                    if (iAmHost && m.address !== myAddr) return <button className="btn btn-deny btn-sm" disabled={busy || pol.members.length <= 1 || !!s.frozen} title={s.frozen ? "Agents are frozen: unfreeze first" : "No vote needed; takes effect after the core wait"} onClick={() => void hostRemove(m.address, m.name ?? "this member")}>Remove</button>;
+                    return <button className="btn btn-deny btn-sm" disabled={busy || pol.members.length <= 1} onClick={() => ctx.change({ op: "RemoveMember", member: m.address as Address })}>Propose removal</button>;
+                  })()}
                 </span>
               </div>
             );
@@ -3115,9 +3142,67 @@ const connectorEnv = (name: string) => `${name.toUpperCase().replace(/-/g, "_")}
 
 // ============================================================== appearance
 
+/** The wake phrase: say it and Karuna starts listening (heard offline, on this computer). The switch
+ *  turns it on and off (the phrase is kept); Save applies a new phrase. The line under it says what
+ *  the listener is doing. */
+function WakePhrase({ top }: { top?: boolean }) {
+  const [on, setOn] = useState(getWakeOn);
+  const [value, setValue] = useState(getWakePhrase);
+  const [saved, setSaved] = useState(getWakePhrase);
+  const [state, setState] = useState(getWakeState);
+  useEffect(() => {
+    const on = () => setState(getWakeState());
+    window.addEventListener("karuna:wake-status", on);
+    requestWakeStatus();
+    return () => window.removeEventListener("karuna:wake-status", on);
+  }, []);
+  const clean = value.trim().replace(/\s+/g, " ").slice(0, 60);
+  const dirty = clean !== saved;
+  const save = () => {
+    setValue(clean);
+    setSaved(clean);
+    setWakePhrase(clean);
+  };
+  const status = !on || !saved
+    ? null
+    : state.status === "error"
+      ? { tone: "bad", text: state.error ?? "The wake phrase stopped." }
+      : state.status === "paused"
+        ? { tone: "", text: state.error ?? "Paused while Karuna is talking." }
+        : state.status === "loading"
+          ? { tone: "", text: "Starting to listen…" }
+          : state.status === "listening"
+            ? { tone: "ok", text: `Listening for “${saved}”${state.heard ? ` · heard “${state.heard}”` : ""}` }
+            : null;
+  return (
+    <div className={`wake-row${top ? "" : " sub"}`}>
+      <label className="switch-row">
+        <b>Wake phrase</b>
+        <input type="checkbox" role="switch" checked={on} onChange={(e) => { setOn(e.target.checked); setWakeOn(e.target.checked); }} />
+      </label>
+      {on && (
+        <form className="wake-form" onSubmit={(e) => { e.preventDefault(); save(); }}>
+          <input
+            type="text" className="wake-input" value={value} maxLength={60} placeholder="e.g. hey karuna" spellCheck={false} autoComplete="off"
+            aria-label="Wake phrase" onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => e.key === "Escape" && setValue(saved)}
+          />
+          <button type="submit" className="btn btn-dark btn-sm" disabled={!dirty}>{dirty || !saved ? "Save" : "Saved"}</button>
+        </form>
+      )}
+      {status && <div className={`wake-status ${status.tone}`} aria-live="polite"><span className="d" />{status.text}</div>}
+    </div>
+  );
+}
+
 function Appearance() {
   const theme = useThemePref();
   const [island, setIsland] = useState(getIslandEnabled);
+  const [voice, setVoice] = useState(getVoiceEnabled);
+  const [readAloud, setRead] = useState(getReadAloud);
+  const [voiceCfg, setVoiceCfg] = useState<{ configured: boolean; conversation: boolean; alerts: boolean } | null>(null);
+  useEffect(() => {
+    api<{ configured: boolean; conversation: boolean; alerts: boolean }>("/voice/config").then(setVoiceCfg).catch(() => setVoiceCfg(null));
+  }, []);
   const options: { v: ThemePref; label: string; note: string }[] = [
     { v: "system", label: "System", note: "Follows your computer" },
     { v: "light", label: "Light", note: "Light backdrop and panels" },
@@ -3140,11 +3225,30 @@ function Appearance() {
       {IN_APP && (
         <div className="card">
           <div className="hd"><h2>Island</h2></div>
-          <div className="pad">
+          <div className="pad settings-list">
             <label className="switch-row">
-              <span><b>Show the island</b><small>The notch at the top of the screen while Karuna is minimized or closed to the tray. Approvals still reach this console and the tray when it's off.</small></span>
+              <b>Show the island</b>
               <input type="checkbox" role="switch" checked={island} onChange={(e) => { setIsland(e.target.checked); setIslandEnabled(e.target.checked); }} />
             </label>
+            <label className={`switch-row${!island || !voiceCfg?.conversation ? " off" : ""}`} title={voiceCfg && !voiceCfg.conversation ? "Voice isn't set up on the Gatekeeper (see README → Karuna Voice)" : undefined}>
+              <b>Voice</b>
+              <input type="checkbox" role="switch" disabled={!island || !voiceCfg?.conversation} checked={voice && !!voiceCfg?.conversation} onChange={(e) => { setVoice(e.target.checked); setVoiceEnabled(e.target.checked); }} />
+            </label>
+            {island && voice && !!voiceCfg?.conversation && (
+              <label className={`switch-row sub${!voiceCfg.alerts ? " off" : ""}`}>
+                <b>Read alerts aloud</b>
+                <input type="checkbox" role="switch" disabled={!voiceCfg.alerts} checked={readAloud && voiceCfg.alerts} onChange={(e) => { setRead(e.target.checked); setReadAloud(e.target.checked); }} />
+              </label>
+            )}
+            {island && voice && !!voiceCfg?.conversation && <WakePhrase />}
+          </div>
+        </div>
+      )}
+      {!IN_APP && !!voiceCfg?.conversation && (
+        <div className="card">
+          <div className="hd"><h2>Voice</h2></div>
+          <div className="pad settings-list">
+            <WakePhrase top />
           </div>
         </div>
       )}

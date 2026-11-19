@@ -10,6 +10,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { createContour } from "../../../web/src/site/contour.ts";
 import { createLotus, contextAttributes } from "../../../web/src/site/lotus.ts";
+import { IslandVoice, type OpenVote } from "./voice.ts";
+import { WaveRenderer } from "./wave.ts";
+import { WakeListener } from "./wake.ts";
 
 type State = "idle" | "working" | "pending" | "approved" | "denied" | "paused" | "offline";
 interface Decision { type: "decision"; id: string; action_type: string; summary: string; result: "allow" | "deny" }
@@ -26,7 +29,9 @@ type GkEvent =
   | { type: "approval_progress"; id: string; approvals: number; needed: number }
   | { type: "agent_paused"; by?: string }
   | { type: "agent_resumed" }
-  | { type: "error"; id?: string; error: string };
+  | { type: "error"; id?: string; error: string }
+  | ({ type: "vote_requested" } & OpenVote)
+  | { type: "vote_resolved"; id: number };
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const notch = $("notch");
@@ -34,6 +39,7 @@ const pill = $("pill");
 const label = $("label");
 const sub = $("sub");
 const floater = $("floater");
+const mic = $<HTMLButtonElement>("mic");
 const card = $("card");
 const cardBody = $("card-body");
 const sprite = $<HTMLCanvasElement>("sprite");
@@ -59,15 +65,19 @@ const DOCK = { halfWidth: 170, maxY: 90 };
 // ------------------------------------------------------------------ appearance (from the console)
 // The console's Appearance page sends the theme (light / dark / system) and whether the island is on.
 // Remembered here too, so the island looks right even before the console has opened.
-type Appearance = { theme: "system" | "light" | "dark"; island: boolean };
+type Appearance = { theme: "system" | "light" | "dark"; island: boolean; voice: boolean; readAloud: boolean; member: string | null; wake: string };
 const APPEAR_KEY = "karuna.appearance";
 const darkMedia = matchMedia("(prefers-color-scheme: dark)");
+const parseAppearance = (a: Partial<Appearance>): Appearance => ({
+  theme: a.theme === "light" || a.theme === "dark" ? a.theme : "system", island: a.island !== false,
+  voice: a.voice === true, readAloud: a.readAloud !== false, member: typeof a.member === "string" ? a.member : null,
+  wake: typeof a.wake === "string" ? a.wake.slice(0, 60) : "",
+});
 const loadAppearance = (): Appearance => {
   try {
-    const a = JSON.parse(localStorage.getItem(APPEAR_KEY) ?? "") as Partial<Appearance>;
-    return { theme: a.theme === "light" || a.theme === "dark" ? a.theme : "system", island: a.island !== false };
+    return parseAppearance(JSON.parse(localStorage.getItem(APPEAR_KEY) ?? ""));
   } catch {
-    return { theme: "system", island: true };
+    return parseAppearance({});
   }
 };
 let appearance = loadAppearance();
@@ -80,6 +90,12 @@ applyAppearance();
 darkMedia.addEventListener("change", applyAppearance);
 
 // ------------------------------------------------------------------ state
+const VOICE_LABELS = { off: "Voice", connecting: "Connecting…", listening: "Listening…", speaking: "Speaking", thinking: "Thinking…" } as const;
+// Karuna Voice (voice.ts). Created below once the card helpers exist; render() reads it.
+// eslint-disable-next-line prefer-const
+let voice: IslandVoice;
+// The wake phrase listener (wake.ts), made with the voice below.
+let wakeListener: WakeListener | null = null;
 let connected = false;
 let paused = false;
 let hovering = false;
@@ -117,7 +133,7 @@ const saveMode = () => {
 
 function currentState(): State {
   if (!connected) return "offline";
-  if (queue.length) return "pending";
+  if (queue.length || voice.myVotes().length) return "pending";
   if (transient && transient.until > Date.now()) return transient.state;
   if (paused) return "paused";
   return "idle";
@@ -126,6 +142,9 @@ const flash = (state: State, ms: number) => {
   transient = { state, until: Date.now() + ms };
   setTimeout(render, ms + 20);
 };
+
+// ------------------------------------------------------------------ voice waveform
+const wave = new WaveRenderer();
 
 // ------------------------------------------------------------------ lotus
 // One turn of the site's lotus (20 s per turn on the site), rendered once at start-up into separate
@@ -184,11 +203,17 @@ function drawSprite(now: number) {
   lastT = now;
   if (!visible) return;
   drawContour(now);
+  // The mic's waveform follows Karuna's voice, and settles flat when it's quiet.
+  if (voice?.active) {
+    wave.setLevel(voice.waveLevel());
+    wave.frame(now);
+  } else wave.setLevel(0);
   if (!frames.length) return;
   const st = currentState();
   // Approved settles: the turn slows to a stop. Everything else turns at its own pace.
   let speed = SPEED[st];
-  if (st === "approved") speed = Math.max(0, 1.6 * (1 - (now - settleFrom) / 1100));
+  if (voice.active) speed = voice.mode === "connecting" ? 0.4 : 0.5 + 6 * Math.min(1, voice.level());
+  else if (st === "approved") speed = Math.max(0, 1.6 * (1 - (now - settleFrom) / 1100));
   phase = (phase + (dt * speed * FRAMES) / 20) % FRAMES;
   const a = Math.floor(phase);
   const b = (a + 1) % FRAMES;
@@ -405,7 +430,63 @@ function approvalCard(a: ApprovalRequested): HTMLElement {
   return box;
 }
 
+/** An open Dharma vote waiting on this member: Yes / No, signed by the console like an approval. */
+function voteCard(v: OpenVote): HTMLElement {
+  const box = el("div", "appr");
+  const head = el("div", "appr-head");
+  head.append(el("h2", "appr-title", v.core ? "Core change: your vote" : "Vote on a change"));
+  box.append(head, el("div", "appr-fact", v.description));
+  box.append(el("div", "appr-why", `${v.yes} of ${v.needed} yes votes${v.no ? ` · ${v.no} no` : ""}`));
+  box.append(el("div", "appr-unanswered", v.core ? "Every member must vote yes, then the core wait." : "Passes with a majority, then the team's wait."));
+  const key = `v${v.id}`;
+  const st = cardStatus.get(key);
+  const status = el("div", `status-line${st?.err ? " err" : ""}`, st?.text ?? "");
+  const actions = el("div", "actions");
+  const no = el("button", "btn btn-deny", "Vote no");
+  const yes = el("button", "btn btn-approve", "Vote yes");
+  no.type = yes.type = "button";
+  no.disabled = yes.disabled = !!st && !st.err;
+  const cast = async (support: boolean) => {
+    cardStatus.set(key, { text: "Signing your vote in the console…", err: false });
+    render();
+    try {
+      const r = await voice.voteByClick(v.id, support);
+      cardStatus.set(key, { text: r === "already" ? "You've already voted on this." : support ? "Voted yes. Recorded on Dharma." : "Voted no. Recorded on Dharma.", err: false });
+      dismissed = key;
+    } catch (err) {
+      cardStatus.set(key, { text: err instanceof Error ? err.message : String(err), err: true });
+    }
+    render();
+  };
+  no.onclick = () => void cast(false);
+  // Like Approve: only a real pointer click votes yes.
+  yes.onclick = (e) => {
+    if ((e as MouseEvent).detail >= 1) void cast(true);
+  };
+  actions.append(no, yes);
+  const bar = el("div", "decide");
+  bar.append(actions, status);
+  box.append(bar);
+  return box;
+}
+
 const expired = (a: ApprovalRequested) => !!a.expires_at && Date.parse(a.expires_at) <= Date.now();
+
+/** The same mic as the pill's: starts or ends a conversation. */
+function micButton(): HTMLButtonElement {
+  const b = mic.cloneNode(true) as HTMLButtonElement;
+  b.removeAttribute("id");
+  b.hidden = false;
+  b.classList.add("card-mic");
+  b.classList.toggle("on", voice.active);
+  b.title = "Talk to Karuna (Ctrl+Shift+Space)";
+  b.addEventListener("pointerdown", (e) => e.stopPropagation());
+  b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void voice.toggle();
+  });
+  return b;
+}
 
 function feedView(): HTMLElement {
   const wrap = el("div");
@@ -413,6 +494,8 @@ function feedView(): HTMLElement {
   const eb = el("div", "eyebrow", st === "offline" ? "Gatekeeper" : "Recent decisions");
   const right = el("span", "right", st === "offline" ? "retrying" : paused ? "paused" : "");
   eb.append(right);
+  // Floating, there's no pill to hold the mic: it sits in the card's header instead.
+  if (voice.enabled && mode.mode === "floating" && st !== "offline") eb.append(micButton());
   wrap.append(eb);
   if (st === "offline") {
     wrap.append(el("p", "empty", "Not connected to the Gatekeeper. Karuna keeps trying quietly; start it and this connects on its own."));
@@ -436,8 +519,15 @@ function render() {
   const st = currentState();
   notch.dataset.state = st;
   floater.dataset.state = st;
-  label.textContent = LABELS[st];
-  sub.textContent = st === "pending" ? queue[0].action_type : st === "offline" ? "retrying" : feed[0] ? feed[0].e.summary : "";
+  const vote = queue.length ? null : voice.myVotes()[0] ?? null;
+  // The conversation needs the mic: the wake phrase lets go of it while talking, and takes it back after.
+  if (voice.active || consoleTalking) wakeListener?.pause();
+  else wakeListener?.resume();
+  label.textContent = voice.active ? VOICE_LABELS[voice.mode] : LABELS[st];
+  sub.textContent = voice.active ? "" : st === "pending" ? (vote ? "vote" : queue[0].action_type) : st === "offline" ? "retrying" : feed[0] ? feed[0].e.summary : "";
+  mic.hidden = !voice.enabled || mode.mode !== "notch";
+  mic.classList.toggle("on", voice.active);
+  mic.title = voice.active ? "End the conversation (Ctrl+Shift+Space)" : "Talk to Karuna (Ctrl+Shift+Space)";
   if (st === "approved") settleFrom = performance.now();
 
   const floating = mode.mode === "floating";
@@ -450,24 +540,32 @@ function render() {
 
   // Open: hovering, dragging, or a new approval waiting. Once the user hovers away from that
   // approval it retracts to the pill (which still says it's waiting); hovering opens it again.
-  const fresh = st === "pending" && queue[0].id !== dismissed;
-  const open = hovering || fresh || dragging;
+  const pendingKey = queue[0]?.id ?? (vote ? `v${vote.id}` : "");
+  const fresh = st === "pending" && pendingKey !== dismissed;
+  // A conversation (or a voice error to read) keeps the panel open until it ends.
+  const talking = voice.active || !!voice.error;
+  const open = hovering || fresh || dragging || talking;
   notch.classList.toggle("open", open && !floating);
-  const showCard = open && !dragging && (st === "pending" || hovering);
+  const showCard = open && !dragging && (st === "pending" || hovering || talking);
   clearTimeout(hideTimer);
   if (showCard) {
     card.hidden = false;
+    card.classList.toggle("wide", talking);
     // Rebuild only when what the card shows changed: rebuilding on every event (a feed decision, a
     // hover) swapped the buttons out from under a click in progress.
     const a = queue[0];
     const s = a && cardStatus.get(a.id);
-    const key =
-      st === "pending"
-        ? `a:${a.id}:${s?.err ? 1 : 0}:${s?.text ?? ""}:${expired(a)}`
-        : `f:${st}:${paused}:${feed.length}:${feed[0]?.at ?? 0}:${Math.floor(Date.now() / 30_000)}`;
+    const vs = vote && cardStatus.get(`v${vote.id}`);
+    const key = talking
+      ? `voice:${voice.stamp()}`
+      : st === "pending"
+        ? a
+          ? `a:${a.id}:${s?.err ? 1 : 0}:${s?.text ?? ""}:${expired(a)}`
+          : `v:${vote!.id}:${vote!.yes}:${vote!.no}:${vs?.err ? 1 : 0}:${vs?.text ?? ""}`
+        : `f:${st}:${paused}:${feed.length}:${feed[0]?.at ?? 0}:${Math.floor(Date.now() / 30_000)}:${voice.enabled}:${mode.mode}`;
     if (key !== cardKey || !cardBody.firstChild) {
       cardKey = key;
-      cardBody.replaceChildren(st === "pending" ? approvalCard(a) : feedView());
+      cardBody.replaceChildren(talking ? voice.panel(el, mode.mode === "floating" ? micButton : undefined) : st === "pending" ? (a ? approvalCard(a) : voteCard(vote!)) : feedView());
     }
     placeCard();
     requestAnimationFrame(() => {
@@ -592,7 +690,9 @@ function setHover(inside: boolean) {
   }
   retractTimer = window.setTimeout(() => {
     hovering = false;
+    const v = voice.myVotes()[0];
     if (queue.length) dismissed = queue[0].id;
+    else if (v) dismissed = `v${v.id}`;
     render();
   }, RETRACT_MS);
 }
@@ -675,9 +775,11 @@ async function decide(a: ApprovalRequested, decision: "approve" | "deny") {
   render();
   try {
     await invoke("approval_decision", { id: a.id, payloadHash: a.payload_hash, decision });
+    return true;
   } catch (err) {
     cardStatus.set(a.id, { text: String(err), err: true });
     render();
+    return false;
   }
 }
 window.addEventListener("keydown", (e) => {
@@ -686,6 +788,7 @@ window.addEventListener("keydown", (e) => {
 });
 
 function onEvent(ev: GkEvent) {
+  voice.onEvent(ev as { type: string });
   switch (ev.type) {
     case "decision":
       feed.unshift({ at: Date.now(), e: ev });
@@ -725,11 +828,68 @@ function onEvent(ev: GkEvent) {
 }
 
 // ------------------------------------------------------------------ wiring
+voice = new IslandVoice({
+  render,
+  held: () => queue,
+  title: (a) => describe(a as ApprovalRequested).title,
+  decide: async (a, d) => {
+    if (!(await decide(a as ApprovalRequested, d))) throw new Error(cardStatus.get(a.id)?.text ?? "The console couldn't sign this.");
+  },
+});
+voice.setAppearance(appearance);
+// The wake phrase (Appearance → Voice): heard offline, it opens the island and starts talking.
+// When the console is in front (the island hidden behind it), the console's top-bar voice answers;
+// otherwise the island opens and answers.
+let consoleTalking = false;
+const sendWakeStatus = () => {
+  if (!wakeListener) return;
+  void emit("karuna://wake-status", { status: wakeListener.status, error: wakeListener.error, phrase: wakeListener.phraseText, heard: wakeListener.lastHeard });
+};
+wakeListener = new WakeListener(
+  () => {
+    if (voice.active || consoleTalking) return;
+    if (!visible) {
+      void emit("karuna://wake", {});
+      return;
+    }
+    void voice.start();
+  },
+  () => {
+    queueMicrotask(render);
+    sendWakeStatus();
+  },
+);
+let heardTimer = 0;
+wakeListener.onHeard = () => {
+  clearTimeout(heardTimer);
+  heardTimer = window.setTimeout(sendWakeStatus, 250);
+};
+void listen("karuna://wake-status-request", () => sendWakeStatus());
+void listen<{ active: boolean }>("karuna://console-voice", (e) => {
+  consoleTalking = !!e.payload?.active;
+  render();
+});
+wakeListener.set(appearance.wake, appearance.voice && appearance.island);
+// Dev only (the design preview): lets dev/island-preview.html play a fake conversation.
+if (import.meta.env.DEV) (window as unknown as { __karunaVoice: IslandVoice }).__karunaVoice = voice;
+// Which member the console signs as decides which votes are "waiting on you": ask now, and again
+// whenever the Gatekeeper reconnects, and every 30 s (the console may load or switch accounts later).
+void voice.refreshMember();
+setInterval(() => void voice.refreshMember(), 30_000);
+// Ctrl+Shift+Space (registered by the app, works from any window) and the pill's mic start or end a conversation.
+void listen("voice-hotkey", () => void voice.toggle());
+mic.addEventListener("pointerdown", (e) => e.stopPropagation()); // not a drag of the pill
+mic.addEventListener("click", (e) => {
+  e.stopPropagation();
+  void voice.toggle();
+});
 void listen<GkEvent>("gk-event", (e) => onEvent(e.payload));
 void listen<{ connected: boolean }>("gk-status", (e) => {
   connected = e.payload.connected;
+  if (connected) void voice.refreshMember();
   if (!connected) {
     queue.length = 0;
+    voice.votes.clear();
     cardStatus.clear();
     paused = false; // the Gatekeeper re-sends its pause state when it reconnects
   }
@@ -737,7 +897,9 @@ void listen<{ connected: boolean }>("gk-status", (e) => {
 });
 void listen<{ inside: boolean }>("island-hover", (e) => setHover(e.payload.inside));
 void listen<Partial<Appearance>>("karuna://appearance", (e) => {
-  appearance = { theme: e.payload.theme === "light" || e.payload.theme === "dark" ? e.payload.theme : "system", island: e.payload.island !== false };
+  appearance = parseAppearance(e.payload);
+  voice.setAppearance(appearance);
+  wakeListener.set(appearance.wake, appearance.voice && appearance.island);
   try {
     localStorage.setItem(APPEAR_KEY, JSON.stringify(appearance));
   } catch {
@@ -762,10 +924,11 @@ window.addEventListener("resize", () => {
 
 void (async () => {
   try {
-    const s = await invoke<{ connected: boolean; paused: boolean; pending: ApprovalRequested[] }>("gk_status");
+    const s = await invoke<{ connected: boolean; paused: boolean; pending: ApprovalRequested[]; votes?: OpenVote[] }>("gk_status");
     connected = s.connected;
     paused = s.paused;
     for (const p of s.pending) if (!queue.some((q) => q.id === p.id)) queue.push(p);
+    for (const v of s.votes ?? []) voice.votes.set(v.id, v);
   } catch {
     /* not in the app (design preview) */
   }

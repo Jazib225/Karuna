@@ -27,7 +27,9 @@ export type WriteFn =
   // v3
   | "anchorWithRecord" | "reportTripwire" | "reportUnapprovedTransfer"
   // v4
-  | "manage";
+  | "manage"
+  // v7
+  | "hostRemove";
 
 export interface DeployArgs {
   firstMember: Address;
@@ -176,7 +178,7 @@ async function simulate(client: PublicClient, from: Address, contract: Address, 
  * Dharma.gatekeeper, the org's Circle wallet.
  */
 export const isMemberSigned = (fn: WriteFn, args: readonly unknown[]) =>
-  fn === "propose" || fn === "vote" || fn === "execute" || fn === "manage" || (fn === "tighten" && String(args[2] ?? "").toLowerCase() !== zeroAddress);
+  fn === "propose" || fn === "vote" || fn === "execute" || fn === "manage" || fn === "hostRemove" || (fn === "tighten" && String(args[2] ?? "").toLowerCase() !== zeroAddress);
 
 /**
  * Member-signed writes go through `relay` (a plain key that only pays gas: about a second on Arc)
@@ -293,6 +295,9 @@ export interface OnchainPolicy {
   /** Team roles (Dharma v4; null before): the structure, each role's permission bits by role id,
    *  and each member's role id and permission bits (lowercase address keys). */
   team: { structure: Structure; rolePerms: Record<number, number>; roles: Record<string, number>; perms: Record<string, number> } | null;
+  /** The host (Dharma v7; null before, or once the host is no longer a member): may remove a
+   *  teammate without a vote, after the core wait. */
+  host: Address | null;
   domains: string[];
   proposals: OnchainProposal[];
   chainTime: number; // latest block timestamp, for timelock math
@@ -361,6 +366,12 @@ export async function readPolicy(client: PublicClient, address: Address, maxProp
     });
     team = t;
   }
+  // The host (v7): who set the org up, while they're still a member.
+  let host: Address | null = null;
+  if (Number(codeVersion) >= 7) {
+    const [h] = await readMany<readonly [Address]>(client, [{ functionName: "host" }], address);
+    host = /^0x0+$/.test(h) ? null : h;
+  }
   const n = Number(count);
   const ids = Array.from({ length: Math.min(n, maxProposals) }, (_, i) => n - 1 - i);
   type RawProposal = { op: number; data: Hex; proposer: Address; createdAt: bigint; queuedAt: bigint; yes: number; no: number; status: number; core: boolean; eta: bigint };
@@ -405,6 +416,7 @@ export async function readPolicy(client: PublicClient, address: Address, maxProp
     }),
     levelLimits,
     team,
+    host,
     domains: [...domains],
     proposals: raw.map((p, i) => {
       let change: Change | null = null;

@@ -28,6 +28,7 @@ pnpm --dir contracts test    # forge test
 | **Loosen = slow + public** | `propose()` → `vote()` until a majority (`members/2 + 1`) → `timelock` seconds → anyone `execute()`s. A majority against defeats it. |
 | **The contract decides direction** | `isTightening(op, data)` classifies every change. A loosening sent down the fast path reverts `NotTightening`; a tightening sent to a vote reverts `UseTighten`. |
 | **Core boundaries are forever** | `core-boundary`, `secrets-read`, `unknown-recipient`, `default-deny` revert `CoreBoundary` on removal — by any path, at proposal and again at execution. |
+| **The host (v7)** | Whoever set the org up (`host()`) may remove a teammate without a vote with `hostRemove()`. It is never instant: the removal is queued for the core wait in public, can't start while frozen, and any member's Freeze cancels it. A host voted out isn't replaced. Orgs set up before v7: the first member is the host. |
 | **Members sign, the Gatekeeper relays** | Members sign EIP-712 `Action`s with keys in their own browsers. The Gatekeeper submits them and pays gas but can't forge or alter one (`BadSignature`); nonces stop replays; deadlines expire them. |
 | **Nothing is erasable** | `anchorLog(head, length)` records the signed log's head; the length can only grow. |
 

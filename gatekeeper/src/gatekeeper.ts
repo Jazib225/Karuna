@@ -1154,7 +1154,12 @@ export class Gatekeeper extends EventEmitter {
     if (deadline < BigInt(Math.floor(this.now().getTime() / 1000))) throw new GatekeeperError("Signature expired", 400);
     if (![Kind.Tighten, Kind.Propose, Kind.Vote, Kind.Manage].includes(a.kind as 0 | 1 | 2 | 3)) throw new GatekeeperError("Unknown action kind");
     // What the signer's role must allow (Dharma checks the same). Votes are every member's, always.
-    if (a.kind === Kind.Manage) {
+    // The host's removal (Dharma v7): signed as Manage + RemoveMember, queued for the core wait.
+    const hostRemoval = a.kind === Kind.Manage && opName(Number(a.op)) === "RemoveMember";
+    if (hostRemoval) {
+      if (p.version < 7) throw new GatekeeperError("This organization's Dharma predates the host role. Upgrade it first (every member signs).", 409);
+      if (!p.host || lower(p.host) !== lower(signer)) throw new GatekeeperError("Only the host can remove someone without a vote. Propose it instead.", 403);
+    } else if (a.kind === Kind.Manage) {
       if (!this.team()) throw new GatekeeperError("This organization's Dharma predates team roles. Upgrade it first.", 409);
       if (!isRoleOp(Number(a.op))) throw new GatekeeperError("Only role changes apply this way", 400);
       this.requirePermission(signer, "team");
@@ -1232,6 +1237,7 @@ export class Gatekeeper extends EventEmitter {
     try {
       if (a.kind === Kind.Tighten) res = await this.send("tighten", [op, data, signer, deadline, a.signature]);
       else if (a.kind === Kind.Propose) res = await this.send("propose", [op, data, signer, deadline, a.signature]);
+      else if (hostRemoval && change.op === "RemoveMember") res = await this.send("hostRemove", [change.member, signer, deadline, a.signature]);
       else if (a.kind === Kind.Manage) res = await this.send("manage", [op, data, signer, deadline, a.signature]);
       else res = await this.send("vote", [BigInt(a.proposalId!), !!a.support, signer, deadline, a.signature]);
     } catch (e) {
@@ -1254,7 +1260,7 @@ export class Gatekeeper extends EventEmitter {
     // The transaction landed. From here on, read failures (e.g. RPC rate limits) must not make it
     // look like it didn't: report success, and let the background sync catch up.
     let proposalId = a.kind === Kind.Vote ? a.proposalId : undefined;
-    if (a.kind === Kind.Propose) {
+    if (a.kind === Kind.Propose || hostRemoval) {
       try {
         const count = await this.deps.client.readContract({ address: this.dharmaAddress(), abi: DHARMA_ABI, functionName: "proposalCount" });
         proposalId = Number(count) - 1;
@@ -1997,6 +2003,19 @@ export class Gatekeeper extends EventEmitter {
   }
 
   /** What happens to a held action if no member answers: shown on its card and in the island. */
+  /** Dharma proposals still taking votes (open, or passed and waiting): for the island and voice. */
+  openVotes(): { id: number; description: string; core: boolean; yes: number; no: number; needed: number; status: string; voters: string[]; eta: number | null }[] {
+    const pol = this.policy;
+    if (!pol) return [];
+    const L = this.labels();
+    return pol.proposals
+      .filter((p) => p.status === "open" || p.status === "queued")
+      .map((p) => ({
+        id: p.id, description: p.change ? describeChange(p.change, L) : `op ${opName(p.op)}`, core: p.core,
+        yes: p.yes, no: p.no, needed: p.needed, status: p.status, voters: p.voters.map((v) => lower(v)), eta: p.eta ?? null,
+      }));
+  }
+
   ifUnanswered(p: Readonly<Proposal>): string | null {
     if (p.status !== "pending") return null;
     if (this.isSandboxHold(p)) return `Refused if no one answers within ${waitText(this.holdMs / 1000)}.`;
@@ -3724,6 +3743,8 @@ export class Gatekeeper extends EventEmitter {
         timelock: pol.timelock,
         coreTimelock: pol.coreTimelock,
         version: pol.version,
+        /** Dharma v7: who set the org up; may remove a teammate without a vote (after the core wait). */
+        host: pol.host ? lower(pol.host) : null,
         required: pol.required,
         thresholdUsd: pol.thresholdUsd,
         policyVersion: pol.policyVersion,

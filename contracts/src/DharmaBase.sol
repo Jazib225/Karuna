@@ -232,8 +232,28 @@ abstract contract DharmaBase {
     /// Each proposal's `_subject`, fixed when it's made.
     mapping(uint256 => bytes32) internal _subjectOf;
 
+    // v7 (appended).
+    /// The host: the member who set the organization up. The host may remove a teammate without a
+    /// vote (`hostRemove`), but never at once: it waits the core wait in public, and any member's
+    /// Freeze cancels it. 0 on orgs set up before v7: their first member is the host, pinned before
+    /// anyone leaves (see `_pinHost`).
+    address internal _host;
+
     // ------------------------------------------------------------------ shared logic (internal)
     // Compiled into whichever half calls it: Dharma (the hot path) or DharmaExt (views, setup).
+
+    /// @dev The host while they're still a member, else nobody (0). A host voted out isn't replaced.
+    function _hostOf() internal view returns (address h) {
+        h = _host;
+        if (h == address(0) && _members.length != 0) h = _members[0]; // set up before v7, team unchanged since
+        if (_memberIdx[h] == 0) h = address(0);
+    }
+
+    /// @dev Orgs set up before v7 have no stored host: fix it as their first member before the team
+    ///      changes, so a removal reordering the list never hands the role to someone else.
+    function _pinHost() internal {
+        if (_host == address(0) && _members.length != 0) _host = _members[0];
+    }
 
     /// @dev Yes votes a normal change needs: a majority.
     function _required() internal view returns (uint32) {
