@@ -12,13 +12,13 @@ import { fileURLToPath } from "node:url";
 
 const ARGV_WRAPPER = fileURLToPath(new URL("./circle-argv.mjs", import.meta.url));
 import {
-  BaseError, ContractFunctionRevertedError, createPublicClient, encodeDeployData, encodeFunctionData, http, zeroAddress,
+  BaseError, ContractFunctionRevertedError, concatHex, createPublicClient, encodeAbiParameters, encodeDeployData, encodeFunctionData, http, zeroAddress,
   type Address, type Chain, type Hex, type PublicClient, type WalletClient,
 } from "viem";
 import { arcTestnet } from "viem/chains";
 import { DHARMA_ABI, DHARMA_PROXY_ABI, MAX_LEVEL, OUTCOME_NAMES, Op, STATUS_NAMES, decodeChange, fromBytes32, fromMicro, type Change, type LevelLimits, decodeRolePerms, type Structure
 } from "@prekaruna/dharma";
-import { DHARMA_BYTECODE, DHARMA_PROXY_BYTECODE } from "@prekaruna/dharma/bytecode";
+import { DHARMA_BYTECODE, DHARMA_EXT_BYTECODE, DHARMA_PROXY_BYTECODE } from "@prekaruna/dharma/bytecode";
 import type { OnchainRule } from "@prekaruna/engine";
 import { WALLET_CHAIN } from "./config.ts";
 
@@ -52,6 +52,8 @@ function initCall(gatekeeper: Address, a: DeployArgs): Hex {
     args: [gatekeeper, a.firstMember, BigInt(a.timelockSeconds), BigInt(a.coreTimelockSeconds), a.thresholdMicro, a.domains],
   });
 }
+/** Dharma's creation code with its one constructor argument: the DharmaExt it forwards to (v6+). */
+const dharmaDeployData = (ext: Address): Hex => concatHex([DHARMA_BYTECODE, encodeAbiParameters([{ type: "address" }], [ext])]);
 const proxyDeployData = (implementation: Address, gatekeeper: Address, a: DeployArgs) =>
   encodeDeployData({ abi: DHARMA_PROXY_ABI, bytecode: DHARMA_PROXY_BYTECODE, args: [implementation, initCall(gatekeeper, a)] });
 
@@ -129,20 +131,24 @@ export class CircleChainWriter implements ChainWriter {
     });
   }
 
-  /** Two transactions: the Dharma code, then the org's proxy (its permanent address) pointing at it. */
-  async deploy(a: DeployArgs) {
-    const code = await this.run(["contract", "deploy", "--bytecode", DHARMA_BYTECODE, "--address", this.from, "--chain", WALLET_CHAIN], 300_000);
-    if (!code.contractAddress) throw new ChainError("Deploying the Dharma code finished without an address");
-    const impl = String(code.contractAddress) as Address;
-    const d = await this.run(["contract", "deploy", "--bytecode", proxyDeployData(impl, this.from, a), "--address", this.from, "--chain", WALLET_CHAIN], 300_000);
-    if (!d.contractAddress) throw new ChainError("Deploying the org's Dharma finished without an address");
-    return { address: String(d.contractAddress) as Address, txRef: String(d.txHash ?? d.id), implementation: impl };
+  private async deployData(data: Hex, what: string) {
+    const r = await this.run(["contract", "deploy", "--bytecode", data, "--address", this.from, "--chain", WALLET_CHAIN], 300_000);
+    if (!r.contractAddress) throw new ChainError(`Deploying ${what} finished without an address`);
+    return { address: String(r.contractAddress) as Address, txRef: String(r.txHash ?? r.id) };
   }
 
+  /** The Dharma code (both halves), then the org's proxy (its permanent address) pointing at it. */
+  async deploy(a: DeployArgs) {
+    const { implementation } = await this.deployCode();
+    const d = await this.deployData(proxyDeployData(implementation, this.from, a), "the org's Dharma");
+    return { address: d.address, txRef: d.txRef, implementation };
+  }
+
+  /** Two transactions: DharmaExt, then Dharma naming it. The org runs Dharma's address. */
   async deployCode() {
-    const code = await this.run(["contract", "deploy", "--bytecode", DHARMA_BYTECODE, "--address", this.from, "--chain", WALLET_CHAIN], 300_000);
-    if (!code.contractAddress) throw new ChainError("Deploying the Dharma code finished without an address");
-    return { implementation: String(code.contractAddress) as Address, txRef: String(code.txHash ?? code.id) };
+    const ext = await this.deployData(DHARMA_EXT_BYTECODE, "the Dharma code (second half)");
+    const code = await this.deployData(dharmaDeployData(ext.address), "the Dharma code");
+    return { implementation: code.address, txRef: code.txRef };
   }
 
   async write(contract: Address, fn: WriteFn, args: readonly unknown[]) {
@@ -214,21 +220,23 @@ export class ViemChainWriter implements ChainWriter {
     this.from = wallet.account!.address;
   }
 
-  async deploy(a: DeployArgs) {
-    const codeHash = await this.wallet.deployContract({ abi: DHARMA_ABI, bytecode: DHARMA_BYTECODE, account: this.wallet.account!, chain: this.wallet.chain });
-    const code = await this.client.waitForTransactionReceipt({ hash: codeHash });
-    if (!code.contractAddress) throw new ChainError("deploying the Dharma code failed");
-    const hash = await this.wallet.sendTransaction({ data: proxyDeployData(code.contractAddress, this.from, a), account: this.wallet.account!, chain: this.wallet.chain });
+  private async deployData(data: Hex, what: string) {
+    const hash = await this.wallet.sendTransaction({ data, account: this.wallet.account!, chain: this.wallet.chain });
     const r = await this.client.waitForTransactionReceipt({ hash });
-    if (!r.contractAddress) throw new ChainError("deploying the org's Dharma failed");
-    return { address: r.contractAddress, txRef: hash, implementation: code.contractAddress };
+    if (!r.contractAddress) throw new ChainError(`deploying ${what} failed`);
+    return { address: r.contractAddress, txRef: hash };
+  }
+
+  async deploy(a: DeployArgs) {
+    const { implementation } = await this.deployCode();
+    const d = await this.deployData(proxyDeployData(implementation, this.from, a), "the org's Dharma");
+    return { address: d.address, txRef: d.txRef, implementation };
   }
 
   async deployCode() {
-    const hash = await this.wallet.deployContract({ abi: DHARMA_ABI, bytecode: DHARMA_BYTECODE, account: this.wallet.account!, chain: this.wallet.chain });
-    const r = await this.client.waitForTransactionReceipt({ hash });
-    if (!r.contractAddress) throw new ChainError("deploying the Dharma code failed");
-    return { implementation: r.contractAddress, txRef: hash };
+    const ext = await this.deployData(DHARMA_EXT_BYTECODE, "the Dharma code (second half)");
+    const code = await this.deployData(dharmaDeployData(ext.address), "the Dharma code");
+    return { implementation: code.address, txRef: code.txRef };
   }
 
   async write(contract: Address, fn: WriteFn, args: readonly unknown[]) {

@@ -1,9 +1,14 @@
 # Dharma contract size: plan
 
-> **Status (Nov 2026):** planned, not built. Dharma v5 is 24,537 bytes of runtime code against the
-> 24,576-byte limit (EIP-170, enforced on Arc). It deploys and works today, but almost any new
-> feature pushes it over. This plan frees room without changing any org's address, storage or
-> the way members upgrade.
+> **Status (Nov 2026):** Option 2 is built as Dharma v6. Dharma is 16,218 bytes and DharmaExt is
+> 16,120, each with about 8.4 KB free under the 24,576-byte limit (v5 was 24,537 bytes with 39 free).
+> Storage layout matches v5 slot for slot. Tests: 93 contract tests (including a real upgrade from
+> the exact v5 code, `test/fixtures/DharmaV5.sol`), plus the Gatekeeper's v2 → v6 upgrade on anvil.
+> Option 1 is not built.
+>
+> Original problem: Dharma v5 sat 39 bytes under the limit (EIP-170, enforced on Arc), so almost
+> any new feature would push it over. This plan frees room without changing any org's address,
+> storage or the way members upgrade.
 
 ## Why
 

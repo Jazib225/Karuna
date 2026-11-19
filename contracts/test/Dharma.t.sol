@@ -2,18 +2,23 @@
 pragma solidity ^0.8.24;
 
 import {Test, Vm} from "forge-std/Test.sol";
-import {Dharma} from "../src/Dharma.sol";
+import {Dharma as DharmaCore} from "../src/Dharma.sol";
+import {DharmaBase as Dharma} from "../src/DharmaBase.sol";
+import {DharmaExt} from "../src/DharmaExt.sol";
+import {DharmaAbi} from "../src/DharmaAbi.sol";
 import {DharmaProxy} from "../src/DharmaProxy.sol";
 
 /// Stand-in for a future Dharma version, to test upgrades.
-contract DharmaNext is Dharma {
+contract DharmaNext is DharmaCore {
+    constructor(address ext_) DharmaCore(ext_) {}
+
     function version() external pure override returns (uint256) {
-        return 6;
+        return 7;
     }
 }
 
 contract DharmaTest is Test {
-    Dharma dharma;
+    DharmaAbi dharma;
     address gk = makeAddr("gatekeeper");
     uint256 aliceKey = 0xA11CE;
     uint256 bobKey = 0xB0B;
@@ -35,8 +40,8 @@ contract DharmaTest is Test {
         string[] memory d = new string[](2);
         d[0] = "github.com";
         d[1] = "stripe.com";
-        Dharma impl = new Dharma();
-        dharma = Dharma(address(new DharmaProxy(address(impl), abi.encodeCall(Dharma.initialize, (gk, alice, TIMELOCK, CORE, 500e6, d)))));
+        DharmaCore impl = new DharmaCore(address(new DharmaExt()));
+        dharma = DharmaAbi(address(new DharmaProxy(address(impl), abi.encodeCall(DharmaExt.initialize, (gk, alice, TIMELOCK, CORE, 500e6, d)))));
     }
 
     // ------------------------------------------------------------- helpers
@@ -370,25 +375,25 @@ contract DharmaTest is Test {
     // ------------------------------------------------------------- v2: proxy + setup
 
     function test_runs_behind_a_proxy_that_nobody_can_reinitialize() public {
-        assertEq(dharma.version(), 5);
+        assertEq(dharma.version(), 6);
         assertEq(dharma.timelock(), TIMELOCK);
         assertEq(dharma.coreTimelock(), CORE);
         string[] memory d = new string[](0);
         vm.expectRevert(Dharma.AlreadyInitialized.selector);
         dharma.initialize(makeAddr("evil"), makeAddr("evil"), 0, CORE, 0, d);
         // the bare implementation can't be initialized either
-        Dharma impl = Dharma(dharma.implementation());
+        DharmaAbi impl = DharmaAbi(dharma.implementation());
         vm.expectRevert(Dharma.AlreadyInitialized.selector);
         impl.initialize(makeAddr("evil"), makeAddr("evil"), 0, CORE, 0, d);
     }
 
     function test_setup_rejects_bad_waits() public {
-        Dharma impl = new Dharma();
+        DharmaCore impl = new DharmaCore(address(new DharmaExt()));
         string[] memory d = new string[](0);
         vm.expectRevert(Dharma.BadCoreWait.selector);
-        new DharmaProxy(address(impl), abi.encodeCall(Dharma.initialize, (gk, alice, TIMELOCK, 0, 500e6, d)));
+        new DharmaProxy(address(impl), abi.encodeCall(DharmaExt.initialize, (gk, alice, TIMELOCK, 0, 500e6, d)));
         vm.expectRevert(Dharma.WaitTooLong.selector);
-        new DharmaProxy(address(impl), abi.encodeCall(Dharma.initialize, (gk, alice, 8 days, CORE, 500e6, d)));
+        new DharmaProxy(address(impl), abi.encodeCall(DharmaExt.initialize, (gk, alice, 8 days, CORE, 500e6, d)));
     }
 
     // ------------------------------------------------------------- v2: core rules change only by everyone + the core wait
@@ -546,7 +551,7 @@ contract DharmaTest is Test {
     function test_an_upgrade_needs_everyone_and_the_core_wait_and_keeps_the_org() public {
         addMembers();
         pass3(Dharma.Op.SetPayee, abi.encode(PAYEE, "data"));
-        address next = address(new DharmaNext());
+        address next = address(new DharmaNext(address(new DharmaExt())));
         bytes32 domainBefore = dharma.DOMAIN_SEPARATOR();
         uint256 id = propose(aliceKey, Dharma.Op.Upgrade, abi.encode(next));
         assertTrue(dharma.proposal(id).core);
@@ -557,7 +562,7 @@ contract DharmaTest is Test {
         dharma.execute(id);
 
         assertEq(dharma.implementation(), next);
-        assertEq(dharma.version(), 6);
+        assertEq(dharma.version(), 7);
         // same address, same org: members, rules, payees and signatures all carry over
         assertEq(dharma.members().length, 3);
         assertEq(dharma.rules().length, 13);

@@ -5,6 +5,17 @@ agent allowances, allowlisted domains, the two-person threshold, members, and th
 Every organization deploys its own (the console does it at setup). `js/` is the shared
 TypeScript vocabulary the Gatekeeper and the console both use.
 
+Since v6 the code is two contracts behind each org's `DharmaProxy`, sharing one storage layout
+(`src/DharmaBase.sol`):
+
+- `src/Dharma.sol`: proposals, votes, execution and instant tightening. It forwards any call it
+  doesn't recognize to its extension.
+- `src/DharmaExt.sol`: setup, team roles, the Gatekeeper's reports and anchors, and every view.
+- `src/DharmaAbi.sol`: both halves as one interface (never deployed). `js/abi.ts` is exported from
+  it, and it fails to compile if the halves ever share a function selector.
+
+Each Dharma names its DharmaExt in its code, so one `Upgrade` vote moves both halves.
+
 ```bash
 pnpm --dir contracts build   # forge build + export ABI/bytecode to js/ (committed)
 pnpm --dir contracts test    # forge test
@@ -39,4 +50,5 @@ rules, votes. Names (organization, members, agents, payees) stay in the Gatekeep
 Agent wallets are smart accounts that deploy through a factory, so `msg.sender` in the
 constructor is not the org. The Gatekeeper and first member are explicit constructor arguments:
 `constructor(gatekeeper, firstMember, timelockSeconds, thresholdMicroUsd, domains[])`.
-Built with `optimizer = true, via_ir = true` (≈14 KB runtime, under the 24 KB limit).
+Built with `optimizer = true, via_ir = true`. The build fails if Dharma, DharmaExt or Escrow gets
+within 1 KB of the 24,576-byte contract limit (`scripts/export-abi.mjs`).
