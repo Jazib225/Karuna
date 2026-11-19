@@ -955,6 +955,7 @@ html, body, * { scrollbar-width: none; }
 .chat-step .grow { flex: 1; min-width: 0; display: grid; gap: 6px; }
 .step-n { flex: none; width: 22px; height: 22px; border-radius: 999px; display: grid; place-items: center; font: 600 12px/1 var(--font-mono); background: var(--canvas-2); border: 1px solid var(--line); color: var(--ink); }
 .chat-url { overflow-wrap: anywhere; padding: 6px 10px; border-radius: var(--r-sm); background: var(--canvas-2); border: 1px solid var(--line); }
+.grok-routine { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px 12px; border-radius: var(--r-sm); background: var(--canvas-2); border: 1px solid var(--line); color: var(--ink); line-height: 1.5; }
 
 /* ------------------------------------------------------------------ confirm dialog (confirm.tsx) */
 .confirm-backdrop {
