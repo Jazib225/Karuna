@@ -8,14 +8,16 @@ export interface PickerOption<V extends string> {
   value: V;
   label: string;
   hint?: string; // a quiet second line, e.g. where a key comes from
+  group?: string; // options sharing a group are listed under its heading
 }
 
-export function Picker<V extends string>({ value, options, onChange, label, className = "" }: {
+export function Picker<V extends string>({ value, options, onChange, label, className = "", disabled = false }: {
   value: V;
   options: readonly PickerOption<V>[];
   onChange: (v: V) => void;
   label: string; // accessible name
   className?: string;
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(() => Math.max(0, options.findIndex((o) => o.value === value)));
@@ -23,6 +25,12 @@ export function Picker<V extends string>({ value, options, onChange, label, clas
   const button = useRef<HTMLButtonElement>(null);
   const listId = useId();
   const current = options.find((o) => o.value === value) ?? options[0];
+  const menu = useRef<HTMLUListElement>(null);
+
+  // Keep the highlighted option in view in a long list.
+  useEffect(() => {
+    if (open) menu.current?.querySelector<HTMLElement>(`[data-i="${active}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [open, active]);
 
   // Close on a click or focus anywhere else.
   useEffect(() => {
@@ -39,6 +47,7 @@ export function Picker<V extends string>({ value, options, onChange, label, clas
   }, [open]);
 
   const show = () => {
+    if (disabled || !options.length) return;
     setActive(Math.max(0, options.findIndex((o) => o.value === value)));
     setOpen(true);
   };
@@ -83,29 +92,45 @@ export function Picker<V extends string>({ value, options, onChange, label, clas
     <div className={`picker ${open ? "open" : ""} ${className}`} ref={root}>
       <button
         type="button" ref={button} className="picker-btn" aria-label={label} aria-haspopup="listbox" aria-expanded={open}
-        aria-controls={listId} onClick={() => (open ? setOpen(false) : show())} onKeyDown={onKey}
+        aria-controls={listId} disabled={disabled} onClick={() => (open ? setOpen(false) : show())} onKeyDown={onKey}
         aria-activedescendant={open ? `${listId}-${active}` : undefined}
       >
-        <span className="picker-value">{current.label}</span>
+        <span className="picker-value">{current?.label ?? ""}</span>
         <Icon name="chevron" size={14} />
       </button>
       {open && (
-        <ul className="picker-menu" role="listbox" id={listId} aria-label={label}>
-          {options.map((o, i) => (
+        <ul className="picker-menu" role="listbox" id={listId} aria-label={label} ref={menu}>
+          {options.map((o, i) => [
+            o.group && o.group !== options[i - 1]?.group && <li key={`g-${o.group}`} role="presentation" className="picker-group">{o.group}</li>,
             <li
-              key={o.value} id={`${listId}-${i}`} role="option" aria-selected={o.value === value}
+              key={o.value} id={`${listId}-${i}`} data-i={i} role="option" aria-selected={o.value === value}
               className={`picker-opt ${i === active ? "active" : ""} ${o.value === value ? "sel" : ""}`}
-              onPointerEnter={() => setActive(i)} onPointerDown={(e) => e.preventDefault()} onClick={() => choose(i)}
+              onPointerEnter={() => setActive(i)} onPointerDown={(e) => e.preventDefault()}
+              // preventDefault: inside a <label>, the click would otherwise also "click" the button and reopen the list
+              onClick={(e) => { e.preventDefault(); choose(i); }}
             >
               <span className="picker-opt-text">
                 <span className="picker-opt-label">{o.label}</span>
                 {o.hint && <span className="picker-opt-hint">{o.hint}</span>}
               </span>
               {o.value === value && <Icon name="check" size={14} />}
-            </li>
-          ))}
+            </li>,
+          ])}
         </ul>
       )}
     </div>
   );
+}
+
+/** The console's dropdown in place of a <select>: string values, and a small pill size for rows of actions. */
+export function Select({ value, options, onChange, label, small = false, disabled = false, className = "" }: {
+  value: string;
+  options: readonly PickerOption<string>[];
+  onChange: (v: string) => void;
+  label: string;
+  small?: boolean;
+  disabled?: boolean;
+  className?: string;
+}) {
+  return <Picker value={value} options={options} onChange={onChange} label={label} disabled={disabled} className={`${small ? "picker-sm" : ""} ${className}`.trim()} />;
 }
