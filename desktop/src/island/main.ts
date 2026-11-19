@@ -847,7 +847,7 @@ const sendWakeStatus = () => {
 };
 wakeListener = new WakeListener(
   () => {
-    if (voice.active || consoleTalking) return;
+    if (!voice.wakeAllowed() || consoleTalking) return;
     if (!visible) {
       void emit("karuna://wake", {});
       return;

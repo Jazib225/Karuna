@@ -126,6 +126,9 @@ async function say(call: VoiceCall, body: { id?: string; vote?: number; reason?:
   await speaking.play().catch(() => undefined);
 }
 
+/** After a conversation ends, the wake phrase is ignored for this long. */
+const WAKE_QUIET_MS = 5000;
+
 /** Hang up a call for good: mute both ways first, so nothing more is heard or sent while the
  *  connection closes, and don't wait forever on a connection that won't close. */
 async function hangUp(c: VoiceConversation) {
@@ -149,6 +152,9 @@ export class IslandVoice {
   private conv: VoiceConversation | null = null;
   /** Which conversation is current; End moves it on (see start). */
   private session = 0;
+  /** Until when the wake phrase is ignored: just after a conversation ends, the mic can still pick
+   *  up Karuna's last words (or the member saying goodbye) and must not start a new one. */
+  private quietUntil = 0;
   private lines: Line[] = [];
   private actions: Action[] = [];
   private drafts: { id: string; rule: string }[] = [];
@@ -171,6 +177,12 @@ export class IslandVoice {
 
   get active() {
     return this.mode !== "off";
+  }
+
+  /** May the wake phrase start a conversation now? Not while one is on, not while Karuna is reading
+   *  an alert aloud (its own voice could sound like the phrase), and not for a moment after End. */
+  wakeAllowed(): boolean {
+    return !this.active && Date.now() >= this.quietUntil && !(speaking && !speaking.paused && !speaking.ended);
   }
 
   /** Votes still open that this member hasn't voted on. Until we know who signs here, none: a
@@ -354,6 +366,7 @@ export class IslandVoice {
   async stop() {
     const c = this.conv;
     this.session++;
+    this.quietUntil = Date.now() + WAKE_QUIET_MS;
     this.conv = null;
     this.codes.clear();
     clearTimeout(this.idleTimer);
@@ -366,6 +379,7 @@ export class IslandVoice {
 
   private ended() {
     this.session++;
+    this.quietUntil = Date.now() + WAKE_QUIET_MS;
     this.conv = null;
     this.codes.clear();
     clearTimeout(this.idleTimer);

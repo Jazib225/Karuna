@@ -150,14 +150,14 @@ export function TopVoice({ s, me }: { s: Snapshot; me: Signer }) {
   const wake = useMemo(() => {
     if (IN_APP) return null;
     const w = new WakeListener(
-      () => void (voice.active ? undefined : voice.start()),
+      () => void (voice.wakeAllowed() ? voice.start() : undefined),
       () => setWakeState({ status: w.status, error: w.error, phrase: w.phraseText, heard: w.lastHeard }),
     );
     w.onHeard = () => setWakeState({ status: w.status, error: w.error, phrase: w.phraseText, heard: w.lastHeard });
     return w;
   }, [voice]);
   // Desktop app: the island listens, and hands the wake to this console when it's in front.
-  useEffect(() => onWakeFromIsland(() => void (voice.active ? undefined : voice.start())), [voice]);
+  useEffect(() => onWakeFromIsland(() => void (voice.wakeAllowed() ? voice.start() : undefined)), [voice]);
   useEffect(() => tellIslandConsoleTalking(voice.active), [voice.active]);
   useEffect(() => {
     if (!wake) return;
