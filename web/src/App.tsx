@@ -1391,11 +1391,10 @@ function Overview({ ctx, wallet, refreshWallet, go }: { ctx: Ctx; wallet: Wallet
         </div>
       </div>
 
-      <div className="card rise" style={st(4)}>
-        <div className="hd"><h2>Recent decisions</h2><a className="sub link-u" href="#activity" onClick={(e) => { e.preventDefault(); go("activity"); }}>signed log →</a></div>
+      <FoldCard id="recent" title="Recent decisions" className="rise" style={st(4)} sub={<><a className="sub link-u" href="#activity" onClick={(e) => { e.preventDefault(); go("activity"); }}>signed log →</a></>}>
         {s.proposals.length === 0 ? <Empty icon="activity">No requests yet. Decisions appear here the moment an agent asks for something.</Empty> : <Rows ctx={ctx} items={s.proposals.slice(0, 8)} />}
         <div className="log-foot"><span className={s.log.verified ? "" : "bad-text"}><span className="sigdot" /> {s.log.verified ? "signed · hash chain verified" : `TAMPERED at entry ${s.log.brokenAt}`}</span><span>head {short(s.log.head)}</span></div>
-      </div>
+      </FoldCard>
     </div>
   );
 }
@@ -1473,8 +1472,7 @@ function EscrowHolds({ ctx }: { ctx: Ctx }) {
   const agentName = (id: string) => s.policy!.agents.find((a) => a.id === id)?.name ?? id;
   const payee = (a?: string) => (a ? s.policy!.payees.find((x) => x.account === a.toLowerCase())?.name ?? short(a) : "—");
   return (
-    <div className="card">
-      <div className="hd"><h2>In escrow</h2><span className="sub">any member can cancel before release; the USDC returns to the wallet</span></div>
+    <FoldCard id="escrow" title="In escrow" sub={<><span className="sub">any member can cancel before release; the USDC returns to the wallet</span></>}>
       <div className="table">
         {held.map((p) => {
           const e = p.escrow!;
@@ -1491,7 +1489,7 @@ function EscrowHolds({ ctx }: { ctx: Ctx }) {
           );
         })}
       </div>
-    </div>
+    </FoldCard>
   );
 }
 
@@ -1806,11 +1804,15 @@ function useFold(id: string): [boolean, () => void] {
   return [open, toggle];
 }
 
+/** A click or key that belongs to a link, button or field inside the header (a filter, "signed log →"), not to the header. */
+const fromControl = (e: { target: EventTarget; currentTarget: EventTarget }) =>
+  e.target !== e.currentTarget && !!(e.target as HTMLElement).closest?.("a, button, input, select, textarea, label, [role=tab]");
+
 /** A card header that folds the card: click (or Enter / Space) to hide or show everything under it. */
 function FoldHead({ title, sub, open, toggle, className = "" }: { title: string; sub: ReactNode; open: boolean; toggle: () => void; className?: string }) {
   return (
-    <div className={`hd fold-hd ${className}`} role="button" tabIndex={0} aria-expanded={open} onClick={toggle}
-      onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), toggle())}>
+    <div className={`hd fold-hd ${className}`} role="button" tabIndex={0} aria-expanded={open} onClick={(e) => !fromControl(e) && toggle()}
+      onKeyDown={(e) => !fromControl(e) && (e.key === "Enter" || e.key === " ") && (e.preventDefault(), toggle())}>
       <h2>{title}</h2>
       <span className="fold-right">{sub}<Icon name="chevron" size={16} className="fold-chev" /></span>
     </div>
@@ -1822,6 +1824,17 @@ function FoldBody({ open, children }: { open: boolean; children: ReactNode }) {
   return (
     <div className={`fold-body${open ? " open" : ""}`} aria-hidden={!open}>
       <div className="fold-inner">{children}</div>
+    </div>
+  );
+}
+
+/** A card whose header folds everything under it; open or folded is remembered per browser. */
+function FoldCard({ id, title, sub, className = "", style, children }: { id: string; title: string; sub?: ReactNode; className?: string; style?: CSSProperties; children: ReactNode }) {
+  const [open, toggle] = useFold(id);
+  return (
+    <div className={`card ${className}${open ? "" : " folded"}`} style={style}>
+      <FoldHead title={title} sub={sub} open={open} toggle={toggle} />
+      <FoldBody open={open}>{children}</FoldBody>
     </div>
   );
 }
@@ -2251,26 +2264,25 @@ function Activity({ ctx, log }: { ctx: Ctx; log: LogEntry[] }) {
       .finally(() => setLoadingOlder(false));
   }, [matching.length, count, olderOnServer, oldestLoaded, loadingOlder]);
   const sentinel = useRef<HTMLDivElement>(null);
+  const [logOpen, toggleLog] = useFold("log");
   useEffect(() => {
     const el = sentinel.current;
-    if (!el || !hasMore) return;
+    if (!el || !hasMore || !logOpen) return; // folded: don't page through history no one can see
     const io = new IntersectionObserver((entries) => {
       if (entries.some((x) => x.isIntersecting)) setCount((c) => (c < matching.length + LOG_PAGE ? c + LOG_PAGE : c));
     });
     io.observe(el);
     return () => io.disconnect();
-  }, [hasMore, matching.length]);
+  }, [hasMore, matching.length, logOpen]);
   const who = (id: unknown) => {
     const v = String(id ?? "");
     return v.startsWith("0x") ? ctx.name(v) : s.policy!.agents.find((a) => a.id === v)?.name ?? v;
   };
   const anchored = s.policy!.anchor.length;
   return (
-    <div className="card">
-      <div className="hd">
-        <h2>Decision log</h2>
-        <span className="filters" role="tablist" aria-label="Filter the log">{(["all", "decisions", "events", "on Arc"] as const).map((k) => <button key={k} role="tab" aria-selected={filter === k} className={filter === k ? "on" : ""} onClick={() => setFilter(k)}>{k}</button>)}</span>
-      </div>
+    <div className={`card${logOpen ? "" : " folded"}`}>
+      <FoldHead title="Decision log" open={logOpen} toggle={toggleLog} sub={<span className="filters" role="tablist" aria-label="Filter the log">{(["all", "decisions", "events", "on Arc"] as const).map((k) => <button key={k} role="tab" aria-selected={filter === k} className={filter === k ? "on" : ""} onClick={() => setFilter(k)}>{k}</button>)}</span>} />
+      <FoldBody open={logOpen}>
       {shown.length === 0 ? (
         <Empty icon="activity">{filter === "all" ? "The log is empty." : `Nothing under “${filter}” yet.`}</Empty>
       ) : (
@@ -2314,6 +2326,7 @@ function Activity({ ctx, log }: { ctx: Ctx; log: LogEntry[] }) {
         <span className={s.log.verified ? "" : "bad-text"}><span className="sigdot" /> {s.log.length} entries · ed25519-signed &amp; hash-chained · {s.log.verified ? "verified" : `TAMPERED at ${s.log.brokenAt}`} · {anchored} anchored on Dharma</span>
         <span>head {short(s.log.head)}</span>
       </div>
+      </FoldBody>
     </div>
   );
 }
@@ -2712,8 +2725,7 @@ function Incidents({ ctx }: { ctx: Ctx }) {
   const agentName = (id: string | null) => (id ? pol.agents.find((a) => a.id === id)?.name ?? id : "every agent");
   const n = blocks.length + sw.trips.length + sw.tainted.length;
   return (
-    <div className="card">
-      <div className="hd"><h2>Blocks and freezes</h2><span className="sub">{n || ""}</span></div>
+    <FoldCard id="blocks" title="Blocks and freezes" sub={<><span className="sub">{n || ""}</span></>}>
       {n === 0 && <Empty icon="shield">Nothing blocked. An agent that fails a drill or touches a trap shows up here.</Empty>}
       {blocks.length > 0 && (
         <div className="table">
@@ -2765,7 +2777,7 @@ function Incidents({ ctx }: { ctx: Ctx }) {
           ))}
         </div>
       )}
-    </div>
+    </FoldCard>
   );
 }
 
@@ -2911,8 +2923,7 @@ function Learned({ ctx }: { ctx: Ctx }) {
   const who = (name: string | null, addr: string) => name ?? short(addr);
   if (!L.precedents.length && !L.blocks.length && !L.allows.length) return null;
   return (
-    <div className="card">
-      <div className="hd"><h2>Learned from your choices</h2></div>
+    <FoldCard id="learned" title="Learned from your choices">
       {L.suggestions.map((x) => (
         <div className="tr learn-tr" key={x.id}>
           <Badge v="approval">suggestion</Badge>
@@ -2949,7 +2960,7 @@ function Learned({ ctx }: { ctx: Ctx }) {
           ))}
         </div>
       )}
-    </div>
+    </FoldCard>
   );
 }
 
@@ -3902,8 +3913,7 @@ function WatchdogCard({ ctx }: { ctx: Ctx }) {
     unapproved: { v: "deny", text: "Not approved" },
   };
   return (
-    <div className="card">
-      <div className="hd"><h2>Wallet watchdog</h2><span className="sub">{watchdogSource(w.events[0]?.source)}</span></div>
+    <FoldCard id="watchdog" title="Wallet watchdog" sub={<><span className="sub">{watchdogSource(w.events[0]?.source)}</span></>}>
       <div className="pad stack-sm">
         <p className="muted">Every USDC transfer out of {w.wallet ? <span className="mono">{short(w.wallet)}</span> : "the wallet"} must match a payment Karuna made. Anything else freezes every agent and is recorded on Dharma.</p>
       </div>
@@ -3920,7 +3930,7 @@ function WatchdogCard({ ctx }: { ctx: Ctx }) {
           ))}
         </div>
       )}
-    </div>
+    </FoldCard>
   );
 }
 
@@ -3930,8 +3940,7 @@ function SandboxRuns({ ctx }: { ctx: Ctx }) {
   const { s, run, busy } = ctx;
   const sb = s.sandbox;
   return (
-    <div className="card">
-      <div className="hd"><h2>Running in a sandbox</h2><span className="sub settings-line">{sb.sessions.length} live{(s.settings.gvisorAvailable || s.settings.values.requireGvisor === 1) && <> · Require gVisor: <SettingValue ctx={ctx} name="requireGvisor" /></>}</span></div>
+    <FoldCard id="sandbox" title="Running in a sandbox" sub={<><span className="sub settings-line">{sb.sessions.length} live{(s.settings.gvisorAvailable || s.settings.values.requireGvisor === 1) && <> · Require gVisor: <SettingValue ctx={ctx} name="requireGvisor" /></>}</span></>}>
       {sb.sessions.length === 0 ? <Empty icon="agents">No boxes running. Start one with <span className="mono">pnpm karuna run --agent &lt;id&gt; ./folder -- &lt;command&gt;</span>.</Empty> : (
         <div className="table">
           {sb.sessions.map((x) => (
@@ -3955,7 +3964,7 @@ function SandboxRuns({ ctx }: { ctx: Ctx }) {
           ))}
         </div>
       )}
-    </div>
+    </FoldCard>
   );
 }
 
