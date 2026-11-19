@@ -22,7 +22,7 @@ with Karuna, a post can only ever become a proposal.
 |---|---|
 | Grok Bot's address | `https://<tunnel>/grok/mcp`: Karuna's MCP connector with its own sign-in (issuer `/grok`), so the connection shows as Grok Bot |
 | Sign-in | OAuth with a code a member approves (Agents → New agent → **Grok Bot**); the Bot's own app link is accepted as the redirect, with PKCE |
-| Its tools | `pay`, `buy_data`, `web_search`, `web_fetch`, `balance`, `check_request`, the team's connectors, plus **`arc_activity`** and **`alert_team`** |
+| Its tools | `pay`, `buy_data`, `web_search`, `web_fetch`, `balance`, `check_request`, the team's connectors, plus **`read_inbox`** and **`report_message`** (its Karuna inbox, where pre-flight's Drills arrive like real mail), **`arc_activity`** and **`alert_team`** |
 | `arc_activity` | Facts only, the same anyone could read on the explorer, with arcscan links. Never a decision's reason, and nothing about Auto-Shield's tests or the trap keys |
 | `alert_team` | Shows on every member's screen and in the island, labelled as the agent's words, with a button to Approvals, Votes, or the freeze (the member confirms). 6 an hour |
 | A routine without sign-in | Karuna also reads the token from `Authorization: ApiKey …`, a bare `Authorization` value, or `X-Karuna-Token` |

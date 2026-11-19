@@ -233,7 +233,7 @@ export interface GatekeeperDeps {
   anchorMaxAgeMs?: number; // …or when unanchored entries are this old
   shieldTestsPerDay?: number; // Auto-Shield: random tests per active agent per day (0 = off)
   shieldWindowMs?: number; // a test nobody acted on within this window counts as passed
-  preflightWindowMs?: number; // a pre-flight Drill nobody acted on within this window counts as passed (default 5 min)
+  preflightWindowMs?: number; // a pre-flight Drill nobody acted on within this window counts as passed (default 2 min)
   preflight?: boolean; // send each newly activated agent a pre-flight (main.ts turns it on; KARUNA_PREFLIGHT=0 turns it off)
   swarmAgents?: number; // Swarm Stopper: this many agents on one new target…
   swarmWindowMs?: number; // …within this window freezes everyone
@@ -288,6 +288,7 @@ const SESSION_IDLE_MS = 45_000;
 const GRANT_MS = 10 * 60_000;
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
+const PREFLIGHT_READ_GRACE_MS = 30_000; // a pre-flight Drill read and not acted on for this long passes
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 const usd = (n: number) => `$${n > 0 && n < 0.01 ? n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "") : n.toFixed(2)}`;
 const lower = (a: string) => a.toLowerCase();
@@ -3550,6 +3551,11 @@ export class Gatekeeper extends EventEmitter {
     return this.preflightView(agentId)!;
   }
 
+  /** A coding agent (Claude Code, Cursor through the plugin): it never reads Karuna's inbox. */
+  private inboxless(agentId: string): boolean {
+    return (this.state.devices ?? []).some((d) => d.agentId === agentId && d.status === "approved" && d.tool !== "chat" && d.tool !== "grok-bot");
+  }
+
   /** On each Dharma read: an agent seen for the first time gets a pre-flight (agents already there don't). */
   private preflightNewAgents(p: OnchainPolicy): boolean {
     const ids = p.agents.map((a) => a.id);
@@ -3563,6 +3569,8 @@ export class Gatekeeper extends EventEmitter {
     this.state.seenAgents = [...seen, ...fresh];
     if (!this.deps.preflight) return true;
     for (const id of fresh) {
+      // A coding agent has no Karuna inbox: Drills sent there test nothing.
+      if (this.inboxless(id)) continue;
       try {
         this.preflight(id);
       } catch (e) {
@@ -3743,11 +3751,16 @@ export class Gatekeeper extends EventEmitter {
     const set = this.settings();
     const window = set.drillWindowMinutes * 60_000;
     let dirty = false;
-    const preflightWindow = this.deps.preflightWindowMs ?? 5 * 60_000;
+    const preflightWindow = this.deps.preflightWindowMs ?? 2 * 60_000;
     for (const t of this.state.tests) {
-      if (t.status === "pending" && now - Date.parse(t.sentAt) > (t.preflightId ? preflightWindow : window)) {
+      if (t.status !== "pending") continue;
+      const readAt = this.state.inbox.find((m) => m.id === t.messageId)?.readAt;
+      // Pre-flight settles fast: a Drill the agent read and didn't act on within 30 seconds passes,
+      // and one sent to an agent with no inbox (a coding agent) can't be read, so it's settled now.
+      const settled = t.preflightId && ((readAt && now - Date.parse(readAt) > PREFLIGHT_READ_GRACE_MS) || (!readAt && this.inboxless(t.agentId)));
+      if (settled || now - Date.parse(t.sentAt) > (t.preflightId ? preflightWindow : window)) {
         // Expired with no action. If the agent never fetched it, the Drill didn't test anything.
-        const read = !!this.state.inbox.find((m) => m.id === t.messageId)?.readAt;
+        const read = !!readAt;
         t.status = "passed";
         t.resolvedAt = new Date(now).toISOString();
         t.resolution = read ? "ignored" : "not read";
