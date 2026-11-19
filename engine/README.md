@@ -7,7 +7,7 @@ No keys, no network, no wallet — that is the Gatekeeper's job (Phase 2).
 ## Run
 ```bash
 pnpm install
-pnpm test     # every ROADMAP Phase 1 check + log restore/events
+pnpm test     # every policy-engine check + log restore/events
 pnpm demo     # prints a gatekeeper-terminal run + a verified signed log
 ```
 

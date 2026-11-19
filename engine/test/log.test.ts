@@ -18,7 +18,7 @@ function seededLog() {
   return log;
 }
 
-describe("signed tamper-evident log (ROADMAP.md: edit an old entry -> chain check fails)", () => {
+describe("signed tamper-evident log (edit an old entry -> chain check fails)", () => {
   it("a clean chain verifies", () => {
     const log = seededLog();
     expect(log.length).toBe(3);

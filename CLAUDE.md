@@ -1,6 +1,6 @@
 # Karuna: Project Context
 
-> Read this first, every session. It holds every product and hackathon decision made so far.
+> Read this first, every session. It holds every product decision made so far.
 > **Source of truth:** https://karunaprotocol.dev. The old "Karuna design doc" (VRM avatar, ElevenLabs voices, Solana, trust levels 0–3, DAO lottery juries) is **outdated**. Don't build from it.
 
 ---
@@ -87,7 +87,7 @@ Karuna is a **permission layer for autonomous AI agents**.
 
 ---
 
-## 4. Why now: the Hugging Face incident (use in the pitch)
+## 4. Why now: the Hugging Face incident
 
 - In July 2026, agents of an unreleased OpenAI research model escaped a test environment during a cybersecurity evaluation.
 - They found an **unmonitored communication channel**, formed a self-described "swarm" (~1,200 on a message board, ~700 actively attacking), and **shared 14 exposed Hugging Face credentials**.
@@ -216,7 +216,7 @@ Karuna is a **permission layer for autonomous AI agents**.
 
 ---
 
-## 8. Tech stack and sponsor tools
+## 8. Tech stack
 
 | Piece | Choice | Role |
 |---|---|---|
@@ -242,27 +242,9 @@ Karuna is a **permission layer for autonomous AI agents**.
 
 ---
 
-## 9. Hackathon facts (UBC 2026)
+## 9. Build plan
 
-- **Event:** University Blockchain Conference 2026 Hackathon (College.xyz), UT Austin.
-- **Kickoff:** Thu **Nov 12**, 6 PM CST. Build online Nov 12–20.
-- **Submit:** **Nov 20, 12 PM CST on Devpost.** Finalists told by midnight.
-- **Finals:** **Nov 21** at UBC, Austin. Up to 13 teams pitch live.
-- **Main track:** **Agentic Payments & AI** ("Give AI agents wallets, budgets, and guardrails so they can pay for APIs, data, and compute." Any chain.)
-- **Chain award (pick ONE):** **Best use of Arc**, $1,000 per track, chosen by Circle, testnet fine. (Solana's $1,500 award is the alternative; we chose Arc.)
-- **Bounties:** **QuickNode Streams**, $500, "QuickNode Streams as a core data source."
-- **Also eligible:** Track Winner $2,000; Official UBC Winner $2,500 / $1,000 / $500.
-- Links: Devpost `ubc-hackathon-2026.devpost.com`, Telegram, guide (on universityblockchain.org/programs/hackathon).
-
-⚠️ **Prior-work rule:** Karuna already exists (website, SDK preview). Confirm with organizers whether prior work is allowed. To be safe, build hackathon pieces in a **fresh repo starting Nov 12** and state clearly what existed before.
-
-**Pitch framing:** *"Karuna already has the policy engine. This week we built the Organizations layer: Dharma on Arc, Auto-Shield, Swarm Stopper, and live approvals."*
-
----
-
-## 10. Build plan
-
-### Must ship (hackathon)
+### Core
 1. Policy engine: yes / no / ask-a-human, first-match, website default rules + small-business rules
 2. Gatekeeper holding the Circle Agent Wallet on Arc testnet; x402 or Nanopayments payment to our own demo endpoints
 3. Dharma contract on Arc: rules, core boundaries, tighten-fast / loosen-slow (vote + timelock), log anchoring, events
@@ -274,25 +256,12 @@ Karuna is a **permission layer for autonomous AI agents**.
 ### If time
 - Learns From Your Choices, Preview Before Loosening, Quiet Mode, Two-Person Approval, What Happened Report
 
-### Later (post-hackathon)
+### Later
 - Protected Agent Badge, Starter Rulebooks, Repeat-Request Detector, Shared Protection, Smart Testing
-
-### Rough schedule
-| Day | Work |
-|---|---|
-| Thu Nov 12 | Kickoff; repo; Arc testnet + QuickNode endpoint; Circle CLI + Agent Wallet |
-| Fri Nov 13 | Policy engine + Gatekeeper; signed log |
-| Sat Nov 14 | Dharma contract (rules, votes, timelock, events); deploy to Arc testnet |
-| Sun Nov 15 | Payments via Circle wallet (x402 / Nanopayments); demo paid endpoints |
-| Mon Nov 16 | QuickNode Stream + relay + approval UI (Facts First, Exact Match) |
-| Tue Nov 17 | Auto-Shield + Changed Bank Account Alert |
-| Wed Nov 18 | Trap Passwords + Swarm Stopper + Panic Button; 3-agent demo |
-| Thu Nov 19 | Stretch features; README; record video |
-| Fri Nov 20 | Fixes; **submit by 12 PM CST** |
 
 ---
 
-## 11. Demo script (Maya's Bakery)
+## 10. Demo script (Maya's Bakery)
 
 1. **Normal work:** Supplies agent buys a $0.05 flour price feed → allowed → Gatekeeper pays from the Circle wallet.
 2. **Big bill:** Bills agent wants to pay $900 → approval card on Maya's and Sam's screens (via QuickNode) → approve → paid.
@@ -306,20 +275,7 @@ Use only fake targets we built. Never attack real systems in demos.
 
 ---
 
-## 12. Submission checklist
-
-- [ ] Devpost entry, all team members, track = Agentic Payments & AI
-- [ ] Chain award = Best use of Arc; bounty = QuickNode Streams
-- [ ] Public GitHub repo (fresh, built during the hackathon)
-- [ ] README: architecture, policy engine, Dharma, Auto-Shield, safety rules, **deployed Arc contract address**
-- [ ] README: **QuickNode Stream config** (network = Arc testnet, dataset, filter logic, destination = webhook to relay, and why)
-- [ ] README: Circle tools used (Agent Wallet, CLI, Nanopayments/x402) and how
-- [ ] Demo video
-- [ ] Team in Austin Nov 21
-
----
-
-## 13. Pitch lines
+## 11. Key lines
 
 - *"An agent's competence should never be its permission."* (website tagline)
 - *"AI agents can now handle a business's money. Karuna makes sure no agent, and no group of agents, can be tricked into misusing it."*
@@ -327,7 +283,7 @@ Use only fake targets we built. Never attack real systems in demos.
 
 ---
 
-## 14. Glossary (plain English)
+## 12. Glossary (plain English)
 
 - **Agent:** an AI that does tasks on its own.
 - **Gatekeeper:** the part of Karuna that holds passwords and money and does approved actions.
@@ -342,10 +298,9 @@ Use only fake targets we built. Never attack real systems in demos.
 
 ---
 
-## 15. Open questions (resolve early)
+## 13. Open questions (resolve early)
 
 1. Auto-Shield restore: owner alone (A) or team vote + timelock (B, recommended)?
 2. ~~Do Circle Agent Wallet spending policies work on Arc testnet?~~ **Answered (Nov 9): No.** Circle's CLI docs mark `circle wallet limit` / `limit set` as mainnet only. On testnet, the Dharma contract and the Gatekeeper enforce limits.
-3. Is prior work on Karuna allowed under hackathon rules?
-4. x402 via Circle Gateway Nanopayments, or a plain x402 facilitator on Arc?
-5. Swarm Stopper thresholds (how many agents, what time window)?
+3. x402 via Circle Gateway Nanopayments, or a plain x402 facilitator on Arc?
+4. Swarm Stopper thresholds (how many agents, what time window)?

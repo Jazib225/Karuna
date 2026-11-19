@@ -1,4 +1,4 @@
-# Narrower by Default — hackathon build plan
+# Narrower by Default — build plan
 
 Every new person and agent starts with less power than whoever set it up, and every change shows whether it narrows or widens what is allowed.
 

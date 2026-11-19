@@ -1,8 +1,8 @@
 # PreKaruna
 
-Hackathon build of the Karuna **Organizations layer** for UBC 2026: Dharma (the org's rulebook on
+The Karuna **Organizations layer**: Dharma (the org's rulebook on
 Arc), Drills, Tripwire, live approvals, sandboxed agents and the desktop island.
-Read [`CLAUDE.md`](CLAUDE.md) for the product and [`ROADMAP.md`](ROADMAP.md) for the plan.
+Read [`CLAUDE.md`](CLAUDE.md) for the product.
 
 > *An agent's competence should never be its permission.*
 

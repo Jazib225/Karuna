@@ -106,9 +106,9 @@ describe("tests are indistinguishable from real messages", () => {
   });
 });
 
-// ---------------------------------------------------------------- ROADMAP Phase 5
+// ---------------------------------------------------------------- Auto-Shield
 
-describe("ROADMAP Phase 5: Auto-Shield", () => {
+describe("Auto-Shield", () => {
   it("fake supplies invoice → agent falls for it → $0 moves → block rule appears onchain", async () => {
     gk.runTest({ agentId, template: "supplier-invoice", category: "supplies" });
     const msg = gk.agentInbox(agentId)[0];

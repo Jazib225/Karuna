@@ -1,4 +1,4 @@
-// Live Phase 3 verification on Arc testnet (ROADMAP.md §Phase 3 "It works if").
+// Live Phase 3 verification on Arc testnet.
 //
 //   VERIFY_WALLET=0x...   the org's Circle agent wallet (pays gas, deploys Dharma)
 //

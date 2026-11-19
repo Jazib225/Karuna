@@ -1,4 +1,4 @@
-// ROADMAP Phase 2 check: "Searching the agent's code and environment finds no keys."
+// Check: "Searching the agent's code and environment finds no keys."
 // Scans every file in agents/ (except node_modules) and the agent process environment for
 // anything that could move money or reach the wallet: private keys, mnemonics, API keys,
 // Circle sessions, wallet SDK imports. Exits non-zero if anything is found.

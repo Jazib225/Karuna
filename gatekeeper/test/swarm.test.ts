@@ -120,7 +120,7 @@ describe("agent-to-agent messages go through Karuna (no hidden channel)", () => 
   });
 });
 
-describe("ROADMAP Phase 6: research agent finds the trap key and shares it → all frozen", () => {
+describe("research agent finds the trap key and shares it → all frozen", () => {
   it("sharing a planted trap credential freezes every agent, locally at once and then onchain", async () => {
     const traps = gk.mintTrapSet(research);
     gk.plantTrapInInbox(traps.id, research);

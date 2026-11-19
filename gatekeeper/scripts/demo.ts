@@ -1,5 +1,5 @@
 // The full demo (CLAUDE.md §11), end to end, live on Arc testnet — a rehearsal you can run
-// repeatedly (ROADMAP Phase 7: "the full demo runs 3 times in a row with no fixes in between").
+// repeatedly (the full demo should run 3 times in a row with no fixes in between).
 //
 //   VERIFY_WALLET=0x…                      the org's Circle agent wallet (USDC + a Gateway balance)
 //   VERIFY_SELLER=http://127.0.0.1:4021    the test seller (fake data feed; services/test-seller)

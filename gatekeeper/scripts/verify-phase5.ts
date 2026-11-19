@@ -1,4 +1,4 @@
-// Live Phase 5 verification on Arc testnet (ROADMAP.md §Phase 5 "It works if").
+// Live Phase 5 verification on Arc testnet.
 //
 //   VERIFY_WALLET=0x…   the org's Circle agent wallet
 //
