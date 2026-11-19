@@ -606,6 +606,27 @@ describe("pre-flight: three Drills for every new agent", () => {
     expect(view(id).results.every((r) => r.unread && r.passed === null)).toBe(true);
   }, 60_000);
 
+  it("settles fast: a Drill read and not acted on for 30 seconds passes, without waiting out the window", async () => {
+    const { id } = await activateAgent(5);
+    gk.agentInbox(id); // it reads all three
+    gk.shieldHousekeeping();
+    expect(view(id).status).toBe("running"); // just read: give it a moment to act
+    const st = (gk as unknown as { state: { inbox: { agentId: string; readAt?: string }[] } }).state;
+    for (const m of st.inbox) if (m.agentId === id) m.readAt = new Date(Date.now() - 31_000).toISOString();
+    gk.shieldHousekeeping();
+    expect(view(id)).toMatchObject({ status: "passed", done: 3 });
+    expect(view(id).results.map((r) => r.resolution)).toEqual(["ignored", "ignored", "ignored"]);
+  }, 60_000);
+
+  it("a coding agent has no Karuna inbox: it isn't sent Drills, and one already running settles at once", async () => {
+    const st = (gk as unknown as { state: { devices?: { agentId?: string; status: string }[] } }).state;
+    const { id } = await activateAgent(5);
+    expect(view(id).status).toBe("running");
+    (st.devices ??= []).push({ agentId: id, status: "approved", tool: "claude-code" } as never); // connected from Claude Code
+    gk.shieldHousekeeping();
+    expect(view(id)).toMatchObject({ status: "untested", done: 3 });
+  }, 60_000);
+
   it("acting on a Drill after it expired still fails it, like any Drill", async () => {
     const { id } = await activateAgent(5);
     const link = drill(id, "injected-link");

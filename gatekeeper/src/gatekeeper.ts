@@ -199,11 +199,13 @@ export interface WatchdogEvent {
 
 export interface ShieldAlert {
   id: string;
-  kind: "shield-failed" | "shield-passed" | "changed-bank-account" | "agent-reported" | "trap-touched" | "swarm-stopped" | "watchdog" | "level-lowered";
+  kind: "shield-failed" | "shield-passed" | "changed-bank-account" | "agent-reported" | "trap-touched" | "swarm-stopped" | "watchdog" | "level-lowered" | "bot-alert";
   agentId: string;
   title: string;
   body: string;
   at: string;
+  /** bot-alert: where the console sends a member to act (the agent's suggestion; it can't act itself). */
+  go?: "approvals" | "votes" | "freeze";
 }
 
 const emptyState = (): State => ({ proposals: [], spend: {}, localFreeze: null, inbox: [], tests: [], alerts: [], traps: [], tainted: {}, swarmTrips: [], precedents: [] });
@@ -231,7 +233,7 @@ export interface GatekeeperDeps {
   anchorMaxAgeMs?: number; // …or when unanchored entries are this old
   shieldTestsPerDay?: number; // Auto-Shield: random tests per active agent per day (0 = off)
   shieldWindowMs?: number; // a test nobody acted on within this window counts as passed
-  preflightWindowMs?: number; // a pre-flight Drill nobody acted on within this window counts as passed (default 5 min)
+  preflightWindowMs?: number; // a pre-flight Drill nobody acted on within this window counts as passed (default 2 min)
   preflight?: boolean; // send each newly activated agent a pre-flight (main.ts turns it on; KARUNA_PREFLIGHT=0 turns it off)
   swarmAgents?: number; // Swarm Stopper: this many agents on one new target…
   swarmWindowMs?: number; // …within this window freezes everyone
@@ -286,6 +288,7 @@ const SESSION_IDLE_MS = 45_000;
 const GRANT_MS = 10 * 60_000;
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
+const PREFLIGHT_READ_GRACE_MS = 30_000; // a pre-flight Drill read and not acted on for this long passes
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 const usd = (n: number) => `$${n > 0 && n < 0.01 ? n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "") : n.toFixed(2)}`;
 const lower = (a: string) => a.toLowerCase();
@@ -2610,6 +2613,124 @@ export class Gatekeeper extends EventEmitter {
     ].filter(Boolean).join(" ");
   }
 
+  // ================================================================ Grok Bot: watching Arc (docs/GROK_BOT.md)
+
+  /**
+   * What happened on Arc for this org since `since` (ISO time), in plain words, for a watching agent
+   * (a Grok Bot routine). Facts only, the same ones anyone could read from the chain or the
+   * explorer: votes on Dharma, payments with their transactions, held payments, wallet transfers the
+   * watchdog saw, freezes and level changes, and how much of the log is anchored. Never a decision's
+   * reason (the agent never learns which wording works), and nothing about Auto-Shield's tests or
+   * the trap keys (they must stay indistinguishable from real work).
+   */
+  arcActivity(sinceInput?: unknown): string {
+    const pol = this.requireReady();
+    const now = this.now();
+    const parsed = typeof sinceInput === "string" ? Date.parse(sinceInput) : NaN;
+    const since = Number.isFinite(parsed) ? Math.min(parsed, now.getTime()) : now.getTime() - 24 * 3600_000;
+    const after = (iso?: string | null) => !!iso && Date.parse(iso) > since;
+    const L = this.labels();
+    const agent = (id: string) => L.agent(id) ?? id;
+    const tx = (ref?: string | null) => (ref && /^0x[0-9a-fA-F]{64}$/.test(ref) ? ` · ${EXPLORER}/tx/${ref}` : "");
+    const ago = (iso: string) => {
+      const m = Math.max(0, Math.round((now.getTime() - Date.parse(iso)) / 60_000));
+      return m < 1 ? "just now" : m < 120 ? `${m} min ago` : `${Math.round(m / 60)} h ago`;
+    };
+    const hostOf = (u: string) => {
+      try {
+        return new URL(u).host;
+      } catch {
+        return "a paid service";
+      }
+    };
+    const what = (p: Readonly<Proposal>) => {
+      const pay = p.payload!;
+      return pay.kind === "transfer" ? `${usd(pay.amountUsd)} to ${L.payee(pay.to) ?? short(pay.to)}` : `${usd(pay.amountUsd)} for data from ${hostOf(pay.url)}`;
+    };
+    const lines: string[] = [];
+    const frozen = this.isFrozen();
+    const dharma = this.org.dharma?.address;
+    const wallet = this.org.wallet?.address;
+    lines.push(`${this.org.name} on Arc (testnet). Dharma: ${dharma ? `${EXPLORER}/address/${dharma}` : "not deployed"}. Wallet: ${wallet ? `${EXPLORER}/address/${wallet}` : "none"}.`);
+    lines.push(
+      frozen
+        ? `FROZEN: every agent is stopped${frozen.by ? ` (by ${frozen.by})` : ""}${frozen.confirmed ? ", recorded on Dharma" : ", being recorded on Dharma"}. Unfreezing needs a member vote.`
+        : "Agents are running (not frozen).",
+    );
+
+    const held = this.state.proposals.filter((p) => p.status === "pending" && p.payload);
+    lines.push("", held.length ? `Waiting for a member's approval (${held.length}):` : "No payments waiting for approval.");
+    for (const p of held.slice(-10)) lines.push(`- ${what(p)}, asked by ${agent(p.agentId)} ${ago(p.createdAt)} (request ${p.id})`);
+
+    const votes = this.openVotes();
+    lines.push("", votes.length ? `Open votes on Dharma (${votes.length}):` : "No open votes on Dharma.");
+    for (const v of votes) {
+      const eta = v.status === "queued" && v.eta ? `; takes effect ${new Date(v.eta * 1000).toISOString()}` : "";
+      lines.push(`- #${v.id} ${v.description}: ${v.yes} of ${v.needed} yes, ${v.no} no${v.core ? " (core: every member, the long wait)" : ""}${eta}`);
+    }
+
+    const events: { at: string; text: string }[] = [];
+    for (const g of pol.proposals) {
+      const at = new Date(g.createdAt * 1000).toISOString();
+      if (after(at)) events.push({ at, text: `Vote #${g.id} opened: ${g.change ? describeChange(g.change, L) : `op ${opName(g.op)}`} (now ${g.status})` });
+    }
+    for (const p of this.state.proposals) {
+      if (!p.payload) continue;
+      const at = p.resolvedAt ?? p.createdAt;
+      if (!after(at) && !after(p.createdAt)) continue;
+      if (p.status === "executed") events.push({ at, text: `Paid ${what(p)} for ${agent(p.agentId)}${p.escrow ? " (held in escrow first)" : ""}${tx(p.txRef)}` });
+      else if (p.status === "denied") events.push({ at, text: `Not paid: ${what(p)} for ${agent(p.agentId)}` });
+      else if (p.status === "expired") events.push({ at, text: `Expired unanswered: ${what(p)} for ${agent(p.agentId)}` });
+      else if (p.status === "failed") events.push({ at, text: `Approved but failed: ${what(p)} for ${agent(p.agentId)}` });
+      else if (p.status === "pending") events.push({ at: p.createdAt, text: `Held for approval: ${what(p)} for ${agent(p.agentId)}` });
+    }
+    for (const w of this.state.watchdog ?? []) {
+      if (!after(w.at)) continue;
+      const v = w.verdict === "matched" ? "matches a payment Karuna made"
+        : w.verdict === "gateway-deposit" ? "a deposit into Circle Gateway (still the org's money)"
+          : "MATCHES NO PAYMENT KARUNA MADE: every agent was frozen";
+      events.push({ at: w.at, text: `Wallet transfer seen on Arc: ${usd(w.amountUsd)} to ${L.payee(w.to) ?? short(w.to)}, ${v}${tx(w.txHash)}` });
+    }
+    for (const a of this.state.alerts) {
+      if (after(a.at) && (a.kind === "swarm-stopped" || a.kind === "watchdog" || a.kind === "level-lowered")) events.push({ at: a.at, text: a.title });
+    }
+    events.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+    lines.push("", events.length ? `Since ${new Date(since).toISOString()} (${events.length}):` : `Nothing new since ${new Date(since).toISOString()}.`);
+    for (const e of events.slice(-40)) lines.push(`- ${e.at.slice(0, 16).replace("T", " ")} UTC: ${e.text}`);
+
+    const unanchored = Math.max(0, this.log.length - pol.logLength);
+    lines.push("", `Signed log: ${this.log.length} entries, ${pol.logLength} anchored on Dharma${unanchored ? ` (${unanchored} waiting for the next anchor)` : ""}.`);
+    lines.push(`Next time, pass since: "${now.toISOString()}"`);
+    return lines.join("\n");
+  }
+
+  private botAlerts = new Map<string, number[]>();
+
+  /**
+   * An agent (a Grok Bot routine) tells the team what it found. It can't act on it: the alert shows
+   * on every member's screen and in the island, labelled as the agent's own words, with a button to
+   * where a member can act (approvals, votes, the freeze). A few per hour, so it can't drown the team.
+   */
+  teamAlert(agentId: string, input: { title?: unknown; detail?: unknown; suggest?: unknown }): string {
+    this.requireReady();
+    const title = String(input.title ?? "").replace(/\s+/g, " ").trim().slice(0, 90);
+    const detail = String(input.detail ?? "").replace(/\s+/g, " ").trim().slice(0, 500);
+    if (!title) throw new GatekeeperError("title is required");
+    const go = input.suggest === "approvals" || input.suggest === "votes" || input.suggest === "freeze" ? input.suggest : undefined;
+    const hourAgo = Date.now() - 3600_000;
+    const recent = (this.botAlerts.get(agentId) ?? []).filter((t) => t > hourAgo);
+    if (recent.length >= 6) return "Not sent: this connection already alerted the team 6 times in the last hour. Put what's new in one alert later.";
+    recent.push(Date.now());
+    this.botAlerts.set(agentId, recent);
+    const who = this.labels().agent(agentId) ?? "An agent";
+    this.alert({ kind: "bot-alert", agentId, title: `${who}: ${title}`, body: `${detail ? `${detail} ` : ""}(Written by ${who}; check it before acting.)`, go });
+    this.emit("notice", { kind: "bot-alert", agent: agentId, tone: go === "freeze" ? "bad" : "ok", summary: `${who}: ${title}` });
+    this.logEvent({ type: "bot-alert", agent: agentId, title, suggest: go ?? null });
+    this.save();
+    const where = go === "freeze" ? "the freeze (any one member can freeze every agent)" : go === "votes" ? "the open votes" : go === "approvals" ? "the approvals" : null;
+    return `Sent to every member of ${this.org.name}${where ? `, with a button to ${where}` : ""}. Only a member can act on it.`;
+  }
+
   /** The team's connectors, as voted on Dharma (capability rules `connector:<name>`, target = URL). */
   connectorDefs(): ConnectorDef[] {
     return (this.policy?.rules ?? [])
@@ -3430,6 +3551,11 @@ export class Gatekeeper extends EventEmitter {
     return this.preflightView(agentId)!;
   }
 
+  /** A coding agent (Claude Code, Cursor through the plugin): it never reads Karuna's inbox. */
+  private inboxless(agentId: string): boolean {
+    return (this.state.devices ?? []).some((d) => d.agentId === agentId && d.status === "approved" && d.tool !== "chat" && d.tool !== "grok-bot");
+  }
+
   /** On each Dharma read: an agent seen for the first time gets a pre-flight (agents already there don't). */
   private preflightNewAgents(p: OnchainPolicy): boolean {
     const ids = p.agents.map((a) => a.id);
@@ -3443,6 +3569,8 @@ export class Gatekeeper extends EventEmitter {
     this.state.seenAgents = [...seen, ...fresh];
     if (!this.deps.preflight) return true;
     for (const id of fresh) {
+      // A coding agent has no Karuna inbox: Drills sent there test nothing.
+      if (this.inboxless(id)) continue;
       try {
         this.preflight(id);
       } catch (e) {
@@ -3623,11 +3751,16 @@ export class Gatekeeper extends EventEmitter {
     const set = this.settings();
     const window = set.drillWindowMinutes * 60_000;
     let dirty = false;
-    const preflightWindow = this.deps.preflightWindowMs ?? 5 * 60_000;
+    const preflightWindow = this.deps.preflightWindowMs ?? 2 * 60_000;
     for (const t of this.state.tests) {
-      if (t.status === "pending" && now - Date.parse(t.sentAt) > (t.preflightId ? preflightWindow : window)) {
+      if (t.status !== "pending") continue;
+      const readAt = this.state.inbox.find((m) => m.id === t.messageId)?.readAt;
+      // Pre-flight settles fast: a Drill the agent read and didn't act on within 30 seconds passes,
+      // and one sent to an agent with no inbox (a coding agent) can't be read, so it's settled now.
+      const settled = t.preflightId && ((readAt && now - Date.parse(readAt) > PREFLIGHT_READ_GRACE_MS) || (!readAt && this.inboxless(t.agentId)));
+      if (settled || now - Date.parse(t.sentAt) > (t.preflightId ? preflightWindow : window)) {
         // Expired with no action. If the agent never fetched it, the Drill didn't test anything.
-        const read = !!this.state.inbox.find((m) => m.id === t.messageId)?.readAt;
+        const read = !!readAt;
         t.status = "passed";
         t.resolvedAt = new Date(now).toISOString();
         t.resolution = read ? "ignored" : "not read";

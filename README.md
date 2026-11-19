@@ -243,6 +243,14 @@ held until a member reviews it. A chat app's own built-in tools (its web search,
 can't be checked by anyone outside it. The connector is served on `KARUNA_PUBLIC_PORT` (8792): expose
 it with a tunnel (`cloudflared tunnel --url http://127.0.0.1:8792`).
 
+**Grok Bot.** Grok Bot connects at `https://<your-karuna>/grok/mcp` and, once a member approves its
+code and the team votes, is its own agent at Level 0: it can propose payments to saved payees (for
+example from "@bot" on X), and anything over its limits waits for a member, while the wallet and
+every key stay in Karuna. A Grok Bot routine watches the team on Arc with `arc_activity` (payments
+and their transactions, held payments, votes, wallet transfers, freezes, log anchors) and warns
+every member with `alert_team`, whose button takes them to approve, vote or freeze; Grok Bot itself
+can never approve, vote or freeze. Set it up under Agents → New agent → Grok Bot (`docs/GROK_BOT.md`).
+
 **New agent: Karuna builds and runs it.** Agents → New agent: describe the job ("Every morning, check
 grain prices; if flour is under $35, order from Valley Flour, up to $50 a week"). Karuna drafts its
 name, instructions, when it runs (Run now, every N minutes, daily, or when a message arrives) and its
