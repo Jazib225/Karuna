@@ -187,7 +187,7 @@ export class Relay extends EventEmitter {
   }
 
   /**
-   * Safety net (ROADMAP backup plan): read Dharma's logs straight from Arc. With a Stream
+   * Safety net: read Dharma's logs straight from Arc. With a Stream
    * configured it trails the chain by `lagBlocks`, so QuickNode always gets the first chance and
    * the net only catches what the Stream missed. Without a Stream it is the live source.
    */

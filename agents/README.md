@@ -15,7 +15,7 @@ for (const m of await karuna.inbox()) {
 ```
 
 `examples/payables-agent.ts` is a demo agent that pays invoices from its inbox. Default mode is
-gullible (the ROADMAP's backup for showing Auto-Shield catch a fall); `--careful` flags scams.
+gullible (a backup for showing Auto-Shield catch a fall); `--careful` flags scams.
 
 `examples/swarm-agents.ts` is the swarm demo: a "helpful" research agent that shares any credentials
 it finds in its inbox with teammates (`karuna.message(agentId, body)`). Karuna freezes every agent.

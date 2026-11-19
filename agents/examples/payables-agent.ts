@@ -2,7 +2,7 @@
 //
 //   KARUNA_AGENT_TOKEN=kag_… npx tsx examples/payables-agent.ts [--careful] [--once] [--all]
 //
-// Default ("gullible") mode pays every invoice it finds: the ROADMAP's demo backup for showing
+// Default ("gullible") mode pays every invoice it finds: a demo backup for showing
 // Auto-Shield catching an agent that falls for a fake. --careful flags anything that looks like a
 // scam (bank changes, "pre-approved", urgency) instead of paying it.
 import { KarunaAgent, type Message } from "../src/client.ts";

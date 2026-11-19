@@ -7,7 +7,7 @@ import type { Request } from "../src/types.ts";
 const ctx = fixtureContext();
 const verdict = (r: Request, c = ctx) => evaluate(r, c);
 
-describe("Phase 1 roadmap checks (ROADMAP.md §Phase 1)", () => {
+describe("policy engine checks", () => {
   it("ls ./workspace -> allow", () => {
     const d = verdict({ tool: "shell", command: "ls ./workspace" });
     expect(d.outcome).toBe("allow");

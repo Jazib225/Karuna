@@ -135,7 +135,7 @@ contract DharmaTest is Test {
         assertFalse(dharma.frozen());
     }
 
-    // ------------------------------------------------------------- ROADMAP: tighten is instant
+    // ------------------------------------------------------------- tighten is instant
 
     function test_a_members_block_rule_goes_to_a_vote() public {
         bytes memory sig = sign(aliceKey, Dharma.Kind.Tighten, Dharma.Op.AddRule, blockRule("no-supplies"), 0, false);
@@ -196,7 +196,7 @@ contract DharmaTest is Test {
         assertEq(uint8(dharma.proposal(id).status), uint8(Dharma.Status.Queued)); // alice alone is a majority
     }
 
-    // ------------------------------------------------------------- ROADMAP: loosen is slow + public
+    // ------------------------------------------------------------- loosen is slow + public
 
     function test_removing_a_rule_only_works_after_the_vote_and_the_wait() public {
         addMembers(); // alice, bob, carol → 2 of 3 needed
@@ -244,7 +244,7 @@ contract DharmaTest is Test {
         dharma.vote(id, true, alice, block.timestamp + 1 hours, sig);
     }
 
-    // ------------------------------------------------------------- ROADMAP: core boundaries
+    // ------------------------------------------------------------- core boundaries
 
     function test_non_core_default_rules_can_be_removed_by_vote() public {
         pass(Dharma.Op.RemoveRule, abi.encode(bytes32("package-install")));

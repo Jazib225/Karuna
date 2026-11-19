@@ -1,4 +1,4 @@
-// Live Phase 2 verification on Arc testnet (ROADMAP.md §Phase 2 "It works if"), on top of Dharma.
+// Live Phase 2 verification on Arc testnet, on top of Dharma.
 //
 //   VERIFY_WALLET=0x...                    the org's Circle agent wallet (Gateway balance > 0)
 //   VERIFY_SELLER=http://127.0.0.1:4021    the running test seller (services/test-seller)

@@ -3,7 +3,7 @@
 We use QuickNode twice:
 1. **An RPC endpoint** on Arc testnet — a faster, private node for the Gatekeeper and scripts (Phase 0).
 2. **One Stream** on Arc testnet, `karuna-events` (the free plan allows one), delivering to our relay's
-   signed webhook (the $500 bounty). It is **backfilled from Dharma's deploy block**, then live, and its
+   signed webhook. It is **backfilled from Dharma's deploy block**, then live, and its
    filter keeps Dharma's events (approval pop-ups, and every agent's record for trust levels) and USDC
    `Transfer` logs out of the org's wallet (the watchdog: each must match a payment Karuna made, or
    every agent freezes).
@@ -65,7 +65,7 @@ things only you can do, then one command:
 (the relay's safety net, the setup script) use Arc's public RPC; set `ARC_LOGS_RPC_URL` to override.
 Everything else uses your QuickNode endpoint (`ARC_RPC_URL`).
 
-### The Stream's config (for the submission README)
+### The Stream's config
 | Setting | Value | Why |
 |---|---|---|
 | Network | `arc-testnet` | Dharma lives on Arc |

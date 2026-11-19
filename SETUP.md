@@ -21,7 +21,6 @@ The wallet an organization uses is chosen in the console at setup; it is not con
 
 ## Still to do
 - QuickNode Arc testnet endpoint → put in `.env` as `ARC_RPC_URL` (secret token; don't paste in chat). Public RPC works until then.
-- Nov 12 kickoff: ask organizers whether prior work on Karuna is allowed.
 
 ## Commands
 ```bash
