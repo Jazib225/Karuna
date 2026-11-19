@@ -4,6 +4,8 @@
 #   powershell -ExecutionPolicy Bypass -File start-karuna.ps1
 
 $root = $PSScriptRoot
+# Run from the checkout, so pnpm reads this repo's package.json and not one in a parent folder.
+Set-Location $root
 $logs = Join-Path $root "logs"
 New-Item -ItemType Directory -Force $logs | Out-Null
 
