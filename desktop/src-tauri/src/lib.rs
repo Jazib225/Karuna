@@ -9,6 +9,7 @@
 mod island;
 mod pipe;
 mod tray;
+mod voice;
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -96,12 +97,21 @@ fn island_open_main(app: AppHandle) {
     open_main(&app);
 }
 
+/// The wake phrase was heard: bring the island on screen (like the hotkey) so its panel shows.
+#[tauri::command]
+fn island_show(app: AppHandle, state: tauri::State<'_, Arc<IslandState>>) {
+    if !state.visible.load(Ordering::SeqCst) {
+        island::show(&app);
+    }
+}
+
 #[tauri::command]
 fn gk_status(gk: tauri::State<'_, Gatekeeper>) -> Value {
     json!({
         "connected": gk.connected.load(Ordering::SeqCst),
         "paused": gk.paused.load(Ordering::SeqCst),
         "pending": gk.pending_events.lock().unwrap().values().cloned().collect::<Vec<_>>(),
+        "votes": gk.open_votes.lock().unwrap().values().cloned().collect::<Vec<_>>(),
     })
 }
 
@@ -151,12 +161,14 @@ pub fn run() {
         .manage(tray::TrayItems::default())
         .manage(Signing::default())
         .manage(Arc::new(IslandState::default()))
-        .invoke_handler(tauri::generate_handler![island_rects, island_drag, island_open_main, gk_status, approval_decision])
+        .invoke_handler(tauri::generate_handler![island_rects, island_drag, island_open_main, island_show, gk_status, approval_decision])
         .setup(|app| {
             let handle = app.handle().clone();
             tray::build(&handle)?;
             pipe::start(handle.clone());
             island::start_cursor_poll(handle.clone());
+            voice::start_hotkey(handle.clone());
+            voice::allow_island_microphone(&handle);
 
             // The console signed a decision: forward it only if it still matches what we asked for
             // and what's pending.

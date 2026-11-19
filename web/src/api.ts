@@ -200,6 +200,8 @@ export interface Snapshot {
     timelock: number; // normal wait, seconds
     coreTimelock: number; // core wait, seconds
     version: number;
+    /** Dharma v7: who set the org up (removes a teammate without a vote, after the core wait). */
+    host?: string | null;
     required: number;
     thresholdUsd: number;
     policyVersion: number;
@@ -345,6 +347,21 @@ export async function api<T = unknown>(path: string, body?: unknown, method?: st
   }
   if (!res.ok) throw new ApiError(data.error ?? `Gatekeeper returned ${res.status}`);
   return data as T;
+}
+
+/** POST that returns audio (Karuna Voice's spoken alerts), with this console's session. */
+export async function apiAudio(path: string, body: unknown): Promise<{ audio: ArrayBuffer; said: string }> {
+  const token = await sessionToken();
+  const res = await fetch(`/api${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...(token ? { "x-karuna-session": token } : {}) },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new ApiError(data.error ?? `Gatekeeper returned ${res.status}`);
+  }
+  return { audio: await res.arrayBuffer(), said: decodeURIComponent(res.headers.get("x-karuna-said") ?? "") };
 }
 
 /** What this person's role allows (from the snapshot). Anyone with no role can do nothing. */

@@ -9,3 +9,6 @@ broadcast/
 *.log
 .DS_Store
 gatekeeper/data.*/
+
+# The wake phrase's offline speech model (pnpm --dir desktop wake:model downloads it)
+web/public/models/

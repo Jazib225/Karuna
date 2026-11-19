@@ -1,7 +1,19 @@
 # Karuna Voice: island expansion + ElevenLabs
 
-> **Status (Nov 2026):** planned, not built. Targets the ElevenLabs bounty (voice central, not an
-> add-on). Main track is unchanged: Agentic Payments and AI on Arc.
+> **Status (Nov 19, 2026):** built on the `eleven-labs` branch (steps 1–5 below); the demo
+> recording (step 6) and Grok Bot are still to do. Targets the ElevenLabs bounty (voice central,
+> not an add-on). Main track is unchanged: Agentic Payments and AI on Arc.
+>
+> **Built differently from this plan, on purpose:**
+> - The model is never told the spoken code. `approve` puts the code on screen and tells the model
+>   only "a code is on the screen", so the agent can't say it aloud (where the mic could hear it)
+>   and nothing an agent wrote can contain it.
+> - `freeze_all` is `pause_all` (`POST /pause`, as planned): instant and local. The onchain
+>   Freeze stays a click in the console. `resume_all` needs the code.
+> - The hotkey toggles the conversation (press to start, press again to end) instead of
+>   hold-to-talk. It's registered with Windows' RegisterHotKey, so no extra plugin.
+> - Chimes live in `web/public/sounds/` (the island's public folder), with built-in tones as a fallback.
+> - `GET /voice/session` is `POST`, so the console always attaches its signed session.
 
 > Goal: **run your organization by talking to the island.** Karuna tells you what your agents
 > want, out loud, and you answer out loud. Voice can always make things safer at once; it can

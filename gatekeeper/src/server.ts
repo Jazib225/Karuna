@@ -16,6 +16,7 @@ import { WalletError, type WalletBackend } from "./wallet.ts";
 import type { EgressProxy } from "./proxy.ts";
 import type { SecretStore } from "./secrets.ts";
 import type { Accounts } from "./accounts.ts";
+import { Voice, VoiceError, heldSentence, reasonSentence, voteSentence } from "./voice.ts";
 
 /** What the agent API needs to hand out sandbox runs. Absent = sandboxes not available. */
 export interface SandboxDeps {
@@ -52,6 +53,7 @@ function fail(res: ServerResponse, e: unknown) {
   // session: true tells the console to sign a new session and try once more.
   if (e instanceof GatekeeperError) return send(res, e.status, { error: e.message, ...(e.message === SESSION_ENDED ? { session: true } : {}) });
   if (e instanceof ConfigError) return send(res, 400, { error: e.message });
+  if (e instanceof VoiceError) return send(res, e.status, { error: e.message });
   if (isTransient(e)) return send(res, 503, { error: "The Arc RPC is busy (rate limited). Try again in a moment — or set ARC_RPC_URL to your QuickNode endpoint." });
   console.error("gatekeeper error:", scrub(e));
   send(res, 500, { error: "Internal error" });
@@ -204,7 +206,41 @@ export function agentApi(gk: Gatekeeper, sandbox?: SandboxDeps): Server {
 export function consoleApi(
   gk: Gatekeeper, wallet: WalletBackend, consoleToken: string, secrets?: SecretStore, caPem?: string,
   accounts: Accounts | null = null,
+  voice: Voice | null = null,
 ): Server {
+  const voiceNames = () => ({
+    agent: (id: string) => gk.org.labels.agents[id] ?? id.replace(/[-_]+/g, " "),
+    payee: (a: string) => gk.org.labels.payees[a.toLowerCase()] ?? null,
+  });
+  /** Karuna Voice (docs/VOICE_PLAN.md): only for a signed-in member's console session. */
+  async function voiceRoute(res: ServerResponse, method: string, path: string, body: Record<string, unknown>, me: string | null): Promise<boolean> {
+    if (method === "GET" && path === "/voice/config") return (send(res, 200, voice ? voice.status() : { configured: false, conversation: false, alerts: false }), true);
+    if (!path.startsWith("/voice/")) return false;
+    if (!voice) throw new GatekeeperError("Voice isn't set up on this Gatekeeper.", 503);
+    if (!me) throw new GatekeeperError("Sign in to the console to use voice.", 401);
+    if (method === "POST" && path === "/voice/session") return (send(res, 200, await voice.conversationToken()), true);
+    if (method === "POST" && path === "/voice/speak") {
+      // Only Karuna's own sentence for one held request or one open vote: never free text.
+      const keys = Object.keys(body).filter((k) => body[k] !== undefined);
+      if (keys.some((k) => !["id", "reason", "vote"].includes(k))) throw new GatekeeperError("Voice only speaks a held request or an open vote, never free text.", 400);
+      let text: string;
+      if (body.vote !== undefined) {
+        const v = gk.openVotes().find((x) => x.id === Number(body.vote));
+        if (!v || !Number.isInteger(Number(body.vote))) throw new GatekeeperError("That vote isn't open.", 404);
+        text = voteSentence(v);
+      } else {
+        const id = String(body.id ?? "");
+        const p = gk.recentProposals().find((x) => x.id === id);
+        if (!p || p.status !== "pending") throw new GatekeeperError("That request isn't waiting for anyone.", 404);
+        text = body.reason === true ? reasonSentence(p, voiceNames()) : heldSentence(p, voiceNames(), gk.approvalsNeeded(p as never));
+      }
+      const audio = await voice.speak(text);
+      res.writeHead(200, { "content-type": "audio/mpeg", "cache-control": "no-store", "x-karuna-said": encodeURIComponent(text) });
+      res.end(audio);
+      return true;
+    }
+    return false;
+  }
   let walletCache: { at: number; value: unknown } | null = null;
 
   return createServer(async (req, res) => {
@@ -277,6 +313,7 @@ export function consoleApi(
       const me = gk.sessionMember(String(req.headers["x-karuna-session"] ?? "") || undefined);
       const gate = GATED.find(([gm, gp]) => gm === method && gp.test(path));
       if (gate) gk.requirePermission(me, gate[2]);
+      if (await voiceRoute(res, method, path, body, me)) return;
 
       // The Circle wallet, from the console (no terminal): sign in with an emailed code, and get test
       // USDC from Circle's faucet. Before setup anyone at this machine can; after, it needs "wallet".

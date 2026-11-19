@@ -38,6 +38,7 @@ contract DharmaExt is DharmaBase {
         coreTimelock = coreTimelock_;
         thresholdMicroUsd = thresholdMicroUsd_;
         _addMember(firstMember);
+        _host = firstMember; // v7: whoever sets the org up is its host
         for (uint256 i; i < domains_.length; i++) _addDomain(domains_[i]);
 
         // Karuna's default policy, in engine order. Core rules change only by a core (every-member) vote.
@@ -202,6 +203,11 @@ contract DharmaExt is DharmaBase {
     /// @notice The code this org's proxy currently runs (its Dharma half).
     function implementation() external view returns (address) {
         return _implementation();
+    }
+
+    /// @notice v7: the host (who set the org up), or 0 once they're no longer a member.
+    function host() external view returns (address) {
+        return _hostOf();
     }
 
     function members() external view returns (address[] memory) {

@@ -88,7 +88,7 @@ beforeEach(async () => {
 
 describe("trust levels", () => {
   it("a new org runs the current Dharma and agents start at Level 0 with its limits, not the allowance", async () => {
-    expect(gk.policy!.version).toBe(6);
+    expect(gk.policy!.version).toBe(7);
     expect(level()).toBe(0);
     expect(gk.policy!.levelLimits![0]).toEqual({ perPaymentUsd: 0.1, dailyUsd: 1 });
     expect((await gk.propose(agent, { type: "transfer", to: PAYEE, amountUsd: 0.1 })).status).toBe("done");

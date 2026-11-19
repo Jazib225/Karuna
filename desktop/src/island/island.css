@@ -160,3 +160,50 @@ button { font: inherit; }
 
 /* Island turned off in the console's Appearance settings: nothing shows, nothing catches clicks. */
 .island-off .notch, .island-off .floater, .island-off .card, .island-off .dock-hint { display: none !important; }
+
+/* ------------------------------------------------------------------ Karuna Voice */
+.pill-mic {
+  position: relative; overflow: hidden; flex: none; display: grid; place-items: center; width: 26px; height: 26px; margin-left: 4px;
+  border-radius: 999px; border: 1px solid var(--line-2); background: transparent; color: var(--text-2); cursor: pointer;
+  transition: width 420ms var(--ease), background-color 260ms var(--ease), border-color 260ms var(--ease), color 180ms var(--ease), box-shadow 420ms var(--ease);
+}
+.pill-mic:hover { color: var(--text); border-color: var(--mid-2); }
+.pill-mic svg { grid-area: 1 / 1; transition: opacity 180ms ease-out, scale 260ms var(--ease); }
+/* Talking: the mic shrinks away and a line grows out from the middle, then moves with Karuna's
+   voice (wave.ts). Monochrome, in the text colour, with no background of its own. */
+.pill-mic .wave { color: inherit;
+  position: absolute; inset: 0; width: 100%; height: 100%; border-radius: inherit; pointer-events: none;
+  opacity: 0; clip-path: inset(0 50% 0 50%);
+  transition: opacity 200ms ease-out, clip-path 460ms var(--ease);
+}
+.pill-mic.on { width: 88px; border-color: transparent; background: transparent; color: var(--text); }
+.pill-mic.on svg { opacity: 0; scale: .4; }
+.pill-mic.on .wave { opacity: 1; clip-path: inset(0 0 0 0); transition-delay: 90ms, 90ms; }
+@media (prefers-reduced-motion: reduce) { .pill-mic, .pill-mic .wave, .pill-mic svg { transition: none; } }
+.card-mic { margin-left: 8px; width: 28px; height: 28px; }
+.card-mic.on { width: 92px; }
+.voice .eyebrow .card-mic { margin-left: auto; }
+.voice .eyebrow .card-mic + .voice-end { margin-left: 8px; }
+.eyebrow .right:empty { display: none; }
+.eyebrow .right:empty + .card-mic { margin-left: auto; }
+.card.wide { width: 420px; }
+.voice { display: flex; flex-direction: column; gap: 10px; }
+.voice .eyebrow { margin-bottom: 2px; }
+.voice-end {
+  margin-left: auto; height: 24px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--line-2);
+  background: transparent; color: var(--text); font: 500 11px var(--sans); letter-spacing: 0; text-transform: none; cursor: pointer;
+}
+.voice-end:hover { border-color: var(--mid-2); background: var(--hover-wash); }
+.voice-err { margin: 0; font-size: 12.5px; color: #f87171; line-height: 1.45; }
+.transcript { display: flex; flex-direction: column; gap: 8px; max-height: 168px; overflow-y: auto; scrollbar-width: thin; }
+.transcript .line { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 10px; font-size: 13px; line-height: 1.45; }
+.transcript .who { font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); padding-top: 2px; }
+.transcript .line.you .said { color: var(--text-2); }
+.vact { border: 1px solid var(--line-2); border-radius: 12px; padding: 10px 12px; font-size: 12.5px; line-height: 1.45; background: var(--well); }
+.vact.done { border-color: var(--line); color: var(--text-2); }
+.vact.error { border-color: rgba(248, 113, 113, .45); color: #f87171; }
+.vact.code { border-color: var(--text); }
+.vact-say { margin-top: 8px; font-size: 13px; color: var(--text-2); }
+.vact-say b { font-family: var(--mono); font-size: 18px; letter-spacing: .08em; color: var(--text); margin-left: 4px; }
+.vact-note { margin-top: 4px; font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
+:root[data-theme="light"] .voice-err, :root[data-theme="light"] .vact.error { color: #b91c1c; }
