@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import type { Address } from "viem";
 import { isAddr, isNoLimit, decodeChange, describeChange, describeScope, NO_LIMIT_USD, waitText, SETTINGS, settingChange, PERMISSIONS, ALL_PERMISSIONS, STRUCTURES, DELETE_ROLE, MAX_ROLE, ROLE_MEMBER, permissionBits, roleNumber, type Change, type SettingName, type Permission, type RoleDef, type Structure } from "@prekaruna/dharma";
 import { api, roleOf, setSessionSigner, useGatekeeper, type LooseningPreview, type AgentExposure, type Exposure, type AgentView, type AgentDraftView, type Governance, type LogEntry, type Proposal, type Rule, type RunDetail, type RunFileChange, type RunStep, type Schedule, type Snapshot, type WalletInfo } from "./api.ts";
@@ -1686,7 +1687,7 @@ const karuna = new KarunaAgent({
 const r = await karuna.buy(serviceUrl, { maxUsd: 0.01, reason: "why" });
 if (r.status === "pending") await karuna.wait(r.id); // a member decides`}</pre>
         </details>
-        <p className="muted small">Claude Code, Cursor and chat apps don't need a token: they connect under Computers &amp; chats below.</p>
+        <p className="muted small">Claude Code, Cursor and chat apps don't need a token: they connect from the New agent card (Coding agents or Claude chat).</p>
         <button className="btn btn-dark" onClick={onDone}>I've copied it</button>
       </div>
     </div>
@@ -1776,8 +1777,6 @@ function Agents({ ctx }: { ctx: Ctx }) {
           <button className="btn btn-ghost btn-sm" type="submit" disabled={busy}>Propose and get a token</button>
         </form>
       } />
-      <ChatSetup ctx={ctx} />
-      <Computers ctx={ctx} />
       <Connectors ctx={ctx} />
       {s.sandbox.remote && <RemoteRuns ctx={ctx} />}
     </div>
@@ -1787,13 +1786,57 @@ function Agents({ ctx }: { ctx: Ctx }) {
 // ============================================================== payees
 
 /** Rules page: the sites agents may reach (read; Level 2+ may write). */
+/** Whether a folding card is open (default) or folded; remembered per browser. */
+function useFold(id: string): [boolean, () => void] {
+  const key = `karuna.fold.${id}`;
+  const [open, setOpen] = useState(() => {
+    try {
+      return localStorage.getItem(key) !== "closed";
+    } catch {
+      return true;
+    }
+  });
+  const toggle = () =>
+    setOpen((o) => {
+      try {
+        localStorage.setItem(key, o ? "closed" : "open");
+      } catch {
+        /* per-browser convenience only */
+      }
+      return !o;
+    });
+  return [open, toggle];
+}
+
+/** A card header that folds the card: click (or Enter / Space) to hide or show everything under it. */
+function FoldHead({ title, sub, open, toggle, className = "" }: { title: string; sub: ReactNode; open: boolean; toggle: () => void; className?: string }) {
+  return (
+    <div className={`hd fold-hd ${className}`} role="button" tabIndex={0} aria-expanded={open} onClick={toggle}
+      onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), toggle())}>
+      <h2>{title}</h2>
+      <span className="fold-right">{sub}<Icon name="chevron" size={16} className="fold-chev" /></span>
+    </div>
+  );
+}
+
+/** What a folding card hides: always rendered, so opening and folding can slide (see .fold-body). */
+function FoldBody({ open, children }: { open: boolean; children: ReactNode }) {
+  return (
+    <div className={`fold-body${open ? " open" : ""}`} aria-hidden={!open}>
+      <div className="fold-inner">{children}</div>
+    </div>
+  );
+}
+
 function TrustedSites({ ctx }: { ctx: Ctx }) {
   const { s, busy } = ctx;
+  const [open, toggle] = useFold("sites");
   const pol = s.policy!;
   return (
-    <div className="card">
-      <div className="hd"><h2>Trusted sites</h2><span className="sub">{pol.domains.length ? pol.domains.length : "none yet, so agents can't reach the web"}</span></div>
+    <div className={`card${open ? "" : " folded"}`}>
+      <FoldHead title="Trusted sites" open={open} toggle={toggle} sub={<span className="sub">{pol.domains.length ? pol.domains.length : "none yet, so agents can't reach the web"}</span>} />
       {pol.domains.length > 0 && (
+        <FoldBody open={open}>
         <div className="table">
           {pol.domains.map((d) => (
             <div className="tr site-tr" key={d}>
@@ -1803,6 +1846,7 @@ function TrustedSites({ ctx }: { ctx: Ctx }) {
             </div>
           ))}
         </div>
+        </FoldBody>
       )}
     </div>
   );
@@ -1810,11 +1854,13 @@ function TrustedSites({ ctx }: { ctx: Ctx }) {
 
 function Payees({ ctx }: { ctx: Ctx }) {
   const { s, busy } = ctx;
+  const [open, toggle] = useFold("payees");
   const pol = s.policy!;
   return (
-    <div className="card">
-      <div className="hd"><h2>Payees</h2><span className="sub">{pol.payees.length ? pol.payees.length : "none yet, so every payment is denied"}</span></div>
+    <div className={`card${open ? "" : " folded"}`}>
+      <FoldHead title="Payees" open={open} toggle={toggle} sub={<span className="sub">{pol.payees.length ? pol.payees.length : "none yet, so every payment is denied"}</span>} />
       {pol.payees.length > 0 && (
+        <FoldBody open={open}>
         <div className="table">
           {pol.payees.map((r) => (
             <div className="tr payee-tr" key={r.account}>
@@ -1826,6 +1872,7 @@ function Payees({ ctx }: { ctx: Ctx }) {
             </div>
           ))}
         </div>
+        </FoldBody>
       )}
     </div>
   );
@@ -1894,6 +1941,7 @@ function describeRule(c: RuleChange, names: { agent: (id: string) => string; pay
 }
 
 function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
+  const [rulesOpen, toggleRules] = useFold("rules");
   const { s, busy } = ctx;
   const pol = s.policy!;
   // Settings are Dharma rules too, but their values show in the card they govern, not in this list.
@@ -1991,9 +2039,9 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
 
   return (
     <div className="stack">
-      {part === "list" && <div className="card">
-        <div className="hd window-hd"><h2>Rules on Dharma</h2><span className="sub">{listedRules.filter((r) => r.active).length} active</span></div>
-        <div className="policy">
+      {part === "list" && <div className={`card${rulesOpen ? "" : " folded"}`}>
+        <FoldHead title="Rules" className="window-hd" open={rulesOpen} toggle={toggleRules} sub={<span className="sub">{listedRules.filter((r) => r.active).length} active</span>} />
+        <FoldBody open={rulesOpen}><div className="policy">
           {listedRules.map((r, i) => (
             <div className={`p ${r.active ? "" : "off"}`} key={r.id} id={`rule-${r.id}`}>
               <span className="i">{String(i + 1).padStart(2, "0")}</span>
@@ -2018,12 +2066,12 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
               </span>
             </div>
           ))}
-        </div>
+        </div></FoldBody>
       </div>}
 
       {part === "propose" && <>
       <div className="card rule-english">
-        <div className="hd"><h2>Describe a rule in plain English</h2></div>
+        <div className="hd"><h2>Draft rule</h2></div>
         <div className="rule-english-body">
           <DrafterKeyField ctx={ctx} />
           <textarea
@@ -2175,7 +2223,6 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
           : "error" in built ? built.error : <>Will be voted on as: <strong>{describeRule(built.change, names)}</strong></>}</div>
       </form>
 
-      {hasLevels(s) && <LevelsCard ctx={ctx} />}
       </>}
     </div>
   );
@@ -2637,11 +2684,49 @@ function Safety({ ctx }: { ctx: Ctx }) {
   return (
     <div className="stack">
       <WatchdogCard ctx={ctx} />
+      <SafetyTools ctx={ctx} />
       <Incidents ctx={ctx} />
-      <Drills ctx={ctx} />
-      <Traps ctx={ctx} />
-      <Inbox ctx={ctx} />
     </div>
+  );
+}
+
+type SafetyMode = "drills" | "traps" | "inbox";
+const SAFETY_MODES: { v: SafetyMode; label: string }[] = [{ v: "drills", label: "Drills" }, { v: "traps", label: "Traps" }, { v: "inbox", label: "Inbox" }];
+
+/** Drills, trap credentials and inboxes in one card, chosen with a switch (like the New agent card). Remembered per browser. */
+function SafetyTools({ ctx }: { ctx: Ctx }) {
+  const [mode, setModeState] = useState<SafetyMode>(() => {
+    try {
+      const v = localStorage.getItem("karuna.safetyMode");
+      return v === "traps" || v === "inbox" ? v : "drills";
+    } catch {
+      return "drills";
+    }
+  });
+  const setMode = (m: SafetyMode) => {
+    setModeState(m);
+    try {
+      localStorage.setItem("karuna.safetyMode", m);
+    } catch {
+      /* per-browser convenience only */
+    }
+  };
+  const switcher = (
+    <span className="filters" role="tablist" aria-label="Safety tools">
+      {SAFETY_MODES.map((o) => <button key={o.v} type="button" role="tab" aria-selected={mode === o.v} className={mode === o.v ? "on" : ""} onClick={() => setMode(o.v)}>{o.label}</button>)}
+    </span>
+  );
+  return mode === "traps" ? <Traps ctx={ctx} switcher={switcher} /> : mode === "inbox" ? <Inbox ctx={ctx} switcher={switcher} /> : <Drills ctx={ctx} switcher={switcher} />;
+}
+
+/** A card's header: its title and either its usual note (right) or, inside SafetyTools, the switch (right) and the note under it. */
+function ToolHead({ title, note, switcher }: { title: string; note: ReactNode; switcher?: ReactNode }) {
+  if (!switcher) return <div className="hd"><h2>{title}</h2>{note}</div>;
+  return (
+    <>
+      <div className="hd"><h2>{title}</h2>{switcher}</div>
+      {note && <div className="tool-note mode-note">{note}</div>}
+    </>
   );
 }
 
@@ -2712,7 +2797,7 @@ function Incidents({ ctx }: { ctx: Ctx }) {
 }
 
 /** Fake scams sent to agents, automatically and on demand. */
-function Drills({ ctx }: { ctx: Ctx }) {
+function Drills({ ctx, switcher }: { ctx: Ctx; switcher?: ReactNode }) {
   const { s, busy, run } = ctx;
   const pol = s.policy!;
   const active = pol.agents.filter((a) => a.active);
@@ -2727,7 +2812,7 @@ function Drills({ ctx }: { ctx: Ctx }) {
   };
   return (
     <div className="card">
-      <div className="hd"><h2>Drills</h2><span className="sub settings-line">fake scams per agent: <SettingValue ctx={ctx} name="drillsPerDay" /> · ignored for <SettingValue ctx={ctx} name="drillWindowMinutes" /> counts as passed</span></div>
+      <ToolHead title="Drills" switcher={switcher} note={<span className="sub">A fake email that tries to trick the agent into acting.</span>} />
       <form className="inline-form" onSubmit={runTest}>
         <label className="field"><span>Agent</span>
           <select value={test.agentId} onChange={(e) => setTest({ ...test, agentId: e.target.value })}>
@@ -2762,7 +2847,7 @@ function Drills({ ctx }: { ctx: Ctx }) {
 }
 
 /** Hand an agent work the way a supplier or teammate would, and see what reached each inbox. */
-function Inbox({ ctx }: { ctx: Ctx }) {
+function Inbox({ ctx, switcher }: { ctx: Ctx; switcher?: ReactNode }) {
   const { s, busy, run } = ctx;
   const pol = s.policy!;
   const active = pol.agents.filter((a) => a.active);
@@ -2774,7 +2859,7 @@ function Inbox({ ctx }: { ctx: Ctx }) {
   };
   return (
     <div className="card">
-      <div className="hd"><h2>Inboxes</h2><span className="sub">{s.inbox.length || ""}</span></div>
+      <ToolHead title="Inboxes" switcher={switcher} note={s.inbox.length ? <span className="sub">{s.inbox.length} message{s.inbox.length === 1 ? "" : "s"}</span> : null} />
       <form className="pad stack-sm" onSubmit={send}>
         <div className="row-form">
           <select aria-label="Agent" value={msg.agentId} onChange={(e) => setMsg({ ...msg, agentId: e.target.value })}>
@@ -2804,7 +2889,7 @@ function Inbox({ ctx }: { ctx: Ctx }) {
 // ============================================================== Swarm Stopper + Trap Passwords
 
 /** Bait credentials: any agent that uses one freezes every agent. */
-function Traps({ ctx }: { ctx: Ctx }) {
+function Traps({ ctx, switcher }: { ctx: Ctx; switcher?: ReactNode }) {
   const { s, busy, run } = ctx;
   const pol = s.policy!;
   const sw = s.swarm;
@@ -2816,7 +2901,7 @@ function Traps({ ctx }: { ctx: Ctx }) {
 
   return (
       <div className="card">
-        <div className="hd"><h2>Trap credentials</h2><span className="sub settings-line">any agent that uses one freezes every agent · Swarm Stopper: <SettingValue ctx={ctx} name="swarmAgents" />{sw.agentsToTrip > 0 && <> hitting one new target within <SettingValue ctx={ctx} name="swarmWindowSeconds" /></>}</span></div>
+        <ToolHead title="Trap credentials" switcher={switcher} note={<span className="sub">A fake API key planted where the agent can find it.</span>} />
         <form className="pad row-form" onSubmit={(e) => { e.preventDefault(); run(() => api("/traps", { agentId: target || undefined }), "Trap credentials minted. Plant them where the agent can find them."); }}>
           <select aria-label="Which agent the traps are for" value={target} onChange={(e) => setTarget(e.target.value)}>
             <option value="">For every agent</option>
@@ -3004,7 +3089,7 @@ function DrafterKeyField({ ctx }: { ctx: Ctx }) {
   const P = DRAFTER_PROVIDERS[provider];
   return (
     <div className="key-ask">
-      <span className="small">Drafting needs a free key from <a className="link-u" href={`https://${P.where}`} target="_blank" rel="noreferrer">{P.where}</a>. Only Karuna uses it, never an agent.</span>
+      <span className="small">Drafting needs a free key from <a className="link-u" href={`https://${P.where}`} target="_blank" rel="noreferrer">{P.where}</a></span>
       <div className="row-form">
         <Picker label="Drafter provider" value={provider} onChange={setProvider}
           options={(Object.keys(DRAFTER_PROVIDERS) as (keyof typeof DRAFTER_PROVIDERS)[]).map((k) => ({ value: k, label: DRAFTER_PROVIDERS[k].label, hint: DRAFTER_PROVIDERS[k].where }))} />
@@ -3082,7 +3167,7 @@ const CHAT_OFF = [
   { id: "direct", label: "Connectors added in Claude directly", note: "add them under Connectors instead" },
 ] as const;
 
-/** Connect Claude chat: Karuna's address, then the built-in tools to turn off. */
+/** Connect Claude chat: Karuna's address, then the built-in tools to turn off (the New agent card's "Claude chat" mode). */
 function ChatSetup({ ctx }: { ctx: Ctx }) {
   const { s } = ctx;
   const url = s.chatUrl ?? null;
@@ -3106,14 +3191,14 @@ function ChatSetup({ ctx }: { ctx: Ctx }) {
   };
   const off = CHAT_OFF.filter((x) => done[x.id]).length;
   return (
-    <div className="card chat-setup">
-      <div className="hd"><h2>Claude chat</h2><span className="sub">{connected ? `connected · ${off}/${CHAT_OFF.length} built-in tools off` : "not connected"}</span></div>
+    <div className="chat-setup">
       <div className="pad stack-sm">
+        <div className="mode-note"><span className={`live-dot${connected ? "" : " off"}`} aria-hidden /> {connected ? `Connected · ${off}/${CHAT_OFF.length} built-in tools off` : "Not connected yet"}</div>
         <div className="chat-step">
           <span className="step-n">1</span>
           <div className="grow">
             <b>Add Karuna as a connector</b>
-            <div className="small muted">In Claude: Settings → Connectors → Add custom connector. Paste this address, then approve the code under Computers &amp; chats.</div>
+            <div className="small muted">In Claude: Settings → Connectors → Add custom connector. Paste this address, then approve its code below.</div>
             {url ? (
               <div className="row-form">
                 <span className="mono small chat-url">{url}</span>
@@ -3137,6 +3222,58 @@ function ChatSetup({ ctx }: { ctx: Ctx }) {
             ))}
           </div>
         </div>
+        <DeviceList ctx={ctx} kind="chat" />
+      </div>
+    </div>
+  );
+}
+
+/** The New agent card's "Coding agents" mode: connect Claude Code or Cursor through Karuna's plugin. */
+const CODING_STEPS = [
+  { tool: "Claude Code", lines: ["/plugin marketplace add <this project's folder>", "/plugin install karuna@karuna"] },
+  { tool: "Cursor", lines: ["node plugin/scripts/install-cursor.mjs"] },
+] as const;
+
+function CodingSetup({ ctx }: { ctx: Ctx }) {
+  const devices = (ctx.s.devices ?? []).filter((d) => d.tool !== "chat");
+  const connected = devices.filter((d) => d.status === "approved").length;
+  const waiting = devices.filter((d) => d.status === "pending").length;
+  const [copied, setCopied] = useState<string | null>(null);
+  const copy = (text: string) => {
+    navigator.clipboard?.writeText(text);
+    setCopied(text);
+    setTimeout(() => setCopied((c) => (c === text ? null : c)), 2000);
+  };
+  return (
+    <div className="chat-setup">
+      <div className="pad stack-sm">
+        <div className="mode-note"><span className={`live-dot${connected ? "" : " off"}`} aria-hidden /> {connected || waiting ? `${connected} connected${waiting ? ` · ${waiting} waiting for approval` : ""}` : "None connected yet"}</div>
+        <div className="chat-step">
+          <span className="step-n">1</span>
+          <div className="grow">
+            <b>Add Karuna's plugin</b>
+            <div className="small muted">Once per computer. Every tool call the coding agent makes then goes through your rules first.</div>
+            {CODING_STEPS.map((t) => (
+              <div className="coding-tool" key={t.tool}>
+                <span className="small">{t.tool}</span>
+                {t.lines.map((l) => (
+                  <div className="row-form" key={l}>
+                    <span className="mono small chat-url">{l}</span>
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => copy(l)}><Icon name={copied === l ? "check" : "copy"} size={13} /> {copied === l ? "Copied" : "Copy"}</button>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="chat-step">
+          <span className="step-n">2</span>
+          <div className="grow">
+            <b>Approve its code</b>
+            <div className="small muted">The first time it tries a tool, it shows a code. Check it matches the request below and approve it. It gets its own agent, starting at Level 0.</div>
+          </div>
+        </div>
+        <DeviceList ctx={ctx} kind="coding" />
       </div>
     </div>
   );
@@ -3144,10 +3281,16 @@ function ChatSetup({ ctx }: { ctx: Ctx }) {
 
 // ============================================================== computers (Claude Code / Cursor plugin)
 
-/** Computers running Claude Code or Cursor with the Karuna plugin: approve, see, disconnect. */
-function Computers({ ctx }: { ctx: Ctx }) {
+/** Coding tools (Claude Code, Cursor) or chat apps: waiting requests to approve or deny, and connections to disconnect. */
+const isChatDevice = (d: { tool: string }) => d.tool === "chat";
+
+/**
+ * The connections of one kind, shown inside the New agent card's Claude chat and Coding agents modes
+ * (this used to be the separate "Computers & chats" card). Approve, Deny and Disconnect work as before.
+ */
+function DeviceList({ ctx, kind }: { ctx: Ctx; kind: "chat" | "coding" }) {
   const { s, run, busy, me } = ctx;
-  const devices = s.devices ?? [];
+  const devices = (s.devices ?? []).filter((d) => (kind === "chat" ? isChatDevice(d) : !isChatDevice(d)));
   const pending = devices.filter((d) => d.status === "pending");
   const connected = devices.filter((d) => d.status === "approved");
   const toolName = (t: string) => (t === "cursor" ? "Cursor" : t === "chat" ? "Chat app" : "Claude Code");
@@ -3159,40 +3302,35 @@ function Computers({ ctx }: { ctx: Ctx }) {
       await submitChange(me, dharma, { kind: Kind.Propose, change: { op: "SetAgent", id: agentId, capUsd: 0 }, label: d.name });
       await submitChange(me, dharma, { kind: Kind.Propose, change: { op: "AddRule", id: `unsandboxed-${agentId}`.slice(0, 31), outcome: "Allow", scope: "unsandboxed", target: agentId } });
     }, `Approved. ${d.name} works once the vote passes (${s.policy!.timelock}s), starting at Level 0`);
-  if (!devices.length) {
-    return (
-      <div className="card">
-        <div className="hd"><h2>Computers &amp; chats</h2><span className="sub">Claude Code · Cursor · chat apps</span></div>
-        <Empty icon="agents">Nothing connected yet. In Claude Code, run <span className="mono">/plugin install karuna</span>; in a chat app, add Karuna's address as a connector. Each shows a code to approve here.</Empty>
-      </div>
-    );
-  }
   return (
-    <div className="card">
-      <div className="hd"><h2>Computers &amp; chats</h2><span className="sub">{connected.length} connected{pending.length ? ` · ${pending.length} waiting` : ""}</span></div>
-      <div className="resolved">
-        {pending.map((d) => (
-          <div className="res" key={d.id}>
-            <Badge v="approval">wants to connect</Badge>
-            <span className="small"><b>{d.name}</b> · {toolName(d.tool)} · code <span className="mono">{d.code}</span> · {ago(d.requestedAt)}</span>
-            <span className="ballot-actions">
-              <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => run(() => api(`/devices/${d.id}/deny`, {}), "Denied")}>Deny</button>
-              <button className="btn btn-approve btn-sm" disabled={busy} title="Check the code matches the one on that computer" onClick={() => approve(d)}><Icon name="pen" size={14} /> Approve</button>
-            </span>
-          </div>
-        ))}
-        {connected.map((d) => {
-          const seen = d.lastSeenAt ? Date.now() - Date.parse(d.lastSeenAt) : null;
-          return (
+    <div className="device-list">
+      <span className="field-label">{kind === "chat" ? "Chat apps" : "Coding agents"} · {connected.length} connected{pending.length ? ` · ${pending.length} waiting` : ""}</span>
+      {!devices.length ? (
+        <div className="small muted">Nothing connected yet. Its code shows up here to approve.</div>
+      ) : (
+        <div className="resolved">
+          {pending.map((d) => (
             <div className="res" key={d.id}>
-              <Badge v={seen !== null && seen < 10 * 60_000 ? "allow" : "approval"}>{seen !== null && seen < 10 * 60_000 ? "active" : "connected"}</Badge>
-              <span className="small"><b>{d.agentName ?? d.name}</b> · {toolName(d.tool)} · {d.lastSeenAt ? `last call ${ago(d.lastSeenAt)}` : "no calls yet"}</span>
-              <button className="btn btn-ghost btn-sm" disabled={busy} onClick={async () => (await askConfirm(`Disconnect ${d.name}? Its tool calls stop working at once.`, { action: "Disconnect", danger: true })) && run(() => api(`/devices/${d.id}/revoke`, {}), "Disconnected")}>Disconnect</button>
+              <Badge v="approval">wants to connect</Badge>
+              <span className="small"><b>{d.name}</b> · {toolName(d.tool)} · code <span className="mono">{d.code}</span> · {ago(d.requestedAt)}</span>
+              <span className="ballot-actions">
+                <button className="btn btn-deny btn-sm" disabled={busy} onClick={() => run(() => api(`/devices/${d.id}/deny`, {}), "Denied")}>Deny</button>
+                <button className="btn btn-approve btn-sm" disabled={busy} title="Check the code matches the one on that computer" onClick={() => approve(d)}><Icon name="pen" size={14} /> Approve</button>
+              </span>
             </div>
-          );
-        })}
-      </div>
-      <div className="log-foot"><span>every tool call is checked against your rules before it runs</span><span>connected computers can be disconnected at any time</span></div>
+          ))}
+          {connected.map((d) => {
+            const seen = d.lastSeenAt ? Date.now() - Date.parse(d.lastSeenAt) : null;
+            return (
+              <div className="res" key={d.id}>
+                <Badge v={seen !== null && seen < 10 * 60_000 ? "allow" : "approval"}>{seen !== null && seen < 10 * 60_000 ? "active" : "connected"}</Badge>
+                <span className="small"><b>{d.agentName ?? d.name}</b> · {toolName(d.tool)} · {d.lastSeenAt ? `last call ${ago(d.lastSeenAt)}` : "no calls yet"}</span>
+                <button className="btn btn-ghost btn-sm" disabled={busy} onClick={async () => (await askConfirm(`Disconnect ${d.name}? Its tool calls stop working at once.`, { action: "Disconnect", danger: true })) && run(() => api(`/devices/${d.id}/revoke`, {}), "Disconnected")}>Disconnect</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -3228,8 +3366,30 @@ const GROQ_HOST = "api.groq.com";
 type AgentModel = "groq" | "anthropic";
 
 /** Describe a job; Karuna drafts the agent; members review and propose it; Karuna runs it. */
+type NewAgentMode = "agent" | "chat" | "coding";
+const NEW_AGENT_MODES: { v: NewAgentMode; label: string }[] = [{ v: "agent", label: "New agent" }, { v: "chat", label: "Claude chat" }, { v: "coding", label: "Coding agents" }];
+const NEW_AGENT_TITLES: Record<NewAgentMode, string> = { agent: "New agent", chat: "Claude chat", coding: "Coding agents" };
+
 function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
   const { s, run, busy, me } = ctx;
+  const [levelsOpen, setLevelsOpen] = useState(false);
+  // Ways to add an agent: one Karuna builds and runs, Claude chat as a connector, or a coding agent (Claude Code, Cursor) through the plugin. Remembered per browser.
+  const [mode, setModeState] = useState<NewAgentMode>(() => {
+    try {
+      const v = localStorage.getItem("karuna.newAgentMode");
+      return v === "chat" || v === "coding" ? v : "agent";
+    } catch {
+      return "agent";
+    }
+  });
+  const setMode = (m: NewAgentMode) => {
+    setModeState(m);
+    try {
+      localStorage.setItem("karuna.newAgentMode", m);
+    } catch {
+      /* per-browser convenience only */
+    }
+  };
   const [job, setJob] = useState("");
   const [drafting, setDrafting] = useState(false);
   const [err, setErr] = useState("");
@@ -3278,8 +3438,28 @@ function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
     }, `Proposed. Karuna runs it once the vote passes (${s.policy!.timelock}s), starting at Level 0`);
   return (
     <div className="card new-agent">
-      <div className="hd"><h2>New agent</h2><span className="sub">Karuna builds and runs it</span></div>
+      <div className="hd">
+        <h2>{NEW_AGENT_TITLES[mode]}</h2>
+        <span className="filters" role="tablist" aria-label="How to add an agent">
+          {NEW_AGENT_MODES.map((o) => {
+            // Requests waiting for a member's approval, so one isn't missed while the card shows another mode.
+            const waiting = o.v === "agent" ? 0 : (s.devices ?? []).filter((d) => d.status === "pending" && (o.v === "chat" ? isChatDevice(d) : !isChatDevice(d))).length;
+            return (
+              <button key={o.v} type="button" role="tab" aria-selected={mode === o.v} className={mode === o.v ? "on" : ""} onClick={() => setMode(o.v)}
+                aria-label={waiting ? `${o.label}, ${waiting} waiting for approval` : undefined}>
+                {o.label}{waiting > 0 && <span className="count tab-count">{waiting}</span>}
+              </button>
+            );
+          })}
+        </span>
+      </div>
+      {mode === "chat" ? <ChatSetup ctx={ctx} /> : mode === "coding" ? <CodingSetup ctx={ctx} /> : (
       <div className="pad stack-sm">
+        <div className="mode-note-row">
+          <div className="mode-note">Karuna builds and runs it</div>
+          {hasLevels(s) && <button type="button" className="btn btn-ghost btn-sm" onClick={() => setLevelsOpen(true)}><Icon name="info" size={14} /> Trust levels</button>}
+        </div>
+        {levelsOpen && hasLevels(s) && <LevelsCard ctx={ctx} onClose={() => setLevelsOpen(false)} />}
         {!d ? (
           <>
             <DrafterKeyField ctx={ctx} />
@@ -3323,6 +3503,7 @@ function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
           </>
         )}
       </div>
+      )}
     </div>
   );
 }
@@ -3654,8 +3835,9 @@ function Preflight({ a, ctx }: { a: AgentView; ctx: Ctx }) {
   );
 }
 
-/** Rules page: what each level may do without asking, and its payment limits (changed by vote). */
-function LevelsCard({ ctx }: { ctx: Ctx }) {
+/** New agent card (the Trust levels button): what each level may do without asking, and its
+ *  payment limits (changed by vote). A popup over a lightly dimmed page; a click outside or Esc closes it. */
+function LevelsCard({ ctx, onClose }: { ctx: Ctx; onClose: () => void }) {
   const { s, busy } = ctx;
   const pol = s.policy!;
   const limits = pol.levelLimits!;
@@ -3663,9 +3845,19 @@ function LevelsCard({ ctx }: { ctx: Ctx }) {
   const streak = pol.levelUpStreak ?? [0, 10, 25, 50];
   const [edit, setEdit] = useState<{ level: number; per: string; daily: string; none: boolean } | null>(null);
   const top = limits.length - 1;
-  return (
-    <div className="card">
-      <div className="hd"><h2>Trust levels</h2><span className="sub">{pol.agents.length} agent{pol.agents.length === 1 ? "" : "s"}</span></div>
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  // Rendered on <body>: an animated page section would otherwise shift a fixed overlay off the window's edges.
+  return createPortal(
+    <div className="info-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div className="card info-pop" role="dialog" aria-modal="true" aria-label="Trust levels">
+      <div className="hd">
+        <h2>Trust levels</h2>
+        <button type="button" className="dismiss-x" aria-label="Close" onClick={onClose}><Icon name="x" size={15} /></button>
+      </div>
       <div className="levels">
         {limits.map((l, n) => {
           const adds = grants.filter((g) => g.min === n).map((g) => g.what);
@@ -3680,8 +3872,8 @@ function LevelsCard({ ctx }: { ctx: Ctx }) {
                   ctx.change({ op: "SetLevelLimits", level: n, perPaymentUsd: per, dailyUsd: daily }).then((ok) => ok && setEdit(null));
                 }}>
                   {!edit.none && <>
-                    <span className="prefix"><span>$</span><input aria-label="Per payment" type="number" min="0" step="0.01" value={edit.per} onChange={(e) => setEdit({ ...edit, per: e.target.value })} /></span>
-                    <span className="prefix"><span>$</span><input aria-label="Per day" type="number" min="0" step="0.01" value={edit.daily} onChange={(e) => setEdit({ ...edit, daily: e.target.value })} /></span>
+                    <span className="prefix limit-input"><span>$</span><input aria-label="Per payment" type="number" min="0" step="0.01" value={edit.per} onChange={(e) => setEdit({ ...edit, per: e.target.value })} placeholder="0.00" /><em>/ payment</em></span>
+                    <span className="prefix limit-input"><span>$</span><input aria-label="Per day" type="number" min="0" step="0.01" value={edit.daily} onChange={(e) => setEdit({ ...edit, daily: e.target.value })} placeholder="0.00" /><em>/ day</em></span>
                   </>}
                   {n === top && <label className="check"><input type="checkbox" checked={edit.none} onChange={(e) => setEdit({ ...edit, none: e.target.checked })} /> <span>No limit</span></label>}
                   <button className="btn btn-ghost btn-sm" disabled={busy || (!edit.none && Number(edit.per) > Number(edit.daily))}>Propose</button>
@@ -3690,18 +3882,19 @@ function LevelsCard({ ctx }: { ctx: Ctx }) {
               ) : (
                 <button className="tag link tnum" title="Propose new payment limits for this level" onClick={() => {
                   const none = isNoLimit(l.perPaymentUsd) && isNoLimit(l.dailyUsd);
-                  setEdit({ level: n, per: none ? "" : String(l.perPaymentUsd), daily: none ? "" : String(l.dailyUsd), none });
+                  setEdit({ level: n, per: none ? "" : l.perPaymentUsd.toFixed(2), daily: none ? "" : l.dailyUsd.toFixed(2), none });
                 }}>
                   {isNoLimit(l.perPaymentUsd) && isNoLimit(l.dailyUsd) ? "No payment limit" : `${usd(l.perPaymentUsd)} per payment · ${usd(l.dailyUsd)} per day`} <Icon name="pen" size={11} />
                 </button>
               )}
-              <span className="level-adds small">{adds.length ? `Also: ${adds.map((w) => (/^[A-Z]{2}/.test(w) ? w : w.charAt(0).toLowerCase() + w.slice(1))).join(", ")}` : n === 0 ? "Payments within the limits only" : ""}</span>
+              <span className="level-adds small">{adds.length ? `Level ${n - 1} + ${adds.map((w) => (/^[A-Z]{2}/.test(w) ? w : w.charAt(0).toLowerCase() + w.slice(1))).join(", ")}` : n === 0 ? "Payments within the limits only" : ""}</span>
             </div>
           );
         })}
       </div>
-      <div className="log-foot"><span>core rules and your own block and approval rules always come first</span><span>a Tripwire drops an agent to Level 0, a failed Drill one level</span></div>
     </div>
+    </div>,
+    document.body,
   );
 }
 

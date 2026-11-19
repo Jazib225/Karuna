@@ -850,7 +850,17 @@ html, body, * { scrollbar-width: none; }
 .level-name small { font-family: var(--font-mono); font-size: 11.5px; color: var(--n500); }
 .level-adds { color: var(--n500); }
 .level-edit { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.level-edit .prefix { flex: 0 1 110px; }
+.level-edit .prefix { flex: 0 1 150px; }
+/* A level's payment limits while editing: the console's input look, compact like the buttons beside it. */
+.limit-input > input {
+  width: 100%; height: 34px; padding: 0 74px 0 26px !important; border-radius: var(--r-md); border: 1px solid var(--n200); background: var(--canvas);
+  color: var(--ink); font-size: 13px; outline: none; -moz-appearance: textfield; transition: border-color .2s var(--ease), box-shadow .2s var(--ease);
+}
+.limit-input > input::-webkit-outer-spin-button, .limit-input > input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.limit-input > input:focus { border-color: var(--n400); box-shadow: var(--ring); }
+.limit-input > input::placeholder { color: var(--n400); }
+.limit-input > span { left: 11px; font-size: 13px; }
+.limit-input > em { position: absolute; right: 11px; top: 50%; translate: 0 -50%; font-style: normal; font-family: var(--font-mono); font-size: 11px; color: var(--n500); pointer-events: none; }
 .upgrade-card p { margin: 0; }
 @media (max-width: 760px) {
   .level-line { grid-template-columns: 1fr; gap: 6px; }
@@ -867,7 +877,7 @@ html, body, * { scrollbar-width: none; }
 
 /* New agent, built agents, and the Runs view */
 .new-agent textarea, .built textarea { width: 100%; }
-.key-ask { display: grid; gap: 8px; padding: 12px 14px; border: 1px dashed var(--n400); border-radius: 10px; }
+.key-ask { display: grid; gap: 8px; }
 .key-ask .grow { flex: 1; min-width: 0; }
 .field small.muted { font-size: 12px; }
 .check-row { display: flex; gap: 8px; align-items: flex-start; font-size: 13.5px; padding: 3px 0; }
@@ -1130,3 +1140,48 @@ html, body, * { scrollbar-width: none; }
 .alert.bad .alert-timer { background: var(--danger); }
 .alert:hover .alert-timer, .alert:focus-within .alert-timer { animation-play-state: paused; }
 @keyframes alert-timer { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+
+/* New agent card: one line under the switch saying what this mode does, and the not-connected dot. */
+.mode-note { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 12px; color: var(--n500); }
+.live-dot.off { background: var(--n300); animation: none; }
+
+/* Safety tools card: the header note moves under the Drills / Traps / Inbox switch. */
+.tool-note { padding: 14px 20px 0; }
+
+/* Trust levels popup (the info button on "Describe a rule"): the page dims a little behind it. */
+.info-backdrop {
+  position: fixed; inset: 0; z-index: 900; display: grid; place-items: center; padding: 16px; overflow-y: auto;
+  background: rgba(10,10,10,.28); backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
+  animation: confirm-fade .18s var(--ease) both;
+}
+.info-pop { width: min(980px, 100%); max-height: calc(100vh - 32px); overflow-y: auto; box-shadow: var(--shadow-lift); animation: confirm-rise .22s var(--ease) both; }
+.info-pop .hd .dismiss-x { margin-left: 4px; }
+
+/* New agent card: the mode's note on the left, Trust levels on the right of the same line. */
+.mode-note-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+
+/* New agent card, Coding agents mode: one block per tool with its commands. */
+.coding-tool { display: grid; gap: 6px; margin-top: 4px; }
+.coding-tool > .small { color: var(--n500); font-family: var(--font-mono); font-size: 11.5px; }
+
+/* New agent card: each connection mode's list (approve, deny, disconnect), and a waiting count on its tab. */
+.device-list { display: grid; gap: 8px; padding-top: 14px; border-top: 1px solid var(--line); }
+.device-list .resolved { margin: 0 -20px -20px; }
+.filters button .tab-count { margin-left: 6px; vertical-align: 1px; }
+
+/* Rules page: a card's header folds it. */
+.fold-hd { cursor: pointer; user-select: none; }
+.fold-hd:hover h2 { color: var(--ink); }
+.fold-hd:focus-visible { outline: 2px solid var(--focus, var(--ink)); outline-offset: -2px; }
+.fold-right { display: inline-flex; align-items: center; gap: 10px; }
+.fold-chev { color: var(--n500); transition: transform .18s var(--ease); }
+.card.folded .fold-chev { transform: rotate(-90deg); }
+.fold-hd { transition: border-color .26s var(--ease); }
+.card.folded > .fold-hd { border-bottom-color: transparent; }
+/* The body slides: its row grows from 0 to its content's height, and back. Folded, it's also hidden
+   (after the slide), so its buttons can't be reached with Tab. */
+.fold-body { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .26s var(--ease); }
+.fold-body.open { grid-template-rows: 1fr; }
+.fold-inner { min-height: 0; overflow: hidden; opacity: 0; visibility: hidden; transition: opacity .2s var(--ease), visibility 0s linear .26s; }
+.fold-body.open > .fold-inner { opacity: 1; visibility: visible; transition: opacity .22s var(--ease) .04s, visibility 0s; }
+@media (prefers-reduced-motion: reduce) { .fold-body, .fold-inner, .fold-chev, .fold-hd { transition: none; } }
