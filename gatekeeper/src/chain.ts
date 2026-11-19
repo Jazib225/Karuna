@@ -163,8 +163,41 @@ async function simulate(client: PublicClient, from: Address, contract: Address, 
     await client.simulateContract({ address: contract, abi: DHARMA_ABI, functionName: fn, args: args as never, account: from });
   } catch (e) {
     const reason = revertReason(e);
-    throw new ChainError(reason ? `Dharma rejected this: ${reason}` : `Simulation failed: ${scrub(e)}`, reason);
+    throw new ChainError(reason ? `Dharma rejected this: ${explainRevert(reason)}` : `Simulation failed: ${scrub(e)}`, reason);
   }
+}
+
+/** Plain words for Dharma's errors a member can run into; the contract's name stays in brackets. */
+const REVERT_TEXT: Record<string, string> = {
+  NotMember: "this key isn't a member of the organization",
+  BadSignature: "the signature doesn't match",
+  Expired: "the signature expired; try again",
+  NotTightening: "only changes that tighten apply at once",
+  MembersMustPropose: "member changes go to a vote",
+  CoreBoundary: "a core rule can never be loosened this way",
+  AlreadyFrozen: "agents are already frozen",
+  AlreadyVoted: "you already voted on this",
+  BadAgent: "that agent id isn't valid",
+  BadDomain: "that site is empty or already trusted",
+  BadLevel: "that isn't a valid trust level",
+  BadLevelLimits: "those level limits aren't valid",
+  BadMember: "that member can't be added or changed this way",
+  BadRule: "that rule isn't valid",
+  CannotRemove: "that can't be removed",
+  NoSuchAgent: "no agent with that id",
+  NoSuchDomain: "that site isn't trusted",
+  NoSuchPayee: "that payee isn't listed",
+  NoSuchProposal: "no such proposal",
+  NoSuchRule: "no rule with that id",
+  NotFrozen: "agents aren't frozen",
+  RuleExists: "a rule with that id already exists",
+  VotingClosed: "voting on this proposal has closed",
+  WaitTooLong: "that wait is longer than allowed",
+  ZeroAddress: "the address is empty",
+};
+export function explainRevert(reason: string): string {
+  const name = reason.replace(/\(.*$/, "");
+  return REVERT_TEXT[name] ? `${REVERT_TEXT[name]} (${reason})` : reason;
 }
 
 // ---------------------------------------------------------------- fast relay for member-signed writes

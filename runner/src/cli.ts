@@ -5,7 +5,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { hostname, tmpdir } from "node:os";
+import { hostname, networkInterfaces, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { USAGE, parseArgs, parseUndoArgs, type RunArgs } from "./args.ts";
 import { scanForSecrets } from "./scan.ts";
@@ -156,8 +156,12 @@ async function main() {
   }
   const gkUrl = new URL(a.gatekeeper);
   const remote = gkUrl.protocol === "https:";
-  // From inside Docker, "this machine" is host.docker.internal.
+  // From inside Docker, "this machine" is host.docker.internal. Docker Desktop defines it; native
+  // Docker on Linux (a docker0 bridge) doesn't, so the relay maps it to the bridge (host-gateway),
+  // where the Gatekeeper's run proxy listens there (see proxyListenHost in gatekeeper/src/proxy.ts).
   const relayHost = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(gkUrl.hostname) ? "host.docker.internal" : gkUrl.hostname;
+  const nativeLinuxDocker = process.platform === "linux" && !!networkInterfaces().docker0;
+  const hostGateway = relayHost === "host.docker.internal" && nativeLinuxDocker ? ["--add-host", "host.docker.internal:host-gateway"] : [];
 
   const dir = a.dir ? resolve(a.dir) : undefined;
   if (dir) {
@@ -280,14 +284,14 @@ async function main() {
     docker(["network", "create", "--internal", net]);
     const view = a.desktop ? ["-p", "127.0.0.1::6080"] : [];
     if (remote) {
-      docker(["run", "-d", "--name", relay, "--restart", "no", ...view,
+      docker(["run", "-d", "--name", relay, "--restart", "no", ...view, ...hostGateway,
         "-e", `GK_HOST=${relayHost}`, "-e", `GK_PORT=${gkUrl.port || 443}`, "-e", `SESSION=${session}`,
         "-e", `CA_B64=${Buffer.from(String(sess.caPem)).toString("base64")}`, ...(a.desktop ? ["-e", `VIEW_TARGET=${box}:6080`] : []),
         REMOTE_RELAY_TAG]);
     } else {
       const fwd = `socat tcp-listen:3128,fork,reuseaddr tcp-connect:${relayHost}:${sess.proxyPort}`;
       const sh = a.desktop ? `${fwd} & exec socat tcp-listen:6080,fork,reuseaddr tcp-connect:${box}:6080` : `exec ${fwd}`;
-      docker(["run", "-d", "--name", relay, "--restart", "no", ...view, "--entrypoint", "sh", "alpine/socat", "-c", sh]);
+      docker(["run", "-d", "--name", relay, "--restart", "no", ...view, ...hostGateway, "--entrypoint", "sh", "alpine/socat", "-c", sh]);
     }
     docker(["network", "connect", "--alias", "karuna-egress", net, relay]);
     if (a.desktop) {

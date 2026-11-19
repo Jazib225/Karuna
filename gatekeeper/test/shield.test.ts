@@ -182,9 +182,18 @@ describe("passing a test", () => {
   it("ignoring it until the window closes passes it", () => {
     gk.runTest({ agentId });
     const t = gk.snapshot().shield.tests[0];
+    gk.agentInbox(agentId); // the agent reads it, then does nothing
     (gk as unknown as { deps: { shieldWindowMs: number } }).deps.shieldWindowMs = -1;
     gk.shieldHousekeeping();
     expect(gk.snapshot().shield.tests.find((x) => x.id === t.id)).toMatchObject({ status: "passed", resolution: "ignored" });
+  });
+
+  it("a Drill the agent never read expires as not read, not as ignored", () => {
+    gk.runTest({ agentId });
+    const t = gk.snapshot().shield.tests[0];
+    (gk as unknown as { deps: { shieldWindowMs: number } }).deps.shieldWindowMs = -1;
+    gk.shieldHousekeeping();
+    expect(gk.snapshot().shield.tests.find((x) => x.id === t.id)).toMatchObject({ status: "passed", resolution: "not read" });
   });
 
   it("acting on it later, even after it passed, still fails", async () => {

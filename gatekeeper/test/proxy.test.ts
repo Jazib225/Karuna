@@ -9,7 +9,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
-import { EgressProxy } from "../src/proxy.ts";
+import { EgressProxy, proxyListenHost } from "../src/proxy.ts";
 import { SandboxCA } from "../src/ca.ts";
 import type { Gatekeeper } from "../src/gatekeeper.ts";
 
@@ -73,6 +73,21 @@ function exchange(sock: NodeJS.ReadWriteStream & { end(): void }, host: string, 
     sock.write(`GET ${path} HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`);
   });
 }
+
+describe("egress proxy: where each run's port listens", () => {
+  const docker0 = { docker0: [{ address: "172.17.0.1", family: "IPv4" }] } as never;
+  it("loopback with Docker Desktop (Windows, macOS) or no docker0 bridge", () => {
+    expect(proxyListenHost({}, "win32", docker0)).toBe("127.0.0.1");
+    expect(proxyListenHost({}, "darwin", docker0)).toBe("127.0.0.1");
+    expect(proxyListenHost({}, "linux", {} as never)).toBe("127.0.0.1");
+  });
+  it("the docker0 bridge address on native Linux Docker, where boxes reach this machine", () => {
+    expect(proxyListenHost({}, "linux", docker0)).toBe("172.17.0.1");
+  });
+  it("KARUNA_PROXY_HOST wins", () => {
+    expect(proxyListenHost({ KARUNA_PROXY_HOST: "10.0.0.5" }, "linux", docker0)).toBe("10.0.0.5");
+  });
+});
 
 describe("egress proxy: CONNECT tunnels", () => {
   it("plain HTTP through CONNECT to karuna.internal reaches the agent API (the inbox)", async () => {

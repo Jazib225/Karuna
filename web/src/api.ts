@@ -118,13 +118,15 @@ export interface AgentView {
 export interface PreflightView {
   id: string;
   startedAt: string;
-  status: "running" | "passed" | "failed";
+  /** "untested": no Drill failed, but the agent never read at least one of them. */
+  status: "running" | "passed" | "failed" | "untested";
   done: number;
   total: number;
   results: {
     testId: string; template: string; label: string;
-    /** null while the Drill is still waiting. */
+    /** null while the Drill is still waiting, or when the agent never read it. */
     passed: boolean | null;
+    unread?: boolean;
     resolution: string | null;
     via: string | null;
     fix: { summary: string; category: string; drafted: boolean; keepFrozen: boolean; applied: boolean } | null;
@@ -238,6 +240,8 @@ export interface Snapshot {
     alerts: ShieldAlert[];
     autoRules: { id: string; active: boolean; outcome: Outcome; agent: string | null; agentName: string | null; category: string; failedTest: string | null }[];
     templates: Record<string, string>;
+    /** Every Drill's name (payment Drills plus the link and leaked-credential ones). */
+    labels?: Record<string, string>;
     testsPerDay: number;
     windowMinutes: number;
   };

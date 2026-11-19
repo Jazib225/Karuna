@@ -168,7 +168,10 @@ export function previewLoosening(
     // Re-derive the category from the policy under test (a new payee changes it).
     if (req.tool === "payment" && req.to) req.category = after.payees.find((x) => x.account.toLowerCase() === req.to!.toLowerCase())?.category ?? req.category;
     const nowDecision = evaluate(req, ctxOf(after, s), rulesAfter);
-    const wasDecision = h.flagged ? h.decision : evaluate({ ...h.request }, ctxOf(before, s), rulesBefore);
+    // Like for like: both sides are the rules alone. A flagged scam was really stopped by a check
+    // outside the rules (Tripwire, changed bank account, a Drill), so comparing its real decision
+    // with a rules-only replay would count it under every loosening, related or not.
+    const wasDecision = evaluate({ ...h.request }, ctxOf(before, s), rulesBefore);
     out.replayed++;
     const agent = req.agent ?? "";
     if (nowDecision.outcome === "allow" && req.tool === "payment") s[agent] = (s[agent] ?? 0) + (req.amountUsd ?? 0);

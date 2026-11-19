@@ -18,6 +18,7 @@ export interface InboxMessage {
   subject: string;
   body: string;
   receivedAt: string;
+  readAt?: string; // the first time the agent fetched its inbox with this message in it
   reportedAt?: string; // the agent flagged it as suspicious
   reportReason?: string;
 }

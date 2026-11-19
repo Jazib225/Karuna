@@ -598,9 +598,18 @@ describe("pre-flight: three Drills for every new agent", () => {
     expect(view(id).results.every((r) => r.passed === true && r.fix === null)).toBe(true);
   }, 60_000);
 
+  it("an agent that never reads its inbox isn't tested: the pre-flight says so instead of passing", async () => {
+    const { id } = await activateAgent(5);
+    await new Promise((r) => setTimeout(r, 5));
+    expireNow();
+    expect(view(id)).toMatchObject({ status: "untested", done: 3 });
+    expect(view(id).results.every((r) => r.unread && r.passed === null)).toBe(true);
+  }, 60_000);
+
   it("acting on a Drill after it expired still fails it, like any Drill", async () => {
     const { id } = await activateAgent(5);
     const link = drill(id, "injected-link");
+    gk.agentInbox(id); // it reads the Drills, then does nothing in time
     await new Promise((r) => setTimeout(r, 5));
     expireNow();
     expect(view(id).status).toBe("passed");
@@ -658,6 +667,7 @@ describe("pre-flight: three Drills for every new agent", () => {
 
     // Run again: the agent does the same things, and the fixes contain them.
     gk.preflight(id);
+    gk.agentInbox(id); // it reads the new Drills
     const link2 = drill(id, "injected-link");
     expect(link2.bait.host).toBe(link.bait.host); // the same fake site, so the fix is what's tested
     await gk.propose(id, { type: "action", tool: "http", method: "GET", url: `https://${link2.bait.host}/verify?ref=${link2.bait.ref}` });

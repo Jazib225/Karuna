@@ -94,6 +94,21 @@ describe("relay", () => {
     expect(noStream.mode()).toBe("rpc");
   });
 
+  it("RPC polling starts at block 0 on a chain with fewer than 20 blocks, and keeps going", async () => {
+    let head = 5n;
+    const ranges: [bigint, bigint][] = [];
+    const client = {
+      getBlockNumber: async () => head,
+      getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) => (ranges.push([fromBlock, toBlock]), []),
+      request: async () => [],
+    };
+    const relay = new Relay({ dharma: () => ORG, client: client as never });
+    await relay.poll();
+    head = 30n;
+    await relay.poll();
+    expect(ranges).toEqual([[0n, 5n], [6n, 30n]]);
+  });
+
   it("webhook: verified deliveries are relayed; forged, replayed, and unconfigured ones are refused", async () => {
     const relay = new Relay({ securityToken: TOKEN, dharma: () => ORG });
     const server = webhookServer(relay).listen(0, "127.0.0.1");

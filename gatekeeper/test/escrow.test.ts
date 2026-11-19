@@ -131,6 +131,17 @@ beforeEach(async () => {
 }, 60_000);
 
 describe("escrow for large payments", () => {
+  it("uses one rule's amount and wait together: only rules the payment reaches apply, the longest wait wins", async () => {
+    // beforeEach: $2 → 1h. Add $20 → 2h and $1 → 10 min.
+    await gk.submitAction(await sign(Kind.Propose, { op: "AddRule", id: "escrow-2", outcome: "Approval", scope: "escrow", target: "7200", maxUsd: 20 }));
+    await gk.submitAction(await sign(Kind.Propose, { op: "AddRule", id: "escrow-3", outcome: "Approval", scope: "escrow", target: "600", maxUsd: 1 }));
+    await passTimelock();
+    expect(gk.escrowFor(bills, 0.5)).toBeNull();
+    expect(gk.escrowFor(bills, 1.5)).toEqual({ thresholdUsd: 1, waitSeconds: 600 });
+    expect(gk.escrowFor(bills, 6)).toEqual({ thresholdUsd: 2, waitSeconds: 3600 }); // not the $20 rule's 2h
+    expect(gk.escrowFor(bills, 25)).toEqual({ thresholdUsd: 20, waitSeconds: 7200 });
+  }, 60_000);
+
   it("is described in plain words", () => {
     expect(describeChange({ op: "AddRule", id: "escrow-1", outcome: "Approval", scope: "escrow", target: "86400", maxUsd: 100 })).toMatch(/Hold payments of \$100\.00 or more in escrow for 24h; any member can cancel/);
   });

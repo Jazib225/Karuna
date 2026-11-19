@@ -152,6 +152,14 @@ describe("Preview Before Loosening", () => {
     expect(gov.preview!.newlyAllowed.map((x) => x.flagged)).toEqual(["changed bank account", null]);
   }, 30_000);
 
+  it("doesn't count a flagged scam under a loosening that has nothing to do with it", async () => {
+    expect((await gk.propose(bills, { type: "transfer", to: NEW_ACCOUNT, amountUsd: 0.3, payeeName: "Supplier" })).status).toBe("denied");
+    const res = await gk.submitAction(await sign(Kind.Propose, { op: "AddDomain", domain: "docs.python.org" }));
+    const pv = gk.snapshot().policy!.proposals.find((g) => g.id === Number(res.proposalId))!.preview!;
+    expect(pv.flaggedAllowed).toBe(0);
+    expect(pv.newlyAllowed).toEqual([]);
+  }, 30_000);
+
   it("counts a scam that would now reach an approval card instead of a block", async () => {
     await gk.submitAction(await sign(Kind.Propose, { op: "AddRule", id: "ap-bills-supplies", outcome: "Approval", agent: bills, scope: "payment:supplies" }));
     await passTimelock();

@@ -381,6 +381,9 @@ a:hover .nudge, button:hover .nudge { translate: 3px 0; }
   .tr > .mono { grid-column: 1 / -1; order: 3; }
   .tr > .av { display: none; }
   .shield-actions { grid-column: 1 / -1; justify-content: flex-start; }
+  /* Learned rows: badge, sentence and button stack; two columns squeezed the sentence. */
+  .learn-tr { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .learn-tr > .badge, .learn-tr > .btn, .learn-tr > .tag { justify-self: start; }
 }
 .row-between { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 

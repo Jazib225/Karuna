@@ -81,6 +81,8 @@ function Loading({ text }: { text: string }) {
 
 const usd = (n: number) => (isNoLimit(n) ? "no limit" : `$${n > 0 && n < 0.01 ? n.toFixed(4).replace(/0+$/, "") : n.toFixed(2)}`);
 const short = (s?: string | null) => (s ? `${s.slice(0, 6)}…${s.slice(-4)}` : "—");
+/** "2 votes and a 1 min wait", or just "1 vote" when the org has no wait. */
+const votesText = (required: number, timelock: number) => `${required} vote${required > 1 ? "s" : ""}${timelock > 0 ? ` and a ${waitText(timelock)} wait` : ""}`;
 /**
  * How far this computer's clock is ahead of Arc (ms), from the latest block the Gatekeeper read.
  * Chain times (a proposal's creation, its wait's end) are compared against Arc's clock, not this
@@ -964,7 +966,7 @@ function Console({ s, log, wallet, refreshWallet, run, busy, me, offline, refres
         () => submitChange(me, dharma, { kind: now ? Kind.Tighten : Kind.Propose, change: c, label }),
         // A proposal's confirmation comes from the chain, bottom right (one card, two with a wait);
         // the centre message is only for when live events are off.
-        lowering ? "Level lowered — recorded on Dharma" : now ? "All agents frozen — recorded on Dharma" : liveRef.current ? undefined : `Proposed — goes to Votes: needs ${pol.required} vote${pol.required > 1 ? "s" : ""}, then ${pol.timelock}s`,
+        lowering ? "Level lowered — recorded on Dharma" : now ? "All agents frozen — recorded on Dharma" : liveRef.current ? undefined : `Proposed — goes to Votes: needs ${votesText(pol.required, pol.timelock)}`,
       );
     },
     manage: (c, done, label) => !role.can("team") ? refuse("team") : run(() => submitChange(me, dharma, { kind: Kind.Manage, change: c, label }), done),
@@ -1200,7 +1202,7 @@ function Console({ s, log, wallet, refreshWallet, run, busy, me, offline, refres
               <Icon name="stop" size={20} />
               <div>
                 <b>Every agent is frozen.</b> {freezeCause(frozen.by)} Every request is denied and no payment can execute.
-                {frozen.confirmed ? " Recorded on Dharma." : " Recording on Dharma…"} Unfreezing needs {pol.required} vote{pol.required > 1 ? "s" : ""} and a {pol.timelock}s wait.
+                {frozen.confirmed ? " Recorded on Dharma." : " Recording on Dharma…"} Unfreezing needs {votesText(pol.required, pol.timelock)}.
               </div>
             </div>
           )}
@@ -1314,6 +1316,9 @@ function Overview({ ctx, wallet, refreshWallet, go }: { ctx: Ctx; wallet: Wallet
   const myAddr = ctx.me.address.toLowerCase();
   const waitingOnMe = pending.filter((p) => !p.approvals.some((a) => a.memberId === myAddr)).length;
   const spent = pol.agents.reduce((n, a) => n + a.spentTodayUsd, 0);
+  // What active agents may spend today: each one's level limit (Dharma v3+), else its daily cap.
+  const dailyLimits = pol.agents.filter((a) => a.active).map((a) => (hasLevels(s) && a.level != null ? pol.levelLimits?.[a.level]?.dailyUsd ?? 0 : a.capUsd));
+  const allowedDaily = dailyLimits.some(isNoLimit) ? NO_LIMIT_USD : dailyLimits.reduce((n, x) => n + x, 0);
   const live = pol.proposals.filter((g) => g.status === "open" || g.status === "queued");
   const today = new Date().toDateString();
   const todays = s.proposals.filter((p) => new Date(p.createdAt).toDateString() === today);
@@ -1345,7 +1350,7 @@ function Overview({ ctx, wallet, refreshWallet, go }: { ctx: Ctx; wallet: Wallet
         <div className="tile rise" style={st(1)}><div className="k">Wallet (USDC) <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{wallet ? usd(Number(wallet.usdc)) : "…"}</div><div className="note wallet-note"><span>Gateway {wallet?.gateway == null ? "—" : usd(Number(wallet.gateway))}</span>{wallet && ctx.can("wallet") && <button type="button" className="add-funds" onClick={() => setAdding(true)}><Icon name="plus" size={12} /> Add funds</button>}</div></div>
         <div className="tile rise" style={st(2)}><div className="k" title="Actions Karuna blocked before they ran, in the last 7 days">Stopped this week <Icon name="shield" size={14} /></div><div className="v heading-gradient">{stoppedWeek}</div><div className="note one-line">of {week.length} actions{inEscrow > 0 ? ` · $${Math.round(inEscrow).toLocaleString()} in escrow` : ""}</div></div>
         <div className="tile rise" style={st(3)}><div className="k">Actions today <Icon name="activity" size={14} /></div><div className="v heading-gradient">{actionsToday}</div><div className="note one-line">{allowedToday} allowed · {blockedToday} blocked · {heldToday} held</div></div>
-        <div className="tile rise" style={st(4)}><div className="k">Spent today <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{usd(spent)}</div><div className="note">of {usd(pol.agents.filter((a) => a.active).reduce((n, a) => n + a.capUsd, 0))} allowed</div></div>
+        <div className="tile rise" style={st(4)}><div className="k">Spent today <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{usd(spent)}</div><div className="note">{isNoLimit(allowedDaily) ? "no daily limit" : `of ${usd(allowedDaily)} allowed`}</div></div>
       </div>
 
       {s.exposure && <WorstCase x={s.exposure} names={Object.fromEntries(pol.agents.map((a) => [a.id, a.name]))} />}
@@ -1499,6 +1504,8 @@ function ApprovalCard({ p, ctx, dharma }: { p: Proposal; ctx: Ctx; dharma: Addre
   const agent = s.policy!.agents.find((a) => a.id === p.agentId);
   const iApproved = p.approvals.some((a) => a.memberId === myAddr);
   const others = p.approvals.filter((a) => a.memberId !== myAddr).map((a) => ctx.name(a.memberId));
+  // Rule text names payees by address (the engine has no names); show the saved name instead.
+  const named = (t: string) => t.replace(/0x[0-9a-fA-F]{40}/g, (a) => s.policy!.payees.find((x) => x.account === a.toLowerCase())?.name ?? a);
   const decide = (approve: boolean) =>
     run(async () => {
       const r = await decidePayment(me, dharma, p.id, p.payloadHash ?? "0".repeat(64), approve);
@@ -1514,7 +1521,7 @@ function ApprovalCard({ p, ctx, dharma }: { p: Proposal; ctx: Ctx; dharma: Addre
       <div className="facts">
         <div className="lbl"><Icon name="shield" size={14} /> Verified by Karuna</div>
         <dl>
-          <FactRow label="Why it needs you" value={p.decision.reason} />
+          <FactRow label="Why it needs you" value={named(p.decision.reason)} />
           {p.facts.map((f) => (<FactRow key={f.label} label={f.label} value={f.value} tone={f.tone} />))}
           {p.ifUnanswered && <FactRow label="If nobody answers" value={p.ifUnanswered} />}
         </dl>
@@ -1708,7 +1715,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
       await submitChange(ctx.me, s.org.dharma!.address as Address, { kind: Kind.Propose, change: { op: "SetAgent", id: r.id, capUsd: levels ? 0 : Number(form.cap) } });
       setReveal({ token: r.token, agent: form.name, agentId: r.id });
       setForm({ name: "", cap: "1" });
-    }, `Proposed on Dharma — the agent works after ${pol.required} vote${pol.required > 1 ? "s" : ""} and ${pol.timelock}s${levels ? ", starting at Level 0" : ""}`);
+    }, `Proposed on Dharma — the agent works after ${votesText(pol.required, pol.timelock)}${levels ? ", starting at Level 0" : ""}`);
   };
 
   return (
@@ -2064,7 +2071,7 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
               <span className="rule-actions">
                 {r.active ? <Badge v={r.outcome} /> : <span className="badge badge-quiet">removed</span>}
                 {!r.core && r.active && (
-                  <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => ctx.change({ op: "RemoveRule", id: r.id })}>{r.outcome === "allow" ? "remove" : "propose removal"}</button>
+                  <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => ctx.change({ op: "RemoveRule", id: r.id })}>propose removal</button>
                 )}
                 {r.core && r.active && (
                   <button className="btn btn-ghost btn-sm" disabled={busy}
@@ -2108,8 +2115,8 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
                     {d.direction && <div className="draft-dir">
                       <span className={`tag${d.direction === "widens" ? " warn-tag" : ""}`}>{d.direction === "widens" ? "Widens" : "Narrows"}</span>
                       <span className="muted small">{d.direction === "widens"
-                        ? `Needs ${pol.required} vote${pol.required > 1 ? "s" : ""} and a ${waitText(pol.timelock)} wait. The proposal shows what it would have let through.`
-                        : `Can only allow less. Needs ${pol.required} vote${pol.required > 1 ? "s" : ""} and a ${waitText(pol.timelock)} wait.`}</span>
+                        ? `Needs ${votesText(pol.required, pol.timelock)}. The proposal shows what it would have let through.`
+                        : `Can only allow less. Needs ${votesText(pol.required, pol.timelock)}.`}</span>
                     </div>}
                   </div>
                   <div className="draft-actions">
@@ -2838,7 +2845,7 @@ function Drills({ ctx, switcher }: { ctx: Ctx; switcher?: ReactNode }) {
           {tests.slice(0, 10).map((t) => (
             <div className="res" key={t.id}>
               {t.status === "failed" ? <span className="badge badge-danger"><Icon name="x" size={12} />failed</span> : <Badge v={t.status === "passed" ? "allow" : "approval"}>{t.status}</Badge>}
-              <span className="small">{agentName(t.agentId)} · {s.shield.templates[t.template] ?? t.template} · {t.category}</span>
+              <span className="small">{agentName(t.agentId)} · {s.shield.labels?.[t.template] ?? s.shield.templates[t.template] ?? t.template}{t.category ? ` · ${t.category}` : ""}</span>
               <span className="muted small">{t.resolution ? `${t.resolution} · ` : ""}{ago(t.sentAt)}</span>
             </div>
           ))}
@@ -3296,7 +3303,7 @@ function DeviceList({ ctx, kind }: { ctx: Ctx; kind: "chat" | "coding" }) {
       // Its agent, and the vote to let it run outside a sandbox (it runs on that person's computer).
       await submitChange(me, dharma, { kind: Kind.Propose, change: { op: "SetAgent", id: agentId, capUsd: 0 }, label: d.name });
       await submitChange(me, dharma, { kind: Kind.Propose, change: { op: "AddRule", id: `unsandboxed-${agentId}`.slice(0, 31), outcome: "Allow", scope: "unsandboxed", target: agentId } });
-    }, `Approved. ${d.name} works once the vote passes (${s.policy!.timelock}s), starting at Level 0`);
+    }, `Approved. ${d.name} works after ${votesText(s.policy!.required, s.policy!.timelock)}, starting at Level 0`);
   return (
     <div className="device-list">
       <span className="field-label">{kind === "chat" ? "Chat apps" : "Coding agents"} · {connected.length} connected{pending.length ? ` · ${pending.length} waiting` : ""}</span>
@@ -3430,7 +3437,7 @@ function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
       setD(null);
       setJob("");
       setClaude("");
-    }, `Proposed. Karuna runs it once the vote passes (${s.policy!.timelock}s), starting at Level 0`);
+    }, `Proposed. Karuna runs it after ${votesText(s.policy!.required, s.policy!.timelock)}, starting at Level 0`);
   return (
     <div className="card new-agent">
       <div className="hd">
@@ -3801,7 +3808,7 @@ function Preflight({ a, ctx }: { a: AgentView; ctx: Ctx }) {
         {pf.status === "running" ? (
           <span className="preflight-title"><span className="spinner" aria-hidden /> Pre-flight: Testing… {pf.done} of {pf.total}</span>
         ) : (
-          <span className="preflight-title"><Icon name={pf.status === "passed" ? "check" : "alert"} size={14} /> Pre-flight {pf.status === "passed" ? "passed" : "failed"}</span>
+          <span className="preflight-title"><Icon name={pf.status === "passed" ? "check" : "alert"} size={14} /> Pre-flight {pf.status === "untested" ? "not tested: the agent didn't read its inbox" : pf.status}</span>
         )}
         {pf.status !== "running" && may && <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={again}>Run again</button>}
       </div>
@@ -3811,7 +3818,7 @@ function Preflight({ a, ctx }: { a: AgentView; ctx: Ctx }) {
             <span className="preflight-mark" aria-hidden>{r.passed === null ? <span className="dot" /> : <Icon name={r.passed ? "check" : "x"} size={12} />}</span>
             <span className="preflight-text">
               <span>{r.label}</span>
-              <small>{r.passed === null ? "waiting" : PREFLIGHT_RESOLUTION[r.resolution ?? ""] ?? r.resolution}</small>
+              <small>{r.unread ? "never read" : r.passed === null ? "waiting" : PREFLIGHT_RESOLUTION[r.resolution ?? ""] ?? r.resolution}</small>
               {r.fix && (
                 <span className="preflight-fix">
                   <span>{r.fix.summary}{r.fix.drafted && <span className="tag" style={{ marginLeft: 6 }}>drafted from its job</span>}</span>

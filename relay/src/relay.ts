@@ -197,7 +197,9 @@ export class Relay extends EventEmitter {
     if (!client || !dharma) return;
     const head = await client.getBlockNumber();
     const latest = this.opts.securityToken ? head - BigInt(this.opts.lagBlocks ?? 40) : head;
-    if (this.lastBlock === null) this.lastBlock = latest - 20n;
+    if (latest < 0n) return; // a chain younger than the lag: nothing to read yet
+    // Start 20 blocks back, but never before block 0 (a brand-new chain has fewer than 20).
+    if (this.lastBlock === null) this.lastBlock = latest >= 20n ? latest - 20n : -1n;
     if (latest <= this.lastBlock) return;
     // At most 2000 blocks a pass, from where the last pass ended: after an outage the net catches
     // up over a few polls instead of skipping the gap.

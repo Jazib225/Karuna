@@ -14,6 +14,7 @@ import { request as httpsRequest } from "node:https";
 import { TLSSocket } from "node:tls";
 import { Duplex } from "node:stream";
 import type { AddressInfo } from "node:net";
+import { networkInterfaces } from "node:os";
 import type { SandboxCA } from "./ca.ts";
 import type { Gatekeeper } from "./gatekeeper.ts";
 import { decodeBody, decodeExchange, modelCall } from "./models.ts";
@@ -30,6 +31,18 @@ interface Target {
   protocol: "http:" | "https:";
   host: string; // hostname
   port: number;
+}
+
+/**
+ * Where each run's proxy port listens. Docker Desktop (Windows, macOS) reaches this machine's
+ * 127.0.0.1 as host.docker.internal. Native Docker on Linux reaches it only through the docker0
+ * bridge address (host-gateway), so there the port listens on that address: still only reachable
+ * from this machine and its containers, never the network. KARUNA_PROXY_HOST overrides both.
+ */
+export function proxyListenHost(env: NodeJS.ProcessEnv = process.env, platform: string = process.platform, nics = networkInterfaces()): string {
+  if (env.KARUNA_PROXY_HOST) return env.KARUNA_PROXY_HOST;
+  if (platform !== "linux") return "127.0.0.1";
+  return nics.docker0?.find((a) => a.family === "IPv4")?.address ?? "127.0.0.1";
 }
 
 export class EgressProxy {
@@ -101,7 +114,7 @@ export class EgressProxy {
     server.on("clientError", (_e, socket) => socket.destroy());
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
-      server.listen(0, "127.0.0.1", () => resolve());
+      server.listen(0, proxyListenHost(), () => resolve());
     });
     this.servers.set(token, server);
     return (server.address() as AddressInfo).port;
