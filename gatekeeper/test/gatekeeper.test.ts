@@ -184,6 +184,20 @@ describe("setup deploys the org's own Dharma", () => {
     expect(onchain).not.toContain("Alice");
     expect(onchain).not.toContain("Secret project");
   });
+
+  it("records who created each agent: the console's member, or whoever proposed it", async () => {
+    const { id: fromConsole } = gk.prepareAgent("Console agent", alice.address);
+    const { id: proposedOnly } = gk.prepareAgent("Proposed agent");
+    await propose(alice, { op: "SetAgent", id: fromConsole, capUsd: 0 });
+    await propose(alice, { op: "SetAgent", id: proposedOnly, capUsd: 0 });
+    await waitTimelock();
+    const agents = gk.snapshot().policy!.agents;
+    for (const id of [fromConsole, proposedOnly]) {
+      expect(agents.find((a) => a.id === id)?.createdBy?.address).toBe(alice.address.toLowerCase());
+    }
+    // New agents start at Level 0, the narrowest level, whoever created them.
+    expect(agents.find((a) => a.id === fromConsole)?.level).toBe(0);
+  }, 30_000);
 });
 
 describe("Rule changes: every member edit is voted on; only panic is instant", () => {
@@ -846,6 +860,9 @@ describe("plain-English rules: a draft that worked is saved and reused", () => {
       expect(calls).toBe(1); // no second model call
       expect(again.rules.map((r) => r.sentence)).toEqual(first.rules.map((r) => r.sentence));
       expect(again.rules[0].change.id).not.toBe(first.rules[0].change.id);
+      // Narrower by default: each drafted line says whether it narrows or widens.
+      expect(first.rules[0].direction).toBe("narrows");
+      expect(again.rules[0].direction).toBe("narrows");
     } finally {
       globalThis.fetch = realFetch;
     }

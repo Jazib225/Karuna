@@ -111,6 +111,8 @@ export interface AgentView {
   built?: { instructions: string; schedule: Schedule; scheduleText: string; paused: boolean; lastRunAt: string | null; provider?: "anthropic" | "groq" } | null;
   /** Pre-flight: three Drills sent when the agent first activated (or on Run again), and their results. */
   preflight?: PreflightView | null;
+  /** The member who created it. A new agent never gets more than its creator already runs. */
+  createdBy?: { address: string; name: string | null } | null;
 }
 
 export interface PreflightView {

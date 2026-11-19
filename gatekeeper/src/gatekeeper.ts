@@ -32,10 +32,10 @@ import {
   TEMPLATES, TEST_LABELS, PREFLIGHT_TEMPLATES, assertShieldSafe, autoRule, isAutoRule, makeTest, makeLinkTest, makeCredentialTest, followsLink, tracesTo,
   type InboxMessage, type ShieldTest, type TestTemplate,
 } from "./shield.ts";
-import { applyChange, recommendFix, fixTightens, type Fix, type FixCategory, band, bandLabel, learnedDenyRule, previewLoosening, suggestions, isLoosening, type PastRequest, type Precedent, type Preview } from "./learn.ts";
+import { applyChange, recommendFix, fixTightens, type Fix, type FixCategory, band, bandLabel, learnedDenyRule, previewLoosening, suggestions, isLoosening, creatorCeilingUsd, direction, type PastRequest, type Precedent, type Preview } from "./learn.ts";
 import { PivotTracker, allText, findCredential, findTrap, mintTraps, targetOf, trapEnvFile, trapLeakMessage, type TrapSet } from "./swarm.ts";
 import { SecretStore } from "./secrets.ts";
-import { DRAFT_KEYS, NoDrafterError, draftRules, freshIds, type DraftResult } from "./draft.ts";
+import { DRAFT_KEYS, NoDrafterError, draftRules, freshIds, type DraftResult, type DraftRule } from "./draft.ts";
 import { hookRequest, type HookCall } from "./hook.ts";
 import { ConnectorClients, exposedName, splitName, toolFingerprint, type ConnectorDef } from "./connectors.ts";
 import type { ModelExchange } from "./models.ts";
@@ -424,6 +424,9 @@ export function inviteTypedData(org: string, invite: string, member: Address, na
 }
 
 // ---------------------------------------------------------------- gatekeeper
+
+/** Each drafted rule tagged with whether it narrows what agents may do or may widen it. */
+const withDirection = (rules: DraftRule[]) => rules.map((r) => ({ ...r, direction: direction(r.change as Change) }));
 
 export class Gatekeeper extends EventEmitter {
   org: OrgFile;
@@ -1193,6 +1196,7 @@ export class Gatekeeper extends EventEmitter {
       throw new GatekeeperError("Rule changes go to a vote: propose it instead. Only the panic button and lowering a level apply instantly.", 409);
     }
     if (change.op === "SetLevel" && a.kind !== Kind.Vote) this.checkLevelChange(change, a.kind === Kind.Tighten);
+    if (change.op === "SetAgent" && a.kind === Kind.Propose) this.checkCreatorCeiling(change, signer);
     let roleName: string | null = null;
     if (change.op === "SetRole" && !this.isMember(change.member)) throw new GatekeeperError("Only voting members have roles. Propose adding them first.", 409);
     if (change.op === "SetRolePerms" && change.permissions !== DELETE_ROLE && change.role > ROLE_MEMBER) {
@@ -1237,6 +1241,10 @@ export class Gatekeeper extends EventEmitter {
       throw new GatekeeperError(msg, e instanceof ChainError && e.reason ? 409 : 502);
     }
     // Role names are kept here once Dharma has the role.
+    // Whoever proposes a new agent is its creator (unless the console already recorded one).
+    if (a.kind === Kind.Propose && change.op === "SetAgent" && !p.agents.some((x) => x.id === change.id)) {
+      (this.org.agentCreators ??= {})[change.id] ??= lower(signer);
+    }
     if (change.op === "SetRolePerms") {
       const r = this.rolesFile();
       const key = roleKey(change.role);
@@ -1297,7 +1305,7 @@ export class Gatekeeper extends EventEmitter {
     // model call: rehearse the demo sentence once and it can't fail on stage. New ids every time.
     const cacheKey = sha256(`${policy.trim().replace(/\s+/g, " ").toLowerCase()}\n${JSON.stringify(ctx)}`);
     const saved = this.state.drafts?.[cacheKey];
-    if (saved) return { rules: freshIds(saved.rules), note: saved.note, skipped: saved.skipped, model: "saved", savedFrom: saved.model };
+    if (saved) return { rules: withDirection(freshIds(saved.rules)), note: saved.note, skipped: saved.skipped, model: "saved", savedFrom: saved.model };
     // Keys marked for the drafter; a key literally named "groq"/"gemini" still works (older setups).
     const keys = Object.fromEntries(DRAFT_KEYS.map((k) => [k, this.deps.secrets?.drafterKey(k) ?? this.deps.secrets?.reveal(k) ?? null]));
     let out: DraftResult;
@@ -1313,7 +1321,7 @@ export class Gatekeeper extends EventEmitter {
       this.state.drafts = Object.fromEntries(keep);
       this.save();
     }
-    return out;
+    return { ...out, rules: withDirection(out.rules) };
   }
 
   nonceOf(address: string) {
@@ -1321,7 +1329,7 @@ export class Gatekeeper extends EventEmitter {
   }
 
   /** Reserve an agent id and issue its token. The agent works once Dharma adds it (by vote). */
-  prepareAgent(name: unknown) {
+  prepareAgent(name: unknown, by?: string | null) {
     this.requireReady();
     const label = requireText(name, "Agent name", 40);
     const taken = new Set([...this.policy!.agents.map((a) => a.id), ...Object.keys(this.org.agentTokens), ...Object.keys(this.org.labels.agents)]);
@@ -1329,7 +1337,8 @@ export class Gatekeeper extends EventEmitter {
     const token = `kag_${randomBytes(24).toString("base64url")}`;
     this.org.agentTokens[id] = sha256(token);
     this.org.labels.agents[id] = label;
-    this.logEvent({ type: "agent-token-issued", agent: id });
+    if (by) (this.org.agentCreators ??= {})[id] = lower(by);
+    this.logEvent({ type: "agent-token-issued", agent: id, ...(by ? { by: lower(by) } : {}) });
     this.save();
     return { id, token };
   }
@@ -2274,6 +2283,25 @@ export class Gatekeeper extends EventEmitter {
    * A member's level change, before it's relayed. Lowering (instant) must say "member"; raising
    * (a proposal) must say "vote", go one level at a time, and have a clean record from the Stream.
    */
+  /**
+   * Narrower by default: adding an agent needs the "agents" permission, and its creator can't give
+   * it a bigger allowance than any agent they already run ($5/day for their first). From Dharma v3
+   * on, levels set spend and every new agent starts at Level 0, so only the permission applies.
+   */
+  private checkCreatorCeiling(c: Extract<Change, { op: "SetAgent" }>, signer: string) {
+    const pol = this.policy!;
+    const existing = pol.agents.find((x) => x.id === c.id);
+    if (!existing) this.requirePermission(signer, "agents");
+    if (pol.version >= 3) return;
+    const creators = this.org.agentCreators ?? {};
+    const creator = creators[c.id] ?? (existing ? null : lower(signer));
+    if (creator !== lower(signer) || c.capUsd <= (existing?.capUsd ?? 0)) return;
+    const ceiling = creatorCeilingUsd(pol.agents, creators, creator, c.id);
+    if (c.capUsd > ceiling.capUsd) {
+      throw new GatekeeperError(`Its creator can't give it more than $${ceiling.capUsd}/day ${ceiling.first ? "for their first agent" : "(the most any agent they run has)"}. Another member can propose more.`, 409);
+    }
+  }
+
   private checkLevelChange(c: Extract<Change, { op: "SetLevel" }>, instant: boolean) {
     const current = this.levelOf(c.agent);
     if (current === null) throw new GatekeeperError(this.policy && this.policy.version < 3 ? "Trust levels need Dharma v3: upgrade first" : "Unknown agent", 409);
@@ -2415,7 +2443,7 @@ export class Gatekeeper extends EventEmitter {
     const d = (this.state.devices ?? []).find((x) => x.id === id);
     if (!d || d.status !== "pending") throw new GatekeeperError("No such connection request waiting", 404);
     const agentId = typeof input.agentId === "string" && input.agentId ? input.agentId : null;
-    const { id: agent, token } = agentId ? { id: agentId, ...this.rotateAgentToken(agentId) } : this.prepareAgent(d.name);
+    const { id: agent, token } = agentId ? { id: agentId, ...this.rotateAgentToken(agentId) } : this.prepareAgent(d.name, typeof input.by === "string" ? input.by : null);
     d.status = "approved";
     d.agentId = agent;
     d.pendingToken = token;
@@ -2989,10 +3017,10 @@ export class Gatekeeper extends EventEmitter {
   }
 
   /** Create a built agent locally (its existence, payees and rules go to Dharma from the console). */
-  buildAgent(input: { name?: unknown; instructions?: unknown; schedule?: unknown; provider?: unknown }) {
+  buildAgent(input: { name?: unknown; instructions?: unknown; schedule?: unknown; provider?: unknown }, by?: string | null) {
     const instructions = requireText(input.instructions, "Instructions", 6000);
     const schedule = parseSchedule(input.schedule);
-    const { id } = this.prepareAgent(input.name); // its token is never kept: each run gets a fresh one
+    const { id } = this.prepareAgent(input.name, by); // its token is never kept: each run gets a fresh one
     (this.state.builtAgents ??= {})[id] = { instructions, schedule, paused: false, createdAt: this.now().toISOString(), ...(input.provider === "groq" ? { provider: "groq" as const } : {}) };
     this.logEvent({ type: "agent-built", agent: id, schedule: scheduleText(schedule) });
     this.save();
@@ -3673,6 +3701,10 @@ export class Gatekeeper extends EventEmitter {
     const spent = this.spentToday();
     const v = this.log.verifyNew(); // the console asks on every change: check only what's new
     const L = this.labels();
+    const creatorOf = (id: string) => {
+      const c = this.org.agentCreators?.[id];
+      return c ? { address: c, name: L.member(c) ?? null } : null;
+    };
     const frozen = this.isFrozen();
     const worst = pol ? this.exposureNow(pol) : null;
     return {
@@ -3710,6 +3742,7 @@ export class Gatekeeper extends EventEmitter {
               })(),
               eligibility: level === null ? null : levelUpEligibility(record, level),
               preflight: this.preflightView(a.id),
+              createdBy: creatorOf(a.id),
             };
           }),
           // Agents with a token but not on Dharma: shown only while a vote to add them is open or
@@ -3717,7 +3750,7 @@ export class Gatekeeper extends EventEmitter {
           ...Object.keys(this.org.agentTokens)
             .filter((id) => !pol.agents.some((a) => a.id === id))
             .filter((id) => pol.proposals.some((p) => (p.status === "open" || p.status === "queued") && p.change?.op === "SetAgent" && p.change.id === id))
-            .map((id) => ({ id, name: L.agent(id) ?? id, capUsd: 0, spentTodayUsd: 0, active: false, hasToken: true, level: null, record: null, eligibility: null, built: null, preflight: null })),
+            .map((id) => ({ id, name: L.agent(id) ?? id, capUsd: 0, spentTodayUsd: 0, active: false, hasToken: true, level: null, record: null, eligibility: null, built: null, preflight: null, createdBy: creatorOf(id) })),
         ],
         payees: pol.payees.map((p) => ({ account: lower(p.account), category: p.category, name: L.payee(p.account) ?? null })),
         domains: pol.domains,

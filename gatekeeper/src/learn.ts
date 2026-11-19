@@ -274,3 +274,28 @@ export function fixTightens(c: Change, rules: { id: string; outcome: string; act
   if (c.op === "RemoveRule") return rules.some((r) => r.id === c.id && r.active && r.outcome === "allow");
   return false;
 }
+
+// ------------------------------------------------------------------ Narrower by default
+
+/** Whether a drafted or proposed change narrows what agents may do, or may widen it. */
+export const direction = (c: Change): "narrows" | "widens" => (isLoosening(c) ? "widens" : "narrows");
+
+/** A creator's first agent may get at most this daily allowance (Dharma before v3, where caps set spend). */
+export const FIRST_AGENT_CAP_USD = 5;
+
+/**
+ * The most daily allowance a member can give an agent they created: the highest cap of any other
+ * agent they already run, and never less than FIRST_AGENT_CAP_USD (all a first agent may get).
+ * From Dharma v3 on, an agent's trust level sets what it may spend and every new agent starts at
+ * Level 0, so this only applies to older orgs.
+ */
+export function creatorCeilingUsd(
+  agents: { id: string; capUsd: number }[],
+  creators: Record<string, string>,
+  creator: string,
+  exclude: string,
+): { capUsd: number; first: boolean } {
+  const mine = agents.filter((a) => a.id !== exclude && creators[a.id] === creator.toLowerCase());
+  if (!mine.length) return { capUsd: FIRST_AGENT_CAP_USD, first: true };
+  return { capUsd: Math.max(FIRST_AGENT_CAP_USD, ...mine.map((a) => a.capUsd)), first: false };
+}

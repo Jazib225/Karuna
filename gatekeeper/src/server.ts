@@ -327,13 +327,13 @@ export function consoleApi(
       }
       // The relay's QuickNode Streams: a USDC transfer out of the org's wallet (watchdog), and the
       // agents' records rebuilt from Dharma's events (trust levels).
-      if (method === "POST" && (m = path.match(/^\/devices\/([\w-]+)\/approve$/))) return send(res, 200, gk.approveDevice(m[1], body));
+      if (method === "POST" && (m = path.match(/^\/devices\/([\w-]+)\/approve$/))) return send(res, 200, gk.approveDevice(m[1], { ...body, by: me ?? body.by }));
       if (method === "POST" && (m = path.match(/^\/devices\/([\w-]+)\/deny$/))) return send(res, 200, gk.denyDevice(m[1]));
       if (method === "POST" && (m = path.match(/^\/devices\/([\w-]+)\/revoke$/))) return send(res, 200, gk.revokeDevice(m[1]));
       if (method === "POST" && (m = path.match(/^\/connectors\/tools\/(.+)\/accept$/))) return send(res, 200, gk.acceptToolChange(decodeURIComponent(m[1])));
       // Agents Karuna builds and runs, and every run's timeline.
       if (method === "POST" && path === "/agents/draft") return send(res, 200, await gk.draftAgent(body.text));
-      if (method === "POST" && path === "/agents/build") return send(res, 200, gk.buildAgent(body));
+      if (method === "POST" && path === "/agents/build") return send(res, 200, gk.buildAgent(body, me));
       if (method === "PATCH" && (m = path.match(/^\/agents\/([\w-]+)\/built$/))) return send(res, 200, gk.updateBuiltAgent(m[1], body));
       if (method === "POST" && (m = path.match(/^\/agents\/([\w-]+)\/run$/))) return send(res, 200, gk.runBuiltAgent(m[1], "Run now"));
       // Pre-flight: three Drills for one agent (Run again), and "Apply fix" for one that failed.
@@ -360,7 +360,7 @@ export function consoleApi(
       if (method === "PATCH" && path === "/settings") return send(res, 200, (gk.renameOrg(body.orgName), { ok: true }));
       if (method === "POST" && path === "/dharma/action") return send(res, 200, await gk.submitAction(body as unknown as SignedAction));
       if (method === "POST" && path === "/rules/draft") return send(res, 200, await gk.draftRules(body.text));
-      if (method === "POST" && path === "/agents/prepare") return send(res, 200, gk.prepareAgent(body.name));
+      if (method === "POST" && path === "/agents/prepare") return send(res, 200, gk.prepareAgent(body.name, me));
       if (method === "POST" && (m = path.match(/^\/agents\/([\w-]+)\/rotate-token$/))) return send(res, 200, gk.rotateAgentToken(m[1]));
       if (method === "POST" && path === "/keys") {
         if (!secrets) return send(res, 501, { error: "No key store" });

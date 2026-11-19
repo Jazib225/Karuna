@@ -11,7 +11,7 @@ import { Kind, actionTypedData, encodeChange, paymentDecisionTypedData, type Cha
 import { Store } from "../src/store.ts";
 import { Gatekeeper, type SignedAction } from "../src/gatekeeper.ts";
 import { ViemChainWriter } from "../src/chain.ts";
-import { applyChange, band, isLoosening, learnedDenyId } from "../src/learn.ts";
+import { applyChange, band, creatorCeilingUsd, direction, FIRST_AGENT_CAP_USD, isLoosening, learnedDenyId } from "../src/learn.ts";
 import type { WalletBackend, X402Quote } from "../src/wallet.ts";
 
 const PORT = 21545 + Math.floor(Math.random() * 1000);
@@ -186,5 +186,28 @@ describe("Preview Before Loosening", () => {
     expect(isLoosening({ op: "AddRule", id: "r3", outcome: "Allow", scope: "http", target: "example.com" })).toBe(true);
     expect(isLoosening({ op: "SetPayee", account: zeroAddress, category: "supplies" })).toBe(true);
     expect(isLoosening({ op: "Freeze" })).toBe(false);
+  });
+});
+
+describe("Narrower by default", () => {
+  it("a drafted block narrows; a drafted allow, approval or new payee widens", () => {
+    expect(direction({ op: "AddRule", id: "r1", outcome: "Deny", scope: "shell", target: "git push" })).toBe("narrows");
+    expect(direction({ op: "AddRule", id: "r2", outcome: "Allow", scope: "http", target: "example.com" })).toBe("widens");
+    expect(direction({ op: "AddRule", id: "r3", outcome: "Approval", scope: "file_write", target: "finance/" })).toBe("widens");
+    expect(direction({ op: "SetPayee", account: zeroAddress, category: "supplies" })).toBe("widens");
+  });
+
+  it("a creator's first agent is capped at $5/day; later ones at the most any agent they run has", () => {
+    const alice = "0x00000000000000000000000000000000000000a1";
+    const bob = "0x00000000000000000000000000000000000000b2";
+    expect(creatorCeilingUsd([], {}, alice, "new")).toEqual({ capUsd: FIRST_AGENT_CAP_USD, first: true });
+    const agents = [{ id: "ops", capUsd: 20 }, { id: "bills", capUsd: 50 }, { id: "new", capUsd: 0 }];
+    const creators = { ops: alice, bills: bob, new: alice };
+    expect(creatorCeilingUsd(agents, creators, alice, "new")).toEqual({ capUsd: 20, first: false });
+    expect(creatorCeilingUsd(agents, creators, bob, "other")).toEqual({ capUsd: 50, first: false });
+    // An agent doesn't raise its own ceiling, and the ceiling never drops below a first agent's.
+    expect(creatorCeilingUsd(agents, creators, alice, "ops")).toEqual({ capUsd: FIRST_AGENT_CAP_USD, first: false });
+    // Addresses compare in lower case.
+    expect(creatorCeilingUsd(agents, creators, alice.toUpperCase().replace("0X", "0x"), "new").capUsd).toBe(20);
   });
 });

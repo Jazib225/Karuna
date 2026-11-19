@@ -26,6 +26,8 @@ export interface OrgFile {
     payees: Record<string, string>; // lowercased address -> name
   };
   agentTokens: Record<string, string>; // agent id -> sha256(token)
+  /** Who created each agent (lowercased member address). A new agent never gets more than its creator already runs. */
+  agentCreators?: Record<string, string>;
   enrollments: { address: string; name: string; requestedAt: string; via?: "invite" }[];
   /** Invite links: anyone with one can send a join request from their own Karuna (members still vote). */
   invites?: Invite[];

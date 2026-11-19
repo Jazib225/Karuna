@@ -1744,6 +1744,7 @@ function Agents({ ctx }: { ctx: Ctx }) {
                         <button className="btn btn-ghost btn-sm" disabled={busy}>propose</button>
                       </form>
                     )}
+                    {a.createdBy && <span className="tag" title="A new agent never gets more than its creator already runs">created by {ctx.name(a.createdBy.address)}</span>}
                     <span className="tag">{a.hasToken ? "token issued" : "no token"}</span>
                     {s.sandbox.unsandboxed.includes(a.id)
                       ? <span className="tag warn-tag" title="Voted to run outside a sandbox: only money and keys are enforced">partially enforced</span>
@@ -1900,7 +1901,7 @@ const DRAFTER_KEY = "gemini";
 type RuleKind = "payment" | "http" | "shell" | "file" | "message";
 type RuleChange = Extract<Change, { op: "AddRule" }>;
 interface RuleForm { kind: RuleKind; outcome: "Deny" | "Approval" | "Allow"; agent: string; target: string; method: string; fileOp: string; category: string; maxUsd: string }
-interface RuleDraft { change: RuleChange; sentence: string }
+interface RuleDraft { change: RuleChange; sentence: string; direction?: "narrows" | "widens" }
 const EMPTY_RULE: RuleForm = { kind: "payment", outcome: "Deny", agent: "", target: "", method: "", fileOp: "", category: "", maxUsd: "" };
 
 /** The form as the exact Dharma change it proposes, or why it can't be proposed yet. */
@@ -2104,6 +2105,12 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
                   <div className="draft-text">
                     <div className="draft-sentence">{describeRule(d.change, names)}</div>
                     <code className="draft-code">{d.change.outcome.toLowerCase()} · {d.change.scope}{d.change.target ? ` → ${d.change.target}` : ""}{d.change.agent ? ` · ${d.change.agent}` : " · every agent"}{d.change.maxUsd ? ` · ≤ $${d.change.maxUsd}` : ""}</code>
+                    {d.direction && <div className="draft-dir">
+                      <span className={`tag${d.direction === "widens" ? " warn-tag" : ""}`}>{d.direction === "widens" ? "Widens" : "Narrows"}</span>
+                      <span className="muted small">{d.direction === "widens"
+                        ? `Needs ${pol.required} vote${pol.required > 1 ? "s" : ""} and a ${waitText(pol.timelock)} wait. The proposal shows what it would have let through.`
+                        : `Can only allow less. Needs ${pol.required} vote${pol.required > 1 ? "s" : ""} and a ${waitText(pol.timelock)} wait.`}</span>
+                    </div>}
                   </div>
                   <div className="draft-actions">
                     <button className="btn btn-ghost btn-sm" type="button" onClick={() => setRule(formFromChange(d.change))}>Edit</button>
@@ -2111,7 +2118,21 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
                   </div>
                 </div>
               ))}
-              {draftNote?.model && <div className="hint">{draftNote.model === "saved" ? `From a saved draft (first drafted by ${draftNote.savedFrom ?? "a model"}), no model call needed.` : `Drafted by ${draftNote.model}.`}</div>}
+              {drafts.length > 1 && (() => {
+                const widen = drafts.filter((d) => d.direction === "widens").length;
+                return (
+                  <div className="draft-all">
+                    <span className="muted small">{drafts.length - widen} narrow{widen ? `, ${widen} widen` : ""}</span>
+                    <button className="btn btn-dark btn-sm" type="button" disabled={busy} onClick={async () => {
+                      for (const d of drafts) {
+                        if (!(await ctx.change(d.change))) break;
+                        setDrafts((x) => x?.filter((y) => y !== d) ?? null);
+                      }
+                    }}>Propose all {drafts.length}</button>
+                  </div>
+                );
+              })()}
+              {draftNote?.model &&<div className="hint">{draftNote.model === "saved" ? `From a saved draft (first drafted by ${draftNote.savedFrom ?? "a model"}), no model call needed.` : `Drafted by ${draftNote.model}.`}</div>}
               {draftNote?.note && <div className="hint">Note from the drafter: {draftNote.note}</div>}
               {!!draftNote?.skipped.length && <div className="hint">Left out {draftNote.skipped.length} suggestion{draftNote.skipped.length > 1 ? "s" : ""} that didn't fit your org: {draftNote.skipped.join("; ")}.</div>}
             </div>

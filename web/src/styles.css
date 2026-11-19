@@ -731,6 +731,9 @@ select {
 .draft-sentence { font-size: 14px; font-weight: 500; }
 .draft-code { font-family: var(--font-mono); font-size: 11.5px; color: var(--n500); overflow-wrap: anywhere; }
 .draft-actions { display: flex; gap: 8px; flex: none; }
+.draft-dir { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; }
+.draft-dir .tag { height: 20px; font-size: 11px; }
+.draft-all { display: flex; gap: 12px; align-items: center; justify-content: flex-end; }
 .rule-form .rule-preview { flex: 1 1 100%; font-size: 13px; color: var(--n600); }
 .rule-form .rule-preview strong { color: var(--n700); font-weight: 600; }
 @media (max-width: 640px) { .draft { flex-direction: column; align-items: stretch; } .draft-actions { justify-content: flex-end; } }

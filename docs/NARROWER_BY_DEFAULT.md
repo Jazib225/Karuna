@@ -2,14 +2,14 @@
 
 Every new person and agent starts with less power than whoever set it up, and every change shows whether it narrows or widens what is allowed.
 
-## Status (branch `approvals-and-roles`, not yet merged)
+## Status (Nov 2026): all four built, on `main`
 
 | Item | State |
 |---|---|
-| 1. On-chain team roles (Flat / Tree) | Contract done: Dharma v4, 24,033 bytes (limit 24,576), 72 contract tests pass. JS encoding (`SetRole`, `SetRolePerms`, `SetStructure`, `Kind.Manage`) done. Gatekeeper relays `manage`. Console partly wired. |
-| 2. Agents inherit their creator's limits | Not started |
-| 3. Pre-flight test on new agents | Not started |
-| 4. Draft diff on proposals | Not started |
+| 1. On-chain team roles (Flat / Tree) | Built. Roles live on Dharma (v4+); the Gatekeeper reads them from the chain; the console signs `Kind.Manage` for role edits and offers Flat / Tree at setup. |
+| 2. Agents inherit their creator's limits | Built, adapted to trust levels. Each agent's creator is recorded (`org.agentCreators`) and shown on its card. Adding an agent needs the `agents` permission. From Dharma v3 on, a level sets what an agent may spend and every new agent starts at Level 0, the narrowest. On older Dharma, where the daily cap sets spend, a creator can't give an agent more than the most any agent they run has ($5/day for a first agent). |
+| 3. Pre-flight test on new agents | Built: three Drills on every new agent, with "Apply fix" and "Run again". |
+| 4. Draft diff on proposals | Built, adapted to Dharma v5. Each drafted rule is tagged **Narrows** or **Widens**, with the vote and wait it needs, and "Propose all N" sends the whole draft. Since v5 every member edit is voted on, tightenings included, so nothing drafted applies at once. |
 
 ## 1. On-chain roles — finish
 - Gatekeeper `chain.ts`: read `structure()`, `memberRoles()`, `rolePerms()`, `permissionsOf()` into the policy; `roleOf`/`can` read from it. Only Viewers and custom role names stay local.
