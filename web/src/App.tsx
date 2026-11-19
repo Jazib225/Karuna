@@ -16,7 +16,7 @@ import { inviteCode, joinStatus, lookupInvite, sendJoin, sentJoins, type SentJoi
 import { IN_APP, getIslandEnabled, setDesktopSigner, setIslandEnabled } from "./desktop.ts";
 import { setThemePref, useThemePref, type ThemePref } from "./theme.ts";
 import { eventName, NAMED_KEYS } from "./eventNames.ts";
-import { Picker } from "./picker.tsx";
+import { Picker, Select } from "./picker.tsx";
 
 // The menu: everyday work first, then settings. Older page names (pop-ups, saved state) still resolve.
 type Page = "overview" | "activity" | "agents" | "safety" | "proposals" | "team" | "rules" | "appearance";
@@ -1620,9 +1620,7 @@ function Waits({ ctx }: { ctx: Ctx }) {
       <div className="wait-row">
         <span className="wait-label">{label}<small>{waitText(current)} now · {who}</small></span>
         <input className="select-sm mono" inputMode="decimal" aria-label={`${label} amount`} value={v.n} onChange={(e) => set({ ...v, n: e.target.value })} />
-        <select className="select-sm" aria-label={`${label} unit`} value={v.unit} onChange={(e) => set({ ...v, unit: e.target.value as Unit })}>
-          {Object.keys(UNITS).map((u) => <option key={u} value={u}>{u}</option>)}
-        </select>
+        <Select small label={`${label} unit`} value={v.unit} onChange={(u) => set({ ...v, unit: u as Unit })} options={Object.keys(UNITS).map((u) => ({ value: u, label: u }))} />
         <button className="btn btn-ghost btn-sm" disabled={ctx.busy || !ok}
           title={sec < min || sec > max ? `Between ${waitText(min) === "no wait" ? "0" : waitText(min)} and ${waitText(max)}` : undefined}
           onClick={async () => {
@@ -2108,48 +2106,41 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
         </div>
       </div>
 
-      <form className="card inline-form rule-form" onSubmit={addRule}>
+      <div className="card">
+        <div className="hd"><h2>New proposal</h2></div>
+      <form className="inline-form rule-form" onSubmit={addRule}>
         {!special && <label className="field"><span>Outcome</span>
-          <select value={rule.outcome} onChange={(e) => setRule({ ...rule, outcome: e.target.value as RuleForm["outcome"] })}>
-            <option value="Deny">Block</option>
-            <option value="Approval">Require approval</option>
-            <option value="Allow">Allow</option>
-          </select>
+          <Select label="Outcome" value={rule.outcome} onChange={(v) => setRule({ ...rule, outcome: v as RuleForm["outcome"] })}
+            options={[{ value: "Deny", label: "Block" }, { value: "Approval", label: "Require approval" }, { value: "Allow", label: "Allow" }]} />
         </label>}
         <label className="field"><span>Action</span>
-          <select value={special || rule.kind} onChange={(e) => {
-            const v = e.target.value;
+          <Select label="Action" value={special || rule.kind} onChange={(v) => {
             const isSpecial = v === "payee" || v === "site" || v === "threshold" || v === "escrow" || v.startsWith("set:");
             setSpecial(isSpecial ? (v as typeof special) : "");
             if (v.startsWith("set:")) setExtra((x) => ({ ...x, setting: "" }));
             setRule({ ...EMPTY_RULE, outcome: rule.outcome, agent: rule.agent, kind: isSpecial ? rule.kind : (v as RuleKind) });
-          }}>
-            <option value="payee">New payee</option>
-            <option value="site">Trusted site</option>
-            <option value="threshold">Two-signature limit</option>
-            <option value="escrow">Escrow for large payments</option>
-            <option value="payment">Payments</option>
-            <option value="http">Web requests</option>
-            <option value="shell">Shell commands</option>
-            <option value="file">Files</option>
-            <option value="message">Messages to other agents</option>
-            <optgroup label="Settings">
-              <option value="set:drillsPerDay">Drills per day</option>
-              <option value="set:drillWindowMinutes">Drill pass window</option>
-              <option value="set:holdSeconds">Approval hold</option>
-              <option value="set:swarmAgents">Swarm Stopper</option>
-              <option value="set:swarmWindowSeconds">Swarm Stopper window</option>
-              {(s.settings.gvisorAvailable || s.settings.values.requireGvisor === 1) && <option value="set:requireGvisor">Require gVisor</option>}
-            </optgroup>
-          </select>
+          }} options={[
+            { value: "payee", label: "New payee" },
+            { value: "site", label: "Trusted site" },
+            { value: "threshold", label: "Two-signature limit" },
+            { value: "escrow", label: "Escrow for large payments" },
+            { value: "payment", label: "Payments" },
+            { value: "http", label: "Web requests" },
+            { value: "shell", label: "Shell commands" },
+            { value: "file", label: "Files" },
+            { value: "message", label: "Messages to other agents" },
+            { value: "set:drillsPerDay", label: "Drills per day", group: "Settings" },
+            { value: "set:drillWindowMinutes", label: "Drill pass window", group: "Settings" },
+            { value: "set:holdSeconds", label: "Approval hold", group: "Settings" },
+            { value: "set:swarmAgents", label: "Swarm Stopper", group: "Settings" },
+            { value: "set:swarmWindowSeconds", label: "Swarm Stopper window", group: "Settings" },
+            ...(s.settings.gvisorAvailable || s.settings.values.requireGvisor === 1 ? [{ value: "set:requireGvisor", label: "Require gVisor", group: "Settings" }] : []),
+          ]} />
         </label>
         {settingName && (settingName === "requireGvisor" ? (
           <label className="field"><span>Require gVisor</span>
-            <select value={extra.setting} onChange={(e) => setExtra({ ...extra, setting: e.target.value })}>
-              <option value="">Choose…</option>
-              <option value="1">On: refuse boxes on plain Docker</option>
-              <option value="0">Off</option>
-            </select>
+            <Select label="Require gVisor" value={extra.setting} onChange={(v) => setExtra({ ...extra, setting: v })}
+              options={[{ value: "", label: "Choose…" }, { value: "1", label: "On: refuse boxes on plain Docker" }, { value: "0", label: "Off" }]} />
           </label>
         ) : (
           <label className="field"><span>{SETTING_FIELD[settingName]}</span>
@@ -2166,33 +2157,24 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
         {special === "escrow" && <>
           <label className="field"><span>Hold for</span><input className="mono" inputMode="decimal" value={extra.wait} onChange={(e) => setExtra({ ...extra, wait: e.target.value })} /></label>
           <label className="field"><span>Unit</span>
-            <select value={extra.unit} onChange={(e) => setExtra({ ...extra, unit: e.target.value as WaitUnit })}>
-              {Object.keys(WAIT_UNITS).map((u) => <option key={u} value={u}>{u}</option>)}
-            </select>
+            <Select label="Unit" value={extra.unit} onChange={(v) => setExtra({ ...extra, unit: v as WaitUnit })} options={Object.keys(WAIT_UNITS).map((u) => ({ value: u, label: u }))} />
           </label>
         </>}
         {!special && <label className="field"><span>Agent</span>
-          <select value={rule.agent} onChange={(e) => setRule({ ...rule, agent: e.target.value })}>
-            <option value="">Every agent</option>
-            {pol.agents.filter((a) => a.active).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-          </select>
+          <Select label="Agent" value={rule.agent} onChange={(v) => setRule({ ...rule, agent: v })} options={[{ value: "", label: "Every agent" }, ...pol.agents.filter((a) => a.active).map((a) => ({ value: a.id, label: a.name }))]} />
         </label>}
         {!special && rule.kind === "payment" && <>
           <label className="field"><span>Payee</span>
-            <select value={rule.target} onChange={(e) => setRule({ ...rule, target: e.target.value })}>
-              <option value="">Any payee</option>
-              {pol.payees.map((p) => <option key={p.account} value={p.account}>{p.name ?? short(p.account)}</option>)}
-            </select>
+            <Select label="Payee" value={rule.target} onChange={(v) => setRule({ ...rule, target: v })}
+              options={[{ value: "", label: "Any payee" }, ...pol.payees.map((p) => ({ value: p.account, label: p.name ?? short(p.account) }))]} />
           </label>
           <label className="field"><span>Category</span><input value={rule.category} onChange={(e) => setRule({ ...rule, category: e.target.value })} placeholder="any" /></label>
           {rule.outcome === "Allow" && <label className="field"><span>Up to (USD)</span><input inputMode="decimal" value={rule.maxUsd} onChange={(e) => setRule({ ...rule, maxUsd: e.target.value })} placeholder="no cap" /></label>}
         </>}
         {!special && rule.kind === "http" && <>
           <label className="field"><span>Method</span>
-            <select value={rule.method} onChange={(e) => setRule({ ...rule, method: e.target.value })}>
-              <option value="">Any</option>
-              {["GET", "POST", "PUT", "PATCH", "DELETE"].map((m) => <option key={m} value={m}>{m}</option>)}
-            </select>
+            <Select label="Method" value={rule.method} onChange={(v) => setRule({ ...rule, method: v })}
+              options={[{ value: "", label: "Any" }, ...["GET", "POST", "PUT", "PATCH", "DELETE"].map((m) => ({ value: m, label: m }))]} />
           </label>
           <label className="field grow"><span>Site</span><input value={rule.target} onChange={(e) => setRule({ ...rule, target: e.target.value })} placeholder="api.github.com or api.openai.com/v1/" /></label>
         </>}
@@ -2201,20 +2183,14 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
         )}
         {!special && rule.kind === "file" && <>
           <label className="field"><span>Access</span>
-            <select value={rule.fileOp} onChange={(e) => setRule({ ...rule, fileOp: e.target.value })}>
-              <option value="">Read or write</option>
-              <option value="read">Read</option>
-              <option value="write">Write</option>
-            </select>
+            <Select label="Access" value={rule.fileOp} onChange={(v) => setRule({ ...rule, fileOp: v })}
+              options={[{ value: "", label: "Read or write" }, { value: "read", label: "Read" }, { value: "write", label: "Write" }]} />
           </label>
           <label className="field grow"><span>Path</span><input value={rule.target} onChange={(e) => setRule({ ...rule, target: e.target.value })} placeholder="finance   ·   or a pattern like *.csv" /></label>
         </>}
         {!special && rule.kind === "message" && (
           <label className="field grow"><span>To</span>
-            <select value={rule.target} onChange={(e) => setRule({ ...rule, target: e.target.value })}>
-              <option value="">Any agent</option>
-              {pol.agents.filter((a) => a.active).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-            </select>
+            <Select label="To agent" value={rule.target} onChange={(v) => setRule({ ...rule, target: v })} options={[{ value: "", label: "Any agent" }, ...pol.agents.filter((a) => a.active).map((a) => ({ value: a.id, label: a.name }))]} />
           </label>
         )}
         <button className="btn btn-dark" disabled={busy || (specialChange ? "error" in specialChange : "error" in built)}><Icon name="plus" /> {special === "payee" ? "Propose payee" : special ? "Propose" : "Propose rule"}</button>
@@ -2222,6 +2198,7 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
           ? "error" in specialChange ? specialChange.error : <>Will be voted on as: <strong>{specialChange.text}</strong></>
           : "error" in built ? built.error : <>Will be voted on as: <strong>{describeRule(built.change, names)}</strong></>}</div>
       </form>
+      </div>
 
       </>}
     </div>
@@ -2390,9 +2367,7 @@ function Team({ ctx }: { ctx: Ctx }) {
                   {!tree ? (
                     <span className="tag">{(s.roles?.can[m.address]?.length ?? ALL_PERMISSIONS.length) === ALL_PERMISSIONS.length ? "Full access" : roleName(r)}</span>
                   ) : admin ? (
-                    <select className="select-sm" aria-label={`${m.name ?? "Member"}'s role`} value={r} disabled={busy} onChange={(e) => void setRole(m.address, e.target.value)}>
-                      {roles.filter((d) => d.id !== "viewer").map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-                    </select>
+                    <Select small label={`${m.name ?? "Member"}'s role`} value={r} disabled={busy} onChange={(v) => void setRole(m.address, v)} options={roles.filter((d) => d.id !== "viewer").map((d) => ({ value: d.id, label: d.name }))} />
                   ) : <span className="tag">{roleName(r)}</span>}
                   <button className="btn btn-deny btn-sm" disabled={busy || pol.members.length <= 1} onClick={() => ctx.change({ op: "RemoveMember", member: m.address as Address })}>Propose removal</button>
                 </span>
@@ -2528,12 +2503,10 @@ function InviteLinks({ ctx }: { ctx: Ctx }) {
         <h2>Invite links</h2>
         {s.publicUrl && (
           <span className="invite-create">
-            <select className="select-sm" aria-label="How long the link lasts" value={limits.days} onChange={(e) => setLimits({ ...limits, days: Number(e.target.value) })}>
-              {[1, 7, 30].map((d) => <option key={d} value={d}>{d === 1 ? "1 day" : `${d} days`}</option>)}
-            </select>
-            <select className="select-sm" aria-label="How many people can use the link" value={limits.uses} onChange={(e) => setLimits({ ...limits, uses: Number(e.target.value) })}>
-              {[1, 5, 10, 25, 50].map((u) => <option key={u} value={u}>{u === 1 ? "1 use" : `${u} uses`}</option>)}
-            </select>
+            <Select small label="How long the link lasts" value={String(limits.days)} onChange={(v) => setLimits({ ...limits, days: Number(v) })}
+              options={[1, 7, 30].map((d) => ({ value: String(d), label: d === 1 ? "1 day" : `${d} days` }))} />
+            <Select small label="How many people can use the link" value={String(limits.uses)} onChange={(v) => setLimits({ ...limits, uses: Number(v) })}
+              options={[1, 5, 10, 25, 50].map((u) => ({ value: String(u), label: u === 1 ? "1 use" : `${u} uses` }))} />
             <button className="btn btn-dark btn-sm" disabled={busy} onClick={create}><Icon name="plus" size={14} /> Create invite link</button>
           </span>
         )}
@@ -2815,15 +2788,11 @@ function Drills({ ctx, switcher }: { ctx: Ctx; switcher?: ReactNode }) {
       <ToolHead title="Drills" switcher={switcher} note={<span className="sub">A fake email that tries to trick the agent into acting.</span>} />
       <form className="inline-form" onSubmit={runTest}>
         <label className="field"><span>Agent</span>
-          <select value={test.agentId} onChange={(e) => setTest({ ...test, agentId: e.target.value })}>
-            {active.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-          </select>
+          <Select label="Agent" value={test.agentId} onChange={(v) => setTest({ ...test, agentId: v })} options={active.map((a) => ({ value: a.id, label: a.name }))} />
         </label>
         <label className="field"><span>Scam</span>
-          <select value={test.template} onChange={(e) => setTest({ ...test, template: e.target.value })}>
-            <option value="">Random</option>
-            {Object.entries(s.shield.templates).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-          </select>
+          <Select label="Scam" value={test.template} onChange={(v) => setTest({ ...test, template: v })}
+            options={[{ value: "", label: "Random" }, ...Object.entries(s.shield.templates).map(([k, v]) => ({ value: k, label: v }))]} />
         </label>
         <label className="field"><span>Pretends to be</span>
           <input list="shield-cats" value={test.category} onChange={(e) => setTest({ ...test, category: e.target.value })} placeholder={categories[0] ?? "supplies"} />
@@ -2862,9 +2831,7 @@ function Inbox({ ctx, switcher }: { ctx: Ctx; switcher?: ReactNode }) {
       <ToolHead title="Inboxes" switcher={switcher} note={s.inbox.length ? <span className="sub">{s.inbox.length} message{s.inbox.length === 1 ? "" : "s"}</span> : null} />
       <form className="pad stack-sm" onSubmit={send}>
         <div className="row-form">
-          <select aria-label="Agent" value={msg.agentId} onChange={(e) => setMsg({ ...msg, agentId: e.target.value })}>
-            {active.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-          </select>
+          <Select label="Agent" value={msg.agentId} onChange={(v) => setMsg({ ...msg, agentId: v })} options={active.map((a) => ({ value: a.id, label: a.name }))} />
           <input aria-label="From" required value={msg.from} onChange={(e) => setMsg({ ...msg, from: e.target.value })} placeholder="From (e.g. a supplier)" />
           <input aria-label="Subject" required value={msg.subject} onChange={(e) => setMsg({ ...msg, subject: e.target.value })} placeholder="Subject" />
         </div>
@@ -2903,10 +2870,8 @@ function Traps({ ctx, switcher }: { ctx: Ctx; switcher?: ReactNode }) {
       <div className="card">
         <ToolHead title="Trap credentials" switcher={switcher} note={<span className="sub">A fake API key planted where the agent can find it.</span>} />
         <form className="pad row-form" onSubmit={(e) => { e.preventDefault(); run(() => api("/traps", { agentId: target || undefined }), "Trap credentials minted. Plant them where the agent can find them."); }}>
-          <select aria-label="Which agent the traps are for" value={target} onChange={(e) => setTarget(e.target.value)}>
-            <option value="">For every agent</option>
-            {active.map((a) => <option key={a.id} value={a.id}>For {a.name}</option>)}
-          </select>
+          <Select label="Which agent the traps are for" value={target} onChange={setTarget}
+            options={[{ value: "", label: "For every agent" }, ...active.map((a) => ({ value: a.id, label: `For ${a.name}` }))]} />
           <button className="btn btn-dark" disabled={busy}><Icon name="key" /> Mint trap set</button>
         </form>
         {sw.traps.length === 0 ? <Empty icon="key">No traps yet. Mint a set above and plant it where an agent can find it.</Empty> : (
@@ -2919,9 +2884,7 @@ function Traps({ ctx, switcher }: { ctx: Ctx; switcher?: ReactNode }) {
                     <span className="small"><b>{t.secrets.map((x) => x.name).join(", ")}</b> <span className="muted">· {t.agentName ?? "every agent"} · {ago(t.createdAt)}</span></span>
                     <span className="shield-actions">
                       <button className="btn btn-ghost btn-sm" aria-expanded={shown === t.id} onClick={() => setShown(shown === t.id ? null : t.id)}>{shown === t.id ? "Hide" : "Show .env"}</button>
-                      <select className="select-sm" aria-label="Agent to leak the credentials to" value={to} onChange={(e) => setPlantTo({ ...plantTo, [t.id]: e.target.value })}>
-                        {active.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-                      </select>
+                      <Select small label="Agent to leak the credentials to" value={to} onChange={(v) => setPlantTo({ ...plantTo, [t.id]: v })} options={active.map((a) => ({ value: a.id, label: a.name }))} />
                       <button className="btn btn-dark btn-sm" disabled={busy || !to}
                         title="Delivers an IT-helpdesk email to the agent that 'accidentally' contains these credentials"
                         onClick={() => run(() => api(`/traps/${t.id}/plant`, { agentId: to }), "Planted: a 'leaked credentials' email is in the agent's inbox")}>
@@ -3343,15 +3306,15 @@ const SCHEDULE_TEXT = (s: Schedule) =>
 function ScheduleFields({ value, onChange }: { value: Schedule; onChange: (s: Schedule) => void }) {
   return (
     <div className="row-form">
-      <select className="select-sm" aria-label="When it runs" value={value.kind} onChange={(e) => {
-        const kind = e.target.value as Schedule["kind"];
+      <Select small label="When it runs" value={value.kind} onChange={(k) => {
+        const kind = k as Schedule["kind"];
         onChange(kind === "every" ? { kind, minutes: value.minutes ?? 60 } : kind === "daily" ? { kind, at: value.at ?? "09:00" } : { kind });
-      }}>
-        <option value="manual">Only when started</option>
-        <option value="every">Every…</option>
-        <option value="daily">Daily at…</option>
-        <option value="inbox">When a message arrives</option>
-      </select>
+      }} options={[
+        { value: "manual", label: "Only when started" },
+        { value: "every", label: "Every…" },
+        { value: "daily", label: "Daily at…" },
+        { value: "inbox", label: "When a message arrives" },
+      ]} />
       {value.kind === "every" && <label className="inline-field"><input className="select-sm mono" type="number" min={15} step={15} value={value.minutes} onChange={(e) => onChange({ ...value, minutes: Number(e.target.value) })} /> minutes</label>}
       {value.kind === "daily" && <input className="select-sm mono" type="time" aria-label="Time" value={value.at} onChange={(e) => onChange({ ...value, at: e.target.value })} />}
     </div>
@@ -3483,10 +3446,8 @@ function NewAgent({ ctx, own }: { ctx: Ctx; own?: ReactNode }) {
             )}
             {(d.note || d.rulesNote) && <p className="muted small">{[d.note, d.rulesNote].filter(Boolean).join(" ")}</p>}
             <label className="field"><span>Runs on</span>
-              <select value={model} onChange={(e) => { setModel(e.target.value as AgentModel); setClaude(""); }}>
-                <option value="groq">Groq · gpt-oss-20b (free tier)</option>
-                <option value="anthropic">Claude (paid)</option>
-              </select>
+              <Select label="Runs on" value={model} onChange={(v) => { setModel(v as AgentModel); setClaude(""); }}
+                options={[{ value: "groq", label: "Groq · gpt-oss-20b (free tier)" }, { value: "anthropic", label: "Claude (paid)" }]} />
               {model === "groq" && haveKey && <small className="muted">Uses your saved Groq key. Its reasoning shows in each run.</small>}
             </label>
             {!haveKey && (
