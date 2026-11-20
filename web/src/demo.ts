@@ -681,7 +681,7 @@ function handle(p: string[], verb: string, b: unknown, q: URLSearchParams): unkn
     if (a0 === "wallets" && a2 === "balance") return { usdc: wallet.usdc };
     return {};
   }
-  if (a0 === "auth" || a0 === "setup" || (a0 === "voice" && a1 === "session")) throw new ApiError("Not available in the demo");
+  if (a0 === "auth" || a0 === "setup" || a0 === "voice") throw new ApiError("Not available in the demo");
 
   if (a0 === "dharma" && a1 === "action") {
     const x = body<{ kind: number; op: number; data: Hex; proposalId: number; support: boolean; signer: string; label?: string }>(b);
@@ -693,7 +693,18 @@ function handle(p: string[], verb: string, b: unknown, q: URLSearchParams): unkn
     }
     if (x.kind === 1) return { txRef: txHash(), proposalId: propose(c, by, x.label).id };
     // Tighten (the panic button, lowering a level) and team roles apply at once.
-    if (c.op === "RemoveMember") return { txRef: txHash(), proposalId: propose(c, by, x.label).id };
+    // The host removes a teammate without a vote (Dharma v7): queued for the core wait, in public.
+    if (c.op === "RemoveMember") {
+      if (by !== pol.host) throw new ApiError("Only the host can remove a member without a vote");
+      if (s.frozen) throw new ApiError("Agents are frozen: unfreeze first");
+      const g = propose(c, by, x.label);
+      g.core = true;
+      g.status = "queued";
+      g.queuedAt = unixNow();
+      g.eta = g.queuedAt + pol.coreTimelock;
+      chain("ProposalQueued", { id: g.id, eta: g.eta });
+      return { txRef: txHash(), proposalId: g.id };
+    }
     apply(c, x.kind === 0 && c.op === "Freeze" ? memberName(by) : x.label);
     record({ event: { type: x.kind === 0 ? "tighten" : "manage", op: c.op, by } });
     return { txRef: txHash() };
