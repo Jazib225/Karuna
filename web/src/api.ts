@@ -334,8 +334,15 @@ async function sessionToken(): Promise<string | null> {
   return token;
 }
 
+/** The demo build answers from an in-browser Gatekeeper (demo.ts) instead of the network. */
+let demoHandler: ((path: string, body: unknown, verb: string) => Promise<unknown>) | null = null;
+export function setDemoHandler(h: typeof demoHandler) {
+  demoHandler = h;
+}
+
 export async function api<T = unknown>(path: string, body?: unknown, method?: string): Promise<T> {
   const verb = method ?? (body === undefined ? "GET" : "POST");
+  if (demoHandler) return (await demoHandler(path, body, verb)) as T;
   const send = async () => {
     const token = verb === "GET" ? session?.token ?? null : await sessionToken();
     return fetch(`/api${path}`, {

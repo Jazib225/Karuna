@@ -1,11 +1,13 @@
 /// <reference types="vite/client" />
-// Dev-only design preview: open the console with ?preview to see every page filled with sample
-// data, without a Gatekeeper, a wallet, or membership. Nothing here ships: App only reads it when
-// import.meta.env.DEV is true, and nothing is sent anywhere (actions just show a toast).
+// The console's demo: a sample organization with test agents, run by an in-browser Gatekeeper
+// (demo.ts). Nothing is sent anywhere. It's the whole app in the demo build (`vite build --mode
+// demo`), and in development with ?preview. A normal build never turns it on.
 import { privateKeyToAccount } from "viem/accounts";
 import type { LogEntry, RunDetail, Snapshot, WalletInfo } from "./api.ts";
 
-export const PREVIEW = import.meta.env.DEV && new URLSearchParams(location.search).has("preview");
+/** The public demo build (deployed on its own, with no Gatekeeper behind it). */
+export const DEMO = import.meta.env.MODE === "demo";
+export const PREVIEW = DEMO || (import.meta.env.DEV && new URLSearchParams(location.search).has("preview"));
 /** ?preview&v2 shows an org still on Dharma v2 (no trust levels; the upgrade card on Votes). */
 const V2 = new URLSearchParams(location.search).has("v2");
 const rec = (agent: string, level: number, completed: number, denied: number, cleanStreak: number, extra: { drillsFailed?: number; tripwires?: number } = {}) => ({
@@ -17,7 +19,9 @@ const rec = (agent: string, level: number, completed: number, denied: number, cl
 export const previewSigner = privateKeyToAccount("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80");
 
 const me = previewSigner.address.toLowerCase();
-const sam = "0x5e7a0c2b9d4f1e3a6c8b0d2f4e6a8c0b2d4f6a81";
+const jazib = "0x5e7a0c2b9d4f1e3a6c8b0d2f4e6a8c0b2d4f6a81";
+export const DEMO_ME = me;
+export const DEMO_JAZIB = jazib;
 const now = Date.now();
 const iso = (secAgo: number) => new Date(now - secAgo * 1000).toISOString();
 const unix = (secAgo: number) => Math.floor(now / 1000) - secAgo;
@@ -49,7 +53,7 @@ export const previewSnapshot: Snapshot = {
     thresholdUsd: 500,
     policyVersion: 14,
     anchor: { head: hash(9), length: 40 },
-    members: [{ address: me, name: "Adi" }, { address: sam, name: "Sam" }],
+    members: [{ address: me, name: "Adi" }, { address: jazib, name: "Jazib" }],
     agents: [
       { id: "supplies", name: "Supplies agent", capUsd: 25, spentTodayUsd: 6.4, active: true, hasToken: true, ...(V2 ? {} : { level: 2, record: rec("supplies", 2, 61, 4, 31), eligibility: { eligible: true, target: 3, needed: 50, have: 51 } }) },
       { id: "payables", name: "Bills agent", capUsd: 800, spentTodayUsd: 3.1, active: true, hasToken: true, ...(V2 ? {} : { level: 1, record: rec("payables", 1, 22, 2, 14, { drillsFailed: 1 }), eligibility: { eligible: false, target: 2, needed: 25, have: 14 } }) },
@@ -87,8 +91,8 @@ export const previewSnapshot: Snapshot = {
     ],
     proposals: [
       {
-        id: 31, op: 3, description: "Add payee Oven Repair Ltd (maintenance)", proposer: sam, createdAt: unix(420), queuedAt: 0, eta: null,
-        yes: 1, no: 0, core: false, needed: 2, status: "open", voters: [sam], change: { op: "SetPayee" },
+        id: 31, op: 3, description: "Add payee Oven Repair Ltd (maintenance)", proposer: jazib, createdAt: unix(420), queuedAt: 0, eta: null,
+        yes: 1, no: 0, core: false, needed: 2, status: "open", voters: [jazib], change: { op: "SetPayee", account: "0x3e5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a", category: "maintenance" },
         exposureDelta: ["+ largest single payment $5.00 → $20.00", "+ payments to Oven Repair Ltd for Bills agent"],
         preview: {
           replayed: 214, days: 7, newlyBlocked: 0, flaggedAllowed: 1,
@@ -99,15 +103,15 @@ export const previewSnapshot: Snapshot = {
         },
       },
       {
-        id: 32, op: 1, description: "Remove rule secrets-read (core)", proposer: sam, createdAt: unix(300), queuedAt: 0, eta: null,
-        core: true, needed: 2, yes: 1, no: 0, status: "open", voters: [sam], change: { op: "RemoveRule" }, preview: null,
+        id: 32, op: 1, description: "Remove rule core-no-secrets (core)", proposer: jazib, createdAt: unix(300), queuedAt: 0, eta: null,
+        core: true, needed: 2, yes: 1, no: 0, status: "open", voters: [jazib], change: { op: "RemoveRule", id: "core-no-secrets" }, preview: null,
       },
       {
         id: 30, op: 5, description: "Raise Supplies agent allowance to $40/day", proposer: me, createdAt: unix(900), queuedAt: unix(40), eta: unix(-20),
-        yes: 2, no: 0, core: false, needed: 2, status: "queued", voters: [me, sam], change: { op: "SetAgent" }, preview: null,
+        yes: 2, no: 0, core: false, needed: 2, status: "queued", voters: [me, jazib], change: { op: "SetAgent", id: "supplies", capUsd: 40 }, preview: null,
       },
-      { id: 29, op: 9, description: "Add member Sam", proposer: me, createdAt: unix(86400), queuedAt: unix(86000), eta: unix(85940), yes: 1, no: 0, core: false, needed: 2, status: "executed", voters: [me], change: { op: "AddMember" }, preview: null },
-      { id: 28, op: 6, description: "Allow domain pastebin.com", proposer: sam, createdAt: unix(90000), queuedAt: 0, eta: null, yes: 1, no: 1, core: false, needed: 2, status: "defeated", voters: [me, sam], change: { op: "AddDomain" }, preview: null },
+      { id: 29, op: 9, description: "Add member Jazib", proposer: me, createdAt: unix(86400), queuedAt: unix(86000), eta: unix(85940), yes: 1, no: 0, core: false, needed: 2, status: "executed", voters: [me], change: { op: "AddMember", member: jazib }, preview: null },
+      { id: 28, op: 6, description: "Allow domain pastebin.com", proposer: jazib, createdAt: unix(90000), queuedAt: 0, eta: null, yes: 1, no: 1, core: false, needed: 2, status: "defeated", voters: [me, jazib], change: { op: "AddDomain", domain: "pastebin.com" }, preview: null },
     ],
   },
   exposure: {
@@ -120,7 +124,7 @@ export const previewSnapshot: Snapshot = {
     ],
   },
   frozen: false,
-  enrollments: [{ address: "0x8d3e5f7a9c1b3d5f7e9a1c3b5d7f9e1a3c5b7d9f", name: "Priya", requestedAt: iso(1800), via: "invite" }],
+  enrollments: [{ address: "0x8d3e5f7a9c1b3d5f7e9a1c3b5d7f9e1a3c5b7d9f", name: "Chris", requestedAt: iso(1800), via: "invite" }],
   publicUrl: "https://karuna.sunrise-bakery.example",
   invites: [{ code: "inv_preview0demo1", link: "https://karuna.sunrise-bakery.example/invite/inv_preview0demo1", createdAt: iso(86_400), expiresAt: new Date(Date.now() + 6 * 86_400_000).toISOString(), uses: 1, maxUses: 10 }],
   shield: {
@@ -138,7 +142,7 @@ export const previewSnapshot: Snapshot = {
   learned: {
     precedents: [
       { id: "pr1", at: iso(7200), agentId: "supplies", agentName: "Supplies agent", counterparty: flour, counterpartyName: "Valley Flour Co.", amountUsd: 32, bandLabel: "under $50", outcome: "approve", byName: "Adi" },
-      { id: "pr2", at: iso(30000), agentId: "payables", agentName: "Bills agent", counterparty: "0x4a1c00000000000000000000000000000000beef", counterpartyName: null, amountUsd: 1290, bandLabel: "over $500", outcome: "deny", byName: "Sam" },
+      { id: "pr2", at: iso(30000), agentId: "payables", agentName: "Bills agent", counterparty: "0x4a1c00000000000000000000000000000000beef", counterpartyName: null, amountUsd: 1290, bandLabel: "over $500", outcome: "deny", byName: "Jazib" },
     ],
     suggestions: [
       { id: "learn-supplies-feed", agentId: "supplies", agentName: "Supplies agent", counterparty: feed, counterpartyName: "Grain price feed", band: 1, bandLabel: "under $5", approvals: 5, change: { op: "AddRule" } },
@@ -151,11 +155,11 @@ export const previewSnapshot: Snapshot = {
     traps: [{ id: "trap-1", agentId: null, agentName: null, createdAt: iso(40000), secrets: [{ name: "STRIPE_SECRET_KEY", value: "sk_live_…" }, { name: "AWS_ACCESS_KEY_ID", value: "AKIA…" }], envFile: "STRIPE_SECRET_KEY=sk_live_51Hx…trap\nAWS_ACCESS_KEY_ID=AKIA4TRAP7Q2…" }],
     tainted: [],
     trips: [{ id: "trip-1", at: iso(86400 * 1.5), reason: "3 agents went after api.unknown-host.io within 20s", agents: ["supplies", "payables", "research"], txRef: tx(7) }],
-    agentsToTrip: 3,
-    windowSeconds: 30,
+    agentsToTrip: 2,
+    windowSeconds: 60,
   },
   settings: {
-    values: { drillsPerDay: 2, drillWindowMinutes: 30, holdSeconds: 120, swarmAgents: 3, swarmWindowSeconds: 30, requireGvisor: 0, learnFromChoices: 1, anchorEvery: 20, preflight: 1, preflightWindowMinutes: 2, gatewayAllowanceUsd: 100 },
+    values: { drillsPerDay: 2, drillWindowMinutes: 30, holdSeconds: 120, swarmAgents: 2, swarmWindowSeconds: 60, requireGvisor: 0, learnFromChoices: 1, anchorEvery: 20, preflight: 1, preflightWindowMinutes: 2, gatewayAllowanceUsd: 100 },
     defaults: { drillsPerDay: 2, drillWindowMinutes: 30, holdSeconds: 120, swarmAgents: 2, swarmWindowSeconds: 60, requireGvisor: 0, learnFromChoices: 1, anchorEvery: 20, preflight: 1, preflightWindowMinutes: 2, gatewayAllowanceUsd: 100 },
     gvisorAvailable: true,
   },
@@ -168,13 +172,13 @@ export const previewSnapshot: Snapshot = {
       { id: "role-3", name: "Approver", permissions: ["approve", "cancelEscrow"] },
       { id: "viewer", name: "Viewer", permissions: [], builtin: true },
     ],
-    of: { [me]: "admin", [sam]: "member", "0x7c1d9e2f4a6b8c0d1e3f5a7b9c0d2e4f6a8b0c1d": "viewer" },
+    of: { [me]: "admin", [jazib]: "member", "0x7c1d9e2f4a6b8c0d1e3f5a7b9c0d2e4f6a8b0c1d": "viewer" },
     can: {
       [me]: ["approve", "cancelEscrow", "propose", "agents", "team", "wallet", "freeze"],
-      [sam]: ["approve", "cancelEscrow", "propose", "agents"],
+      [jazib]: ["approve", "cancelEscrow", "propose", "agents"],
       "0x7c1d9e2f4a6b8c0d1e3f5a7b9c0d2e4f6a8b0c1d": [],
     },
-    viewers: [{ address: "0x7c1d9e2f4a6b8c0d1e3f5a7b9c0d2e4f6a8b0c1d", name: "Priya (accountant)" }],
+    viewers: [{ address: "0x7c1d9e2f4a6b8c0d1e3f5a7b9c0d2e4f6a8b0c1d", name: "Chris (accountant)" }],
   },
   inbox: [
     { id: "m4", agentId: "payables", from: "Valley Flour Co.", subject: "Invoice #2291 — November flour", body: "", receivedAt: iso(600), test: null },
@@ -202,10 +206,10 @@ export const previewSnapshot: Snapshot = {
         { label: "Agent spend today", value: "$612.00 of $800.00" },
       ],
       payload: { kind: "transfer", amountUsd: 612.5 }, payloadHash: "ab".repeat(32), status: "pending",
-      approvals: [{ memberId: sam, at: iso(40) }], approvalsNeeded: 2, ifUnanswered: "Nothing is paid until a member approves.",
+      approvals: [{ memberId: jazib, at: iso(40) }], approvalsNeeded: 2, ifUnanswered: "Nothing is paid until a member approves.",
     },
     {
-      id: "p-8", agentId: "research", createdAt: iso(300), action: { type: "x402", url: "https://api.grainfeed.dev/v2/wheat?range=90d", method: "GET" },
+      id: "p-10", agentId: "research", createdAt: iso(300), action: { type: "x402", url: "https://api.grainfeed.dev/v2/wheat?range=90d", method: "GET" },
       reason: "Need 90 days of wheat prices to forecast next month's flour cost.",
       request: { tool: "payment", paymentKind: "x402", amountUsd: 0.05, url: "https://api.grainfeed.dev/v2/wheat?range=90d" },
       decision: { outcome: "approval", ruleId: "cap-would-exceed", reason: "This would take Research agent past its $2.00 daily allowance" },
@@ -244,7 +248,7 @@ export const previewSnapshot: Snapshot = {
     {
       id: "p-2", agentId: "payables", createdAt: iso(30000), action: { type: "transfer", to: "0x4a1c00000000000000000000000000000000beef", amountUsd: 1290 },
       request: { tool: "payment", paymentKind: "transfer", amountUsd: 1290 }, decision: { outcome: "approval", ruleId: "approval-over-threshold", reason: "" },
-      facts: [], status: "denied", approvals: [], approvalsNeeded: 2, resolvedBy: sam, resolvedAt: iso(29800),
+      facts: [], status: "denied", approvals: [], approvalsNeeded: 2, resolvedBy: jazib, resolvedAt: iso(29800),
     },
   ],
   log: { length: 46, head: hash(46), verified: true, brokenAt: null, publicKeyPem: "" },
@@ -257,11 +261,11 @@ export const previewSnapshot: Snapshot = {
   ],
   runs: [
     { id: "run-1", agentId: "flour-buyer", agentName: "Flour buyer", trigger: "Daily at 09:00", startedAt: iso(240), endedAt: null, status: "running", built: true, host: "bakery-mini", steps: 6, actions: 2, models: ["claude-sonnet-5-5 (Anthropic)"], reasoningVisible: true, waiting: 1 },
-    { id: "run-dev", agentId: "supplies", agentName: "Supplies agent", trigger: "karuna run on sam-laptop", startedAt: iso(5400), endedAt: iso(5100), status: "done", built: false, host: "sam-laptop", steps: 4, actions: 1, models: [], reasoningVisible: false, waiting: 0, changes: 3, undone: 1 },
+    { id: "run-dev", agentId: "supplies", agentName: "Supplies agent", trigger: "karuna run on jazib-laptop", startedAt: iso(5400), endedAt: iso(5100), status: "done", built: false, host: "jazib-laptop", steps: 4, actions: 1, models: [], reasoningVisible: false, waiting: 0, changes: 3, undone: 1 },
     { id: "run-0", agentId: "flour-buyer", agentName: "Flour buyer", trigger: "Run now", startedAt: iso(86400), endedAt: iso(86300), status: "done", built: true, host: "bakery-mini", steps: 5, actions: 1, models: ["claude-sonnet-5-5 (Anthropic)"], reasoningVisible: true, waiting: 0 },
   ],
   devices: [
-    { id: "d1", code: "7F3A-91C2", name: "sam's Claude Code (sam-mbp)", tool: "claude-code", status: "pending", requestedAt: iso(90), agentId: null, agentName: null, lastSeenAt: null, approvedAt: null },
+    { id: "d1", code: "7F3A-91C2", name: "jazib's Claude Code (jazib-mbp)", tool: "claude-code", status: "pending", requestedAt: iso(90), agentId: null, agentName: null, lastSeenAt: null, approvedAt: null },
     { id: "d2", code: "0B4E-5D17", name: "adi's Claude Code (adi-xps)", tool: "claude-code", status: "approved", requestedAt: iso(86400), agentId: "adi-claude-code", agentName: "Adi's Claude Code", lastSeenAt: iso(40), approvedAt: iso(86000) },
     { id: "d3", code: "C2A8-6E40", name: "adi's Cursor (adi-xps)", tool: "cursor", status: "approved", requestedAt: iso(86400 * 3), agentId: "adi-cursor", agentName: "Adi's Cursor", lastSeenAt: iso(7200), approvedAt: iso(86400 * 3) },
   ],
@@ -279,7 +283,7 @@ export const previewSnapshot: Snapshot = {
     remote: { port: 8443, host: "0.0.0.0", names: ["localhost", "127.0.0.1", "bakery-mini"] },
     sessions: [
       { id: "ee02b031", agentId: "payables", agentName: "Bills agent", startedAt: iso(1800), lastSeen: iso(2), host: "bakery-mini", isolation: "gvisor", desktop: false, remote: false, viewer: null, requests: 214, denied: 3, lastRequest: "POST https://api.openai.com/v1/chat/completions", stopRequested: false },
-      { id: "9c1d77aa", agentId: "supplies", agentName: "Supplies agent", startedAt: iso(420), lastSeen: iso(4), host: "sam-laptop", isolation: "docker", desktop: true, remote: true, viewer: "http://127.0.0.1:63873/vnc.html?autoconnect=1&resize=scale", requests: 37, denied: 0, lastRequest: "GET https://api.grainfeed.dev/v2/flour", stopRequested: false },
+      { id: "9c1d77aa", agentId: "supplies", agentName: "Supplies agent", startedAt: iso(420), lastSeen: iso(4), host: "jazib-laptop", isolation: "docker", desktop: true, remote: true, viewer: "http://127.0.0.1:63873/vnc.html?autoconnect=1&resize=scale", requests: 37, denied: 0, lastRequest: "GET https://api.grainfeed.dev/v2/flour", stopRequested: false },
     ],
     keys: [
       { name: "openai", envVar: "OPENAI_API_KEY", placeholder: "karuna_key_openai", boundTo: ["api.openai.com"], createdAt: iso(86400 * 3) },
@@ -293,7 +297,7 @@ export const previewSnapshot: Snapshot = {
 export const previewLog: LogEntry[] = [
   { seq: 45, timestamp: iso(95), request: { tool: "payment", paymentKind: "transfer", amountUsd: 612.5, to: flour, agent: "payables" }, decision: { outcome: "approval", ruleId: "approval-over-threshold", reason: "" }, hash: hash(45) },
   { seq: 44, timestamp: iso(300), request: { tool: "payment", paymentKind: "x402", amountUsd: 0.05, to: feed, agent: "research" }, decision: { outcome: "approval", ruleId: "cap-would-exceed", reason: "" }, hash: hash(44) },
-  { seq: 43, timestamp: iso(420), event: { type: "proposal", id: 31, by: sam, txRef: tx(5) }, hash: hash(43) },
+  { seq: 43, timestamp: iso(420), event: { type: "proposal", id: 31, by: jazib, txRef: tx(5) }, hash: hash(43) },
   { seq: 42, timestamp: iso(700), request: { tool: "payment", paymentKind: "x402", amountUsd: 0.05, to: feed, agent: "supplies" }, decision: { outcome: "allow", ruleId: "learn-supplies-flour", reason: "" }, hash: hash(42) },
   { seq: 41, timestamp: iso(1500), request: { tool: "payment", paymentKind: "transfer", amountUsd: 1290, to: "0x4a1c00000000000000000000000000000000beef", agent: "payables" }, decision: { outcome: "deny", ruleId: "core-no-unknown-payee", reason: "" }, hash: hash(41) },
   { seq: 40, timestamp: iso(2400), request: { tool: "shell", command: "rm -rf ./data", agent: "research" }, decision: { outcome: "deny", ruleId: "deny-shell-destructive", reason: "" }, hash: hash(40) },
@@ -310,9 +314,9 @@ export function previewRun(id: string): RunDetail {
   return {
     ...summary,
     ...(summary.id === "run-dev" ? { fileChanges: [
-      { mount: "/home/sam/bakery/books", path: "orders/2026-11.csv", kind: "modified" as const, binary: false, diff: "@@ -3,3 +3,4 @@\n 2026-11-14,Valley Flour,2,62.40\n 2026-11-15,Valley Flour,2,62.40\n-2026-11-16,Oven Repair,1,180.00\n+2026-11-16,Oven Repair,1,1800.00\n+2026-11-17,Unknown Ltd,1,950.00" },
-      { mount: "/home/sam/bakery/books", path: "notes/supplier.txt", kind: "added" as const, binary: false, diff: "+New bank details for Oven Repair: 0x9f3…" },
-      { mount: "/home/sam/bakery/books", path: "old/invoice-114.pdf", kind: "deleted" as const, binary: true, diff: null, undoneAt: iso(4000) },
+      { mount: "/home/jazib/bakery/books", path: "orders/2026-11.csv", kind: "modified" as const, binary: false, diff: "@@ -3,3 +3,4 @@\n 2026-11-14,Valley Flour,2,62.40\n 2026-11-15,Valley Flour,2,62.40\n-2026-11-16,Oven Repair,1,180.00\n+2026-11-16,Oven Repair,1,1800.00\n+2026-11-17,Unknown Ltd,1,950.00" },
+      { mount: "/home/jazib/bakery/books", path: "notes/supplier.txt", kind: "added" as const, binary: false, diff: "+New bank details for Oven Repair: 0x9f3…" },
+      { mount: "/home/jazib/bakery/books", path: "old/invoice-114.pdf", kind: "deleted" as const, binary: true, diff: null, undoneAt: iso(4000) },
     ] } : {}),
     steps: [
       { at: iso(238), kind: "model", status: 200, exchange: { provider: "Anthropic", model: "claude-sonnet-5-5", asked: "Run started: Daily at 09:00. Your instructions: Every morning, buy today's grain prices…", system: "", toolsOffered: ["list_payees", "pay", "buy_data", "web_get"], said: "I'll get today's grain prices first.", thinking: "", toolCalls: [{ name: "buy_data", input: "{\"url\":\"https://api.grainfeed.dev/v2/flour\",\"max_usd\":0.1}" }], stopReason: "tool_use" } },

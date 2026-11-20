@@ -2,14 +2,15 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEven
 import { createPortal } from "react-dom";
 import type { Address } from "viem";
 import { isAddr, isNoLimit, decodeChange, describeChange, describeScope, NO_LIMIT_USD, waitText, SETTINGS, settingChange, PERMISSIONS, ALL_PERMISSIONS, STRUCTURES, DELETE_ROLE, MAX_ROLE, ROLE_MEMBER, permissionBits, roleNumber, type Change, type SettingName, type Permission, type RoleDef, type Structure } from "@prekaruna/dharma";
-import { api, roleOf, setSessionSigner, useGatekeeper, type LooseningPreview, type AgentExposure, type Exposure, type AgentView, type AgentDraftView, type Governance, type LogEntry, type Proposal, type Rule, type RunDetail, type RunFileChange, type RunStep, type Schedule, type Snapshot, type WalletInfo } from "./api.ts";
+import { api, roleOf, setDemoHandler, setSessionSigner, useGatekeeper, type LooseningPreview, type AgentExposure, type Exposure, type AgentView, type AgentDraftView, type Governance, type LogEntry, type Proposal, type Rule, type RunDetail, type RunFileChange, type RunStep, type Schedule, type Snapshot, type WalletInfo } from "./api.ts";
 import { Kind, SignerUnavailable, cancelEscrow, decidePayment, loadSigner, signerKey, submitChange, type Signer } from "./signer.ts";
 import { accountEmail, createAccount, signIn as accountSignIn, signOut as accountSignOut } from "./account.ts";
 import { useRelay, type ChainEvent, type LiveMode } from "./live.ts";
 import { Palette, type Command } from "./palette.tsx";
 import { TopVoice } from "./voice.tsx";
 import { keccak256, stringToHex } from "viem";
-import { PREVIEW, previewLog, previewRun, previewSigner, previewSnapshot, previewWallet } from "./preview.ts";
+import { PREVIEW, previewSigner, previewWallet } from "./preview.ts";
+import { demoApi, demoSubscribe, demoView, startDemo } from "./demo.ts";
 import { Badge, Icon, type IconName } from "./icons.tsx";
 import { askConfirm } from "./confirm.tsx";
 import { ProposalToaster, type GovEvent, type ProposalToast } from "./proposalToasts.ts";
@@ -132,20 +133,20 @@ function useNow(ms = 1000) {
 
 // ============================================================== root
 
-/** Dev-only (?preview[=frozen|setup|join|offline]): sample data, no Gatekeeper, nothing sent. */
-function usePreviewGatekeeper() {
-  const mode = new URLSearchParams(location.search).get("preview");
-  const state: Snapshot = mode === "setup"
-    ? { ...previewSnapshot, setUp: false, policy: null }
-    : mode === "join"
-      ? { ...previewSnapshot, policy: { ...previewSnapshot.policy!, members: previewSnapshot.policy!.members.slice(1) } }
-      : mode === "frozen"
-        ? { ...previewSnapshot, frozen: { by: "Sam", at: new Date().toISOString(), confirmed: true } }
-        : previewSnapshot;
-  const offline = mode === "offline" ? "connect ECONNREFUSED 127.0.0.1:8788" : null;
-  return { state: offline ? null : state, log: previewLog, wallet: previewWallet, offline, refresh: async () => {}, refreshWallet: () => {} };
+// The demo (the demo build, or ?preview in development): every call goes to the in-browser
+// Gatekeeper in demo.ts, and its test agents start sending requests.
+if (PREVIEW) {
+  setDemoHandler(demoApi);
+  startDemo();
 }
-const useConsoleData = PREVIEW ? usePreviewGatekeeper : useGatekeeper;
+
+/** The demo's state, live: it changes as test agents ask and as you approve, vote and freeze. */
+function useDemoGatekeeper() {
+  const [v, setV] = useState(demoView);
+  useEffect(() => demoSubscribe(() => setV(demoView())), []);
+  return { state: v.state as Snapshot | null, log: v.log, wallet: v.wallet as WalletInfo | null, offline: null as string | null, refresh: async () => setV(demoView()), refreshWallet: () => setV(demoView()) };
+}
+const useConsoleData = PREVIEW ? useDemoGatekeeper : useGatekeeper;
 
 /** While something is being sent (a vote, an approval, a rule): a visible notice with the time so far. */
 function WorkingNotice() {
@@ -208,10 +209,6 @@ export default function App() {
     setTimeout(() => setFlash((f) => (f?.text === text ? null : f)), 6000);
   };
   const run: Run = async (fn, ok) => {
-    if (PREVIEW) {
-      notify("ok", `Preview — nothing was sent${ok ? ` (would show: “${ok}”)` : ""}`);
-      return false;
-    }
     if (busy) return false;
     setBusy(true);
     try {
@@ -1136,7 +1133,7 @@ function Console({ s, log, wallet, refreshWallet, run, busy, me, offline, refres
           <span className="av">{myName[0]?.toUpperCase()}</span>
           <div className="who" title={account.email ? `Logged in as ${account.email} · ${myAddr}` : `This device's key · ${myAddr}`}><div>{myName}</div><div>{account.email ?? short(myAddr)}</div></div>
         </div>
-        <button type="button" className="logout-btn" onClick={() => void account.signOut()}><Icon name="logout" size={15} /> Log out</button>
+        {!PREVIEW && <button type="button" className="logout-btn" onClick={() => void account.signOut()}><Icon name="logout" size={15} /> Log out</button>}
       </aside>
 
       <main className="main">
@@ -1176,6 +1173,7 @@ function Console({ s, log, wallet, refreshWallet, run, busy, me, offline, refres
             ) : null}
           </div>
         </header>
+        {PREVIEW && <DemoNotice />}
 
         {role.id === "viewer" && <div className="viewer-note"><Icon name="team" size={14} /> You're a Viewer: you can see everything here, but approving and changing things is up to the members.</div>}
         <div className="alerts">
@@ -1184,7 +1182,7 @@ function Console({ s, log, wallet, refreshWallet, run, busy, me, offline, refres
               <span className="alert-icon"><Icon name={a.tone === "bad" ? "alert" : a.tone === "ok" ? "check" : a.go === "approvals" ? "approvals" : a.go === "dharma" ? "votes" : "signal"} size={15} /></span>
               <div className="alert-top">
                 <b>{a.title}</b>
-                <span className="via">{a.via ? a.via : a.source === "quicknode" ? "via QuickNode" : a.source === "rpc" && (a.go === "shield" || a.go === "swarm") ? "Gatekeeper" : "via Arc RPC"}</span>
+                <span className="via">{PREVIEW ? "demo" : a.via ? a.via : a.source === "quicknode" ? "via QuickNode" : a.source === "rpc" && (a.go === "shield" || a.go === "swarm") ? "Gatekeeper" : "via Arc RPC"}</span>
               </div>
               <button className="alert-x" aria-label="Dismiss" onClick={() => dismiss(a.id)}><Icon name="x" size={14} /></button>
               <div className="alert-body">{a.body}</div>
@@ -2745,8 +2743,38 @@ function govEvent(e: ChainEvent, s: Snapshot, me: string, name: (a?: string | nu
   return { kind, id, what, mine: who === me.toLowerCase(), by: kind === "created" ? name(who) : undefined };
 }
 
+/** The demo's one line of context: what this is, and what to try. Dismissed per browser. */
+function DemoNotice() {
+  const [open, setOpen] = useState(() => {
+    try {
+      return localStorage.getItem("karuna.demoNotice") !== "closed";
+    } catch {
+      return true;
+    }
+  });
+  if (!open) return null;
+  const close = () => {
+    setOpen(false);
+    try {
+      localStorage.setItem("karuna.demoNotice", "closed");
+    } catch {
+      /* per-browser convenience only */
+    }
+  };
+  return (
+    <div className="demo-notice" role="note">
+      <span>
+        <b>Demo organization.</b> Test agents send requests every few seconds and Karuna decides each one by the rules.
+        Approve a payment, propose a rule, send a Drill or freeze every agent: Jazib, the other member, votes on what you propose.
+        Nothing reaches a chain and no money moves; reload to start over.
+      </span>
+      <button type="button" className="btn btn-ghost btn-sm" onClick={close}>Dismiss</button>
+    </div>
+  );
+}
+
 function LiveBadge({ mode }: { mode: LiveMode }) {
-  const label = mode === "quicknode" ? "QuickNode" : mode === "rpc" ? "Arc" : mode === "connecting" ? "connecting…" : "relay offline";
+  const label = PREVIEW ? "simulated chain" : mode === "quicknode" ? "QuickNode" : mode === "rpc" ? "Arc" : mode === "connecting" ? "connecting…" : "relay offline";
   return <span className={`live ${mode}`} title="Where live chain events come from"><span className="d" /> {label}</span>;
 }
 
@@ -3798,7 +3826,7 @@ function RunTimeline({ ctx, id }: { ctx: Ctx; id: string }) {
   // Live while it runs: refetch on every change the console hears about (and every 3 s as a fallback).
   useEffect(() => {
     let alive = true;
-    const load = () => (PREVIEW ? setR(previewRun(id)) : void api<RunDetail>(`/runs/${id}`).then((x) => alive && setR(x)).catch(() => undefined));
+    const load = () => void api<RunDetail>(`/runs/${id}`).then((x) => alive && setR(x)).catch(() => undefined);
     load();
     // A finished run doesn't change: no fallback polling for it.
     const finished = !!summary && summary.status !== "running" && summary.status !== "starting";

@@ -1,6 +1,8 @@
 // Live chain events for this console, from the relay (QuickNode Stream, or direct Arc RPC when
 // QuickNode is quiet). Each Dharma event reaches every member's screen within seconds.
 import { useEffect, useRef, useState } from "react";
+import { demoChainSubscribe } from "./demo.ts";
+import { PREVIEW } from "./preview.ts";
 
 export interface ChainEvent {
   id: string;
@@ -15,7 +17,21 @@ export interface ChainEvent {
 
 export type LiveMode = "quicknode" | "rpc" | "none" | "offline" | "connecting";
 
-export function useRelay(onEvents: (events: ChainEvent[]) => void) {
+/** The demo's chain events, from its in-browser Gatekeeper (no relay, no chain). */
+function useDemoRelay(onEvents: (events: ChainEvent[]) => void) {
+  const [last, setLast] = useState<ChainEvent | null>(null);
+  const cb = useRef(onEvents);
+  cb.current = onEvents;
+  useEffect(() => demoChainSubscribe((events) => {
+    setLast(events[0]);
+    cb.current(events);
+  }), []);
+  return { mode: "quicknode" as LiveMode, last };
+}
+
+export const useRelay = PREVIEW ? useDemoRelay : useLiveRelay;
+
+function useLiveRelay(onEvents: (events: ChainEvent[]) => void) {
   const [mode, setMode] = useState<LiveMode>("connecting");
   const [last, setLast] = useState<ChainEvent | null>(null);
   const cb = useRef(onEvents);
