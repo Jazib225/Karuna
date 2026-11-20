@@ -6,6 +6,7 @@
 // console window, which signs it with this member's key; only that signed decision, still
 // matching the pending request's id and payload hash, is written to the Gatekeeper's pipe.
 
+mod services;
 mod island;
 mod pipe;
 mod tray;
@@ -17,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Listener, Manager, WindowEvent};
+use tauri::{AppHandle, Emitter, Listener, Manager, RunEvent, WindowEvent};
 
 use island::{IslandState, Rect};
 use pipe::{norm_hash, Gatekeeper};
@@ -54,8 +55,8 @@ fn island_error(app: &AppHandle, id: &str, error: &str) {
 }
 
 /// Sites the console may open in the default browser: the Arc block explorers, Circle, and where the
-/// drafting key comes from (Groq's and Google AI Studio's key pages).
-const EXTERNAL_HOSTS: &[&str] = &["arcscan.app", "arc.io", "arc.network", "circle.com", "console.groq.com", "aistudio.google.com"];
+/// drafting key comes from (Groq's and Google AI Studio's key pages), and ElevenLabs' key page for voice.
+const EXTERNAL_HOSTS: &[&str] = &["arcscan.app", "arc.io", "arc.network", "circle.com", "console.groq.com", "aistudio.google.com", "elevenlabs.io"];
 
 /// An https link to one of EXTERNAL_HOSTS (or a subdomain), with nothing a shell could misread.
 fn external_link_allowed(url: &str) -> bool {
@@ -157,13 +158,18 @@ fn approval_decision(app: AppHandle, gk: tauri::State<'_, Gatekeeper>, signing: 
 
 pub fn run() {
     tauri::Builder::default()
+        // First: a second launch hands over to this copy (and its services) and exits.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| open_main(app)))
         .manage(Gatekeeper::default())
         .manage(tray::TrayItems::default())
         .manage(Signing::default())
         .manage(Arc::new(IslandState::default()))
-        .invoke_handler(tauri::generate_handler![island_rects, island_drag, island_open_main, island_show, gk_status, approval_decision])
+        .manage(services::Services::default())
+        .invoke_handler(tauri::generate_handler![island_rects, island_drag, island_open_main, island_show, gk_status, approval_decision, services::services_status])
         .setup(|app| {
             let handle = app.handle().clone();
+            // The installed app runs Karuna's own services (a development build doesn't).
+            services::start(&handle);
             tray::build(&handle)?;
             pipe::start(handle.clone());
             island::start_cursor_poll(handle.clone());
@@ -234,8 +240,13 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running the Karuna desktop app");
+        .build(tauri::generate_context!())
+        .expect("error while building the Karuna desktop app")
+        .run(|app, event| {
+            if let RunEvent::Exit = event {
+                services::stop(app);
+            }
+        });
 }
 
 #[cfg(test)]

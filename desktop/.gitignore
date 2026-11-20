@@ -2,3 +2,5 @@ node_modules
 dist
 src-tauri/target
 src-tauri/gen
+# The installed app's backend (node desktop/core/build.mjs)
+src-tauri/core
