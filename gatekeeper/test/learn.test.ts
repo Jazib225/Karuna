@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPublicClient, createTestClient, createWalletClient, defineChain, http, zeroAddress, type Address, type Hex, type PublicClient } from "viem";
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
-import { Kind, actionTypedData, encodeChange, paymentDecisionTypedData, type Change } from "@prekaruna/dharma";
+import { Kind, actionTypedData, encodeChange, paymentDecisionTypedData, settingChange, type Change } from "@prekaruna/dharma";
 import { Store } from "../src/store.ts";
 import { Gatekeeper, type SignedAction } from "../src/gatekeeper.ts";
 import { ViemChainWriter } from "../src/chain.ts";
@@ -132,6 +132,24 @@ describe("Learns From Your Choices", () => {
     expect((await gk.propose(bills, { type: "transfer", to: OTHER, amountUsd: 4 })).status).toBe("done");
     expect((await gk.propose(bills, { type: "transfer", to: OTHER, amountUsd: 40 })).status).toBe("pending"); // above the learned band
     expect(gk.snapshot().learned.suggestions).toEqual([]);
+  }, 60_000);
+
+  it("the team can turn learning off (a voted setting): decisions stand, Karuna adapts nothing from them", async () => {
+    expect(gk.settings().learnFromChoices).toBe(1); // on by default
+    await gk.submitAction(await sign(Kind.Propose, settingChange("learnFromChoices", 0)));
+    await passTimelock();
+    expect(gk.settings().learnFromChoices).toBe(0);
+    // A "no" no longer becomes a block: the next request asks a member again.
+    const r = await gk.propose(bills, { type: "transfer", to: PAYEE, amountUsd: 5 });
+    await decide(r.id, false);
+    await gk.idle();
+    await gk.sync(true);
+    expect(gk.policy!.rules.some((x) => x.id === learnedDenyId(bills, PAYEE) && x.active)).toBe(false);
+    expect((await gk.propose(bills, { type: "transfer", to: PAYEE, amountUsd: 5 })).status).toBe("pending");
+    // Repeated "yes" isn't suggested as a rule either.
+    for (let i = 0; i < 3; i++) await decide((await gk.propose(bills, { type: "transfer", to: OTHER, amountUsd: 4 })).id, true);
+    expect(gk.snapshot().learned.suggestions).toEqual([]);
+    expect(gk.snapshot().learned.precedents).toEqual([]);
   }, 60_000);
 
   it("never suggests auto-approving a counterparty a human has refused", async () => {
