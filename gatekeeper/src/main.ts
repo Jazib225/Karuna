@@ -53,20 +53,24 @@ const gk = new Gatekeeper({
   },
   // The same relayer opens and releases escrow holds for large payments (and relays members' cancels).
   ...(relayWallet ? { escrow: new ViemEscrow(relayWallet, client) } : {}),
-  timelockSeconds: Number(process.env.KARUNA_TIMELOCK_SECONDS ?? 60),
+  // Karuna's defaults. Team settings aren't read from .env: they change only through a proposal
+  // (the waits through Set wait votes, the rest through settings votes on Dharma).
+  timelockSeconds: 60,
   chatUrl: process.env.KARUNA_CHAT_URL || undefined,
-  coreTimelockSeconds: Number(process.env.KARUNA_CORE_TIMELOCK_SECONDS ?? 86_400),
-  anchorEvery: Number(process.env.KARUNA_ANCHOR_EVERY ?? 20),
-  shieldTestsPerDay: Number(process.env.KARUNA_SHIELD_TESTS_PER_DAY ?? 2),
-  shieldWindowMs: Number(process.env.KARUNA_SHIELD_WINDOW_MINUTES ?? 30) * 60_000,
-  preflightWindowMs: Number(process.env.KARUNA_PREFLIGHT_MINUTES ?? 2) * 60_000,
-  preflight: process.env.KARUNA_PREFLIGHT !== "0",
-  swarmAgents: Number(process.env.KARUNA_SWARM_AGENTS ?? 2),
-  swarmWindowMs: Number(process.env.KARUNA_SWARM_WINDOW_SECONDS ?? 60) * 1000,
+  coreTimelockSeconds: 86_400,
+  anchorEvery: 20,
+  shieldTestsPerDay: 2,
+  shieldWindowMs: 30 * 60_000,
+  preflightWindowMs: 2 * 60_000,
+  preflight: true,
+  swarmAgents: 2,
+  swarmWindowMs: 60_000,
+  gatewayAllowanceUsd: 100,
   secrets,
-  // Agents run in Karuna sandboxes; an agent token used anywhere else is refused unless voted.
-  requireSandbox: (process.env.KARUNA_REQUIRE_SANDBOX ?? "1") !== "0",
-  requireIsolation: process.env.KARUNA_REQUIRE_ISOLATION === "gvisor" ? "gvisor" : "docker",
+  // Agents run in Karuna sandboxes, always: an agent token used anywhere else is refused (unless
+  // the team votes that one agent unsandboxed). Require gVisor is a team setting, off by default.
+  requireSandbox: true,
+  requireIsolation: "docker",
   // The console offers "Require gVisor" only where gVisor is installed (the same check `karuna run` makes).
   gvisorAvailable: /"runsc"/.test(spawnSync("docker", ["info", "--format", "{{json .Runtimes}}"], { encoding: "utf8", timeout: 10_000, windowsHide: true }).stdout ?? ""),
   // Agents Karuna builds and runs: each run is a normal `karuna run` of the hosted runner, with a
@@ -96,7 +100,7 @@ const gk = new Gatekeeper({
   // Undo a run's file changes from its snapshot on this machine (runs started here, by `karuna run`).
   undo: runnerUndo(resolve(here, "../..")),
 });
-gk.holdMs = Number(process.env.KARUNA_HOLD_SECONDS ?? 120) * 1000;
+gk.holdMs = 120_000; // the Approval hold until the team votes one
 const ca = new SandboxCA(dataDir);
 const egress = new EgressProxy(gk, ca, { agentApiPort: agentPort }); // waits gk.holdMs: the Approval hold setting
 const consoleToken = store.loadOrCreateConsoleToken();

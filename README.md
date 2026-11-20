@@ -497,8 +497,8 @@ cd desktop && npm run tauri dev       # optional: the desktop app and island
 ```
 A new install opens on **setup**: name the organization, pick the wallet, choose a flat or tree team,
 and Karuna deploys the org's own Dharma on Arc with this browser's signing key as its first member.
-Then propose agents, payees and teammates. New orgs take their waits from `KARUNA_TIMELOCK_SECONDS`
-(default 60) and `KARUNA_CORE_TIMELOCK_SECONDS` (default 86400). For x402 services the wallet also
+Then propose agents, payees and teammates. New orgs start with a 60s wait and a 24h wait for core
+changes; the team changes either, and every other team setting, by proposal. For x402 services the wallet also
 needs a Gateway balance (Add funds in the console, or
 `circle gateway deposit --amount 1 --address 0x… --chain ARC-TESTNET --method direct`).
 
@@ -508,8 +508,8 @@ sandboxes; for the desktop app, Rust (MSVC) and Visual Studio Build Tools with t
 Installer: `cd desktop && npm run tauri build`.
 
 ### Running agents: always in a Karuna sandbox
-Agent tokens only work from inside a box (`KARUNA_REQUIRE_SANDBOX=0` turns that off for local demos;
-per agent, a voted `unsandboxed` rule does). Needs Docker. From the repo root:
+Agent tokens only work from inside a box. That can't be turned off for the org; per agent, a voted
+`unsandboxed` rule allows it. Needs Docker. From the repo root:
 ```bash
 KARUNA_AGENT_TOKEN=kag_… pnpm karuna run --agent invoice-bot ./invoice-bot -- python main.py
 ```
@@ -522,7 +522,7 @@ every box. See [docs/SANDBOX_PLAN.md](docs/SANDBOX_PLAN.md).
   (and `KARUNA_PUBLIC_HOSTS=<its LAN or VPN name>`), download `karuna-ca.pem` from Agents → Run on
   another machine, then: `pnpm karuna run --agent <id> --gatekeeper https://<name>:8443 --ca karuna-ca.pem ./agent -- …`.
 - **Isolation:** `--isolation auto` (default) uses gVisor when Docker has the `runsc` runtime, else
-  hardened Docker. `KARUNA_REQUIRE_ISOLATION=gvisor` makes the Gatekeeper refuse anything weaker.
+  hardened Docker. The team's Require gVisor setting (a proposal) makes the Gatekeeper refuse anything weaker.
 - **Computer-use agents:** `--desktop` gives the box a virtual screen and Chromium; the runner prints a
   live view URL. The browser's traffic goes through the same proxy and rules.
 

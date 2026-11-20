@@ -30,8 +30,9 @@ export interface WalletBackend {
   transfer(from: string, to: string, amountUsd: number, idempotencyKey: string): Promise<{ txRef: string; raw: unknown }>;
   balances(address: string): Promise<{ usdc: string; gateway: string | null }>;
   listWallets(): Promise<string[]>;
-  /** Move USDC from the wallet into its Circle Gateway balance, which x402 purchases draw on. */
-  depositGateway?(from: string, amountUsd: number): Promise<{ txRef: string; raw: unknown }>;
+  /** Move USDC from the wallet into its Circle Gateway balance, which x402 purchases draw on.
+   *  `allowanceUsd` is the team's Gateway allowance setting: the standing approval for deposits. */
+  depositGateway?(from: string, amountUsd: number, allowanceUsd?: number): Promise<{ txRef: string; raw: unknown }>;
   /** Whether the Circle CLI is here and logged in to testnet (and as whom). */
   loginStatus?(): Promise<WalletLoginStatus>;
   /** Email a one-time code for a testnet login. A first login also creates the account's wallets. */
@@ -81,8 +82,8 @@ function extractJson(text: string): Record<string, unknown> | null {
   }
 }
 
-/** How much Gateway may pull from the wallet before another approval (one approval covers many deposits). */
-const GATEWAY_ALLOWANCE_USD = Number(process.env.KARUNA_GATEWAY_ALLOWANCE_USD ?? 100);
+/** How much Gateway may pull from the wallet before another approval, until the team votes a Gateway allowance. */
+const GATEWAY_ALLOWANCE_USD = 100;
 
 export class CircleCliWallet implements WalletBackend {
   private readonly bin: string;
@@ -185,10 +186,10 @@ export class CircleCliWallet implements WalletBackend {
   /**
    * Add funds to Gateway in one transaction. Circle's `gateway deposit` sends two every time (an
    * approval, then the deposit, ~13s). Here the wallet approves Gateway once for a standing amount
-   * (GATEWAY_ALLOWANCE_USD), and each deposit is a single `deposit` call while that lasts. Gateway
+   * (the team's Gateway allowance), and each deposit is a single `deposit` call while that lasts. Gateway
    * only ever pulls from the wallet that calls `deposit`, so the approval can't be used by anyone else.
    */
-  async depositGateway(address: string, amountUsd: number): Promise<{ txRef: string; raw: unknown }> {
+  async depositGateway(address: string, amountUsd: number, allowanceUsd = GATEWAY_ALLOWANCE_USD): Promise<{ txRef: string; raw: unknown }> {
     const [decimals, allowance] = await Promise.all([
       this.rpc.readContract({ address: USDC_TOKEN, abi: erc20Abi, functionName: "decimals" }),
       this.rpc.readContract({ address: USDC_TOKEN, abi: erc20Abi, functionName: "allowance", args: [address as Address, this.gateway] }),
@@ -200,7 +201,7 @@ export class CircleCliWallet implements WalletBackend {
     if (!owner) return this.cliDeposit(address, amountUsd, new Error("couldn't find the wallet's backing key"));
     try {
       if (allowance < value) {
-        const standing = parseUnits(String(Math.max(amountUsd, GATEWAY_ALLOWANCE_USD)), decimals);
+        const standing = parseUnits(String(Math.max(amountUsd, allowanceUsd)), decimals);
         await this.execute(address, USDC_TOKEN, "approve(address,uint256)", [this.gateway, standing.toString()]);
       }
     } catch (e) {

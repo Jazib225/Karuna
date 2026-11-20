@@ -1239,7 +1239,7 @@ function Console({ s, log, wallet, refreshWallet, run, busy, me, offline, refres
  * Add funds to Gateway: USDC moves from the org's Circle wallet into its Gateway balance, which
  * agents spend for paid data (x402 nanopayments). On testnet there's no other way to fill it.
  */
-function AddFunds({ wallet, run, onClose, onDone }: { wallet: WalletInfo; run: Run; onClose: () => void; onDone: () => void }) {
+function AddFunds({ ctx, wallet, run, onClose, onDone }: { ctx: Ctx; wallet: WalletInfo; run: Run; onClose: () => void; onDone: () => void }) {
   const have = Number(wallet.usdc) || 0;
   // Arc pays gas in USDC, so keep a little back when "Max" is used.
   const max = Math.max(0, Math.floor((have - 0.02) * 100) / 100);
@@ -1270,6 +1270,7 @@ function AddFunds({ wallet, run, onClose, onDone }: { wallet: WalletInfo; run: R
         <div className="confirm-body">
           <p className="confirm-lead" id="add-funds-title"><b>Add funds to Gateway</b></p>
           <p className="muted small" style={{ margin: 0 }}>Moves USDC from your Circle wallet into Gateway, which your agents spend on paid data. It stays your organization's money.</p>
+          <p className="muted small" style={{ margin: 0 }}>Gateway may pull up to <SettingValue ctx={ctx} name="gatewayAllowanceUsd" /> (or the amount, if larger) on one approval.</p>
           <div className="funds-flow">
             <span><small>Circle wallet</small><b>{usd(have)}</b></span>
             <Icon name="arrow" size={14} />
@@ -1295,14 +1296,24 @@ function AddFunds({ wallet, run, onClose, onDone }: { wallet: WalletInfo; run: R
 }
 
 /** The proposal form's field label for each setting's value. */
-const SETTING_FIELD: Record<Exclude<SettingName, "requireGvisor">, string> = {
-  learnFromChoices: "1 = on, 0 = off",
+const SETTING_FIELD: Record<Exclude<SettingName, keyof typeof SETTING_SWITCH>, string> = {
   drillsPerDay: "Per agent per day (0 = off)",
   drillWindowMinutes: "Minutes",
   holdSeconds: "Seconds",
   swarmAgents: "Agents (0 = off)",
   swarmWindowSeconds: "Seconds",
+  anchorEvery: "Entries",
+  preflightWindowMinutes: "Minutes",
+  gatewayAllowanceUsd: "USD",
 };
+
+/** On/off settings: the proposal form offers On and Off instead of a number. */
+const SETTING_SWITCH = {
+  requireGvisor: "On: refuse boxes on plain Docker",
+  learnFromChoices: "On: a Deny becomes a block, repeated Approves are suggested as rules",
+  preflight: "On: three Drills for every new agent",
+} satisfies Partial<Record<SettingName, string>>;
+const isSwitch = (n: SettingName): n is keyof typeof SETTING_SWITCH => n in SETTING_SWITCH;
 
 /**
  * One org setting's current value, shown in the card it governs. Changing it is a proposal like any
@@ -1358,7 +1369,7 @@ function Overview({ ctx, wallet, refreshWallet, go }: { ctx: Ctx; wallet: Wallet
   ];
   return (
     <div className="stack">
-      {adding && wallet && <AddFunds wallet={wallet} run={ctx.run} onClose={() => setAdding(false)} onDone={refreshWallet} />}
+      {adding && wallet && <AddFunds ctx={ctx} wallet={wallet} run={ctx.run} onClose={() => setAdding(false)} onDone={refreshWallet} />}
       <div className="tiles">
         <div className={`tile rise ${waitingOnMe ? "attention" : ""}`} style={st(0)}><div className="k">Waiting for you <Icon name="approvals" size={14} /></div><div className="v heading-gradient">{waitingOnMe}</div><div className="note">{waitingOnMe ? "to approve" : "all clear"}</div></div>
         <div className="tile rise" style={st(1)}><div className="k">Wallet (USDC) <Icon name="wallet" size={14} /></div><div className="v heading-gradient">{wallet ? usd(Number(wallet.usdc)) : "…"}</div><div className="note wallet-note"><span>Gateway {wallet?.gateway == null ? "—" : usd(Number(wallet.gateway))}</span>{wallet && ctx.can("wallet") && <button type="button" className="add-funds" onClick={() => setAdding(true)}><Icon name="plus" size={12} /> Add funds</button>}</div></div>
@@ -2189,13 +2200,18 @@ function Policy({ ctx, part }: { ctx: Ctx; part: "list" | "propose" }) {
             { value: "set:holdSeconds", label: "Approval hold", group: "Settings" },
             { value: "set:swarmAgents", label: "Swarm Stopper", group: "Settings" },
             { value: "set:swarmWindowSeconds", label: "Swarm Stopper window", group: "Settings" },
+            { value: "set:preflight", label: "Pre-flight Drill", group: "Settings" },
+            { value: "set:preflightWindowMinutes", label: "Pre-flight pass window", group: "Settings" },
+            { value: "set:learnFromChoices", label: "Learns From Your Choices", group: "Settings" },
+            { value: "set:anchorEvery", label: "Anchor the log every", group: "Settings" },
+            { value: "set:gatewayAllowanceUsd", label: "Gateway allowance", group: "Settings" },
             ...(s.settings.gvisorAvailable || s.settings.values.requireGvisor === 1 ? [{ value: "set:requireGvisor", label: "Require gVisor", group: "Settings" }] : []),
           ]} />
         </label>
-        {settingName && (settingName === "requireGvisor" ? (
-          <label className="field"><span>Require gVisor</span>
-            <Select label="Require gVisor" value={extra.setting} onChange={(v) => setExtra({ ...extra, setting: v })}
-              options={[{ value: "", label: "Choose…" }, { value: "1", label: "On: refuse boxes on plain Docker" }, { value: "0", label: "Off" }]} />
+        {settingName && (isSwitch(settingName) ? (
+          <label className="field"><span>{SETTINGS[settingName].label}</span>
+            <Select label={SETTINGS[settingName].label} value={extra.setting} onChange={(v) => setExtra({ ...extra, setting: v })}
+              options={[{ value: "", label: "Choose…" }, { value: "1", label: SETTING_SWITCH[settingName] }, { value: "0", label: "Off" }]} />
           </label>
         ) : (
           <label className="field"><span>{SETTING_FIELD[settingName]}</span>
@@ -2365,7 +2381,7 @@ function Activity({ ctx, log }: { ctx: Ctx; log: LogEntry[] }) {
         </div>
       )}
       <div className="log-foot">
-        <span className={s.log.verified ? "" : "bad-text"}><span className="sigdot" /> {s.log.length} entries · ed25519-signed &amp; hash-chained · {s.log.verified ? "verified" : `TAMPERED at ${s.log.brokenAt}`} · {anchored} anchored on Dharma</span>
+        <span className={s.log.verified ? "" : "bad-text"}><span className="sigdot" /> {s.log.length} entries · ed25519-signed &amp; hash-chained · {s.log.verified ? "verified" : `TAMPERED at ${s.log.brokenAt}`} · {anchored} anchored on Dharma, every <SettingValue ctx={ctx} name="anchorEvery" /></span>
         <span>head {short(s.log.head)}</span>
       </div>
       </FoldBody>
@@ -2869,6 +2885,10 @@ function Drills({ ctx, switcher }: { ctx: Ctx; switcher?: ReactNode }) {
   return (
     <div className="card">
       <ToolHead title="Drills" switcher={switcher} note={<span className="sub">A fake email that tries to trick the agent into acting.</span>} />
+      <p className="pad muted small" style={{ margin: 0 }}>
+        Random Drills: <SettingValue ctx={ctx} name="drillsPerDay" />, passed if ignored for <SettingValue ctx={ctx} name="drillWindowMinutes" />.
+        Pre-flight for new agents: <SettingValue ctx={ctx} name="preflight" />{s.settings.values.preflight === 1 && <>, passed if ignored for <SettingValue ctx={ctx} name="preflightWindowMinutes" /></>}.
+      </p>
       <form className="inline-form" onSubmit={runTest}>
         <label className="field"><span>Agent</span>
           <Select label="Agent" value={test.agentId} onChange={(v) => setTest({ ...test, agentId: v })} options={active.map((a) => ({ value: a.id, label: a.name }))} />
@@ -2992,9 +3012,11 @@ function Learned({ ctx }: { ctx: Ctx }) {
   const L = s.learned;
   const proposing = (id: string) => s.policy!.proposals.some((g) => g.change?.id === id && (g.status === "open" || g.status === "queued"));
   const who = (name: string | null, addr: string) => name ?? short(addr);
-  if (!L.precedents.length && !L.blocks.length && !L.allows.length) return null;
+  const on = s.settings.values.learnFromChoices === 1;
+  if (on && !L.precedents.length && !L.blocks.length && !L.allows.length) return null;
   return (
-    <FoldCard id="learned" title="Learned from your choices">
+    <FoldCard id="learned" title="Learned from your choices" sub={<span className="sub settings-line">Learning: <SettingValue ctx={ctx} name="learnFromChoices" /></span>}>
+      {!on && <p className="pad muted small" style={{ margin: 0 }}>Off: every decision stays a member's, and Karuna adapts nothing from them.</p>}
       {L.suggestions.map((x) => (
         <div className="tr learn-tr" key={x.id}>
           <Badge v="approval">suggestion</Badge>
@@ -3217,30 +3239,6 @@ function WakePhrase({ top }: { top?: boolean }) {
   );
 }
 
-/**
- * Learns From Your Choices, on or off for the whole team. A setting on Dharma like the others, so
- * flipping it is a proposal the team votes on (no one turns a safety net off alone).
- */
-function LearningCard({ ctx }: { ctx: Ctx }) {
-  const { s, busy } = ctx;
-  const on = s.settings.values.learnFromChoices === 1;
-  const pending = s.policy?.proposals.find((g) => (g.status === "open" || g.status === "queued") && g.change?.op === "AddRule" && g.change.scope === "setting:learnFromChoices");
-  const to = pending && pending.change?.op === "AddRule" ? pending.change.target === "1" : null;
-  return (
-    <div className="card">
-      <div className="hd"><h2>Learning</h2></div>
-      <div className="pad settings-list">
-        <label className={`switch-row${pending ? " off" : ""}`}>
-          <b>Learn from your decisions</b>
-          <input type="checkbox" role="switch" checked={to ?? on} disabled={busy || !!pending || !ctx.can("propose")}
-            onChange={(e) => void ctx.change(settingChange("learnFromChoices", e.target.checked ? 1 : 0))} />
-        </label>
-        {pending && <p className="muted small">Your team is voting to turn this {to ? "on" : "off"}.</p>}
-      </div>
-    </div>
-  );
-}
-
 function Appearance({ ctx }: { ctx: Ctx }) {
   const theme = useThemePref();
   const [island, setIsland] = useState(getIslandEnabled);
@@ -3299,7 +3297,6 @@ function Appearance({ ctx }: { ctx: Ctx }) {
           </div>
         </div>
       )}
-      <LearningCard ctx={ctx} />
     </div>
   );
 }

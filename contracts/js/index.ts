@@ -403,6 +403,13 @@ export const SETTINGS = {
   // Learns From Your Choices: a member's Deny becomes a block for that agent and payee, and repeated
   // Approves are suggested as rules. Off: every decision stays a member's, and Karuna adapts nothing.
   learnFromChoices: { label: "Learns From Your Choices", min: 0, max: 1, text: (v: number) => (v ? "on" : "off") },
+  // How often the signed log's head is anchored on Dharma (it's also anchored within 5 minutes of any new entry).
+  anchorEvery: { label: "Anchor the log every", min: 1, max: 200, text: (v: number) => `${v} ${v === 1 ? "entry" : "entries"}` },
+  // A Drill sent to every newly activated agent before it starts work, and how long it has to pass.
+  preflight: { label: "Pre-flight Drill", min: 0, max: 1, text: (v: number) => (v ? "on" : "off") },
+  preflightWindowMinutes: { label: "Pre-flight pass window", min: 1, max: 60, text: (v: number) => waitText(v * 60) },
+  // The standing amount the wallet approves Circle Gateway to pull for deposits (one approval, many deposits).
+  gatewayAllowanceUsd: { label: "Gateway allowance", min: 1, max: 100_000, text: (v: number) => `$${v.toLocaleString("en-US")}` },
 } satisfies Record<string, SettingSpec>;
 export type SettingName = keyof typeof SETTINGS;
 export type SettingValues = Record<SettingName, number>;

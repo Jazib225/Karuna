@@ -14,7 +14,7 @@ import {
 } from "@prekaruna/engine";
 import {
   DHARMA_ABI, Kind, LEVEL_UP_STREAK, actionTypedData, decodeChange, describeChange, encodeChange, levelLabel, levelUpEligibility, opName,
-  escrowCancelTypedData, escrowRef, paymentDecisionTypedData, toBytes32, toMicro, waitText, isSettingName, parseSetting, type SettingValues,
+  escrowCancelTypedData, escrowRef, paymentDecisionTypedData, toBytes32, toMicro, waitText, isSettingName, parseSetting, type SettingName, type SettingValues,
   type AgentRecord, type Change,
   ADMIN_ROLE, MEMBER_ROLE, VIEWER_ROLE, PERMISSIONS, PERMISSION_BITS, ALL_PERMISSIONS, consoleSessionTypedData, permissionList, roleKey, roleNumber,
   isRoleOp, DELETE_ROLE, ROLE_DEFAULT, ROLE_MEMBER, type Permission, type RoleDef, type Structure,
@@ -229,16 +229,19 @@ export interface GatekeeperDeps {
   now?: () => Date;
   timelockSeconds?: number; // for new Dharma deployments: the normal wait
   coreTimelockSeconds?: number; // …and the wait for core changes (default 24 h)
-  anchorEvery?: number; // anchor the log after this many new entries…
+  // The defaults below apply until the team votes a setting (see SETTINGS); main.ts passes fixed
+  // values, so a team setting only ever changes through a proposal.
+  anchorEvery?: number; // anchor the log after this many new entries (Anchor the log every)…
   anchorMaxAgeMs?: number; // …or when unanchored entries are this old
   shieldTestsPerDay?: number; // Auto-Shield: random tests per active agent per day (0 = off)
   shieldWindowMs?: number; // a test nobody acted on within this window counts as passed
   preflightWindowMs?: number; // a pre-flight Drill nobody acted on within this window counts as passed (default 2 min)
-  preflight?: boolean; // send each newly activated agent a pre-flight (main.ts turns it on; KARUNA_PREFLIGHT=0 turns it off)
+  preflight?: boolean; // send each newly activated agent a pre-flight (the Pre-flight Drill setting's default)
   swarmAgents?: number; // Swarm Stopper: this many agents on one new target…
   swarmWindowMs?: number; // …within this window freezes everyone
+  gatewayAllowanceUsd?: number; // the standing Gateway approval (Gateway allowance; default $100)
   secrets?: SecretStore; // the org's API keys; only the egress proxy ever sees values
-  requireSandbox?: boolean; // agent tokens only work from inside a Karuna sandbox (unless voted otherwise)
+  requireSandbox?: boolean; // agent tokens only work from inside a Karuna sandbox (always on in main.ts; tests may leave it off)
   requireIsolation?: "gvisor" | "docker"; // refuse runs weaker than this (default for the Require gVisor setting)
   gvisorAvailable?: boolean; // gVisor (runsc) is installed for Docker on this machine
   connectors?: ConnectorClients; // MCP clients for the team's connectors (tests pass a fake)
@@ -687,7 +690,12 @@ export class Gatekeeper extends EventEmitter {
 
   /** The org's settings: the newest active `setting:<name>` rule on Dharma for each, else this Gatekeeper's default. */
   settings(): SettingValues {
-    const out = this.settingDefaults();
+    return { ...this.settingDefaults(), ...this.votedSettings() };
+  }
+
+  /** Only the settings the team has voted (the newest active `setting:<name>` rule for each). */
+  private votedSettings(): Partial<SettingValues> {
+    const out: Partial<SettingValues> = {};
     for (const r of this.policy?.rules ?? []) {
       // Org-wide rules only: Dharma v5 lets the Gatekeeper add one agent's approval rule at once,
       // so an agent-scoped "setting" must never change the org's settings.
@@ -700,7 +708,11 @@ export class Gatekeeper extends EventEmitter {
     return out;
   }
 
-  /** What applies before the team votes a setting: this Gatekeeper's .env values. */
+  private votedSetting(name: SettingName): number | null {
+    return this.votedSettings()[name] ?? null;
+  }
+
+  /** What applies before the team votes a setting: Karuna's defaults (fixed in main.ts, not read from .env). */
   settingDefaults(): SettingValues {
     return {
       drillsPerDay: this.deps.shieldTestsPerDay ?? 0,
@@ -710,6 +722,10 @@ export class Gatekeeper extends EventEmitter {
       swarmWindowSeconds: Math.round((this.deps.swarmWindowMs ?? 60_000) / 1000),
       requireGvisor: this.deps.requireIsolation === "gvisor" ? 1 : 0,
       learnFromChoices: 1,
+      anchorEvery: this.deps.anchorEvery ?? 20,
+      preflight: this.deps.preflight ? 1 : 0,
+      preflightWindowMinutes: Math.round((this.deps.preflightWindowMs ?? 2 * 60_000) / 60_000),
+      gatewayAllowanceUsd: this.deps.gatewayAllowanceUsd ?? 100,
     };
   }
 
@@ -726,7 +742,7 @@ export class Gatekeeper extends EventEmitter {
     if (this.walletUsd !== null && amountUsd > this.walletUsd) throw new GatekeeperError(`The wallet holds ${usd(this.walletUsd)}; enter that or less`);
     let txRef: string;
     try {
-      ({ txRef } = await this.deps.wallet.depositGateway(from, amountUsd));
+      ({ txRef } = await this.deps.wallet.depositGateway(from, amountUsd, this.settings().gatewayAllowanceUsd));
     } catch (e) {
       throw new GatekeeperError(`Gateway deposit failed: ${scrub(e)}. Check the Gateway balance before trying again.`, 502);
     }
@@ -891,7 +907,7 @@ export class Gatekeeper extends EventEmitter {
     if (!p) return;
     const unanchored = this.log.length - p.logLength;
     if (unanchored <= 0) return;
-    const every = this.deps.anchorEvery ?? 20;
+    const every = this.settings().anchorEvery;
     const maxAge = this.deps.anchorMaxAgeMs ?? 5 * 60_000;
     if (unanchored < every && Date.now() - this.lastAnchorTry < maxAge) return;
     this.lastAnchorTry = Date.now();
@@ -2127,7 +2143,7 @@ export class Gatekeeper extends EventEmitter {
   get holdMs() {
     return this.settings().holdSeconds * 1000;
   }
-  /** This Gatekeeper's default hold (KARUNA_HOLD_SECONDS), used until the team votes a different one. */
+  /** This Gatekeeper's default hold, used until the team votes a different one. */
   set holdMs(ms: number) {
     this.baseHoldMs = ms;
   }
@@ -3570,7 +3586,7 @@ export class Gatekeeper extends EventEmitter {
     const fresh = ids.filter((id) => !seen.has(id));
     if (!fresh.length) return false;
     this.state.seenAgents = [...seen, ...fresh];
-    if (!this.deps.preflight) return true;
+    if (!this.settings().preflight) return true;
     for (const id of fresh) {
       // A coding agent has no Karuna inbox: Drills sent there test nothing.
       if (this.inboxless(id)) continue;
@@ -3754,7 +3770,8 @@ export class Gatekeeper extends EventEmitter {
     const set = this.settings();
     const window = set.drillWindowMinutes * 60_000;
     let dirty = false;
-    const preflightWindow = this.deps.preflightWindowMs ?? 2 * 60_000;
+    // A test may set the default to a few ms; a voted window is whole minutes.
+    const preflightWindow = this.votedSetting("preflightWindowMinutes") !== null ? set.preflightWindowMinutes * 60_000 : (this.deps.preflightWindowMs ?? 2 * 60_000);
     for (const t of this.state.tests) {
       if (t.status !== "pending") continue;
       const readAt = this.state.inbox.find((m) => m.id === t.messageId)?.readAt;

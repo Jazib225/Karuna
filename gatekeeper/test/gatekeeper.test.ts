@@ -67,7 +67,9 @@ class FakeWallet implements WalletBackend {
   async listWallets() {
     return [];
   }
-  async depositGateway(_f: string, amountUsd: number) {
+  allowances: number[] = [];
+  async depositGateway(_f: string, amountUsd: number, allowanceUsd?: number) {
+    if (allowanceUsd !== undefined) this.allowances.push(allowanceUsd);
     this.paid.push({ kind: "gateway", amount: amountUsd, to: "gateway" });
     return { txRef: "0xdeposit", raw: {} };
   }
@@ -326,6 +328,26 @@ describe("settings: voted on Dharma like any rule", () => {
     await propose(alice, settingChange("drillsPerDay", 1));
     await waitTimelock();
     expect(gk.snapshot().shield.testsPerDay).toBe(1);
+  }, 60_000);
+
+  it("anchoring, pre-flight, the Gateway allowance and learning are team settings changed by a vote", async () => {
+    expect(gk.settings()).toMatchObject({ anchorEvery: 1000, preflight: 0, gatewayAllowanceUsd: 100, learnFromChoices: 1 });
+    expect(describeChange(settingChange("anchorEvery", 5))).toBe("Set anchor the log every to 5 entries");
+    expect(describeChange(settingChange("gatewayAllowanceUsd", 250))).toBe("Set gateway allowance to $250");
+    expect(() => settingChange("anchorEvery", 0)).toThrow(/1 to 200/);
+    expect(() => settingChange("preflight", 2)).toThrow(/0 to 1/);
+
+    gk.walletUsd = 10;
+    await gk.depositGateway(1);
+    await propose(alice, settingChange("gatewayAllowanceUsd", 250));
+    await propose(alice, settingChange("anchorEvery", 5));
+    await propose(alice, settingChange("preflight", 1));
+    await propose(alice, settingChange("learnFromChoices", 0));
+    expect(gk.settings().anchorEvery).toBe(1000); // not until the votes pass
+    await waitTimelock();
+    expect(gk.settings()).toMatchObject({ anchorEvery: 5, preflight: 1, gatewayAllowanceUsd: 250, learnFromChoices: 0 });
+    await gk.depositGateway(1);
+    expect(wallet.allowances).toEqual([100, 250]);
   }, 60_000);
 
   it("Require gVisor, once voted on, refuses boxes that run on plain Docker", async () => {
