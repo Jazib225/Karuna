@@ -12,7 +12,7 @@ import { Relay, consoleServer, scrub, webhookServer } from "./relay.ts";
 import { RecordBook } from "./records.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-loadEnv({ path: resolve(here, "../../.env"), quiet: true });
+loadEnv({ path: process.env.KARUNA_ENV_FILE ?? resolve(here, "../../.env"), quiet: true });
 
 const port = Number(process.env.RELAY_PORT ?? 8790);
 const webhookPort = Number(process.env.RELAY_WEBHOOK_PORT ?? 8791);
@@ -56,7 +56,7 @@ const post = (path: string, body: unknown) =>
     headers: { "content-type": "application/json", "x-karuna-console-token": consoleToken() },
     body: JSON.stringify(body),
   });
-const records = new RecordBook(resolve(here, "../.records.json"));
+const records = new RecordBook(process.env.KARUNA_RELAY_RECORDS ?? resolve(here, "../.records.json"));
 const relay = new Relay({
   securityToken: process.env.QUICKNODE_SECURITY_TOKEN || undefined,
   client,

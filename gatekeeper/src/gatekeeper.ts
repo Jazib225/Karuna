@@ -1402,6 +1402,12 @@ export class Gatekeeper extends EventEmitter {
     return this.deps.chatUrl ? this.deps.chatUrl.replace(/\/+$/, "").replace(/\/mcp$/, "") : null;
   }
 
+  /** A new public address (the console's tunnel started), or none (it stopped). Invite links and the
+   *  chat-app address follow it at once. */
+  setPublicUrl(url: string | null) {
+    this.deps.chatUrl = url ?? undefined;
+  }
+
   private inviteLink(code: string) {
     return `${this.publicUrl}/invite/${code}`;
   }
@@ -1413,7 +1419,7 @@ export class Gatekeeper extends EventEmitter {
     if (!Number.isInteger(days) || days < 1 || days > 30) throw new GatekeeperError("An invite link can last 1 to 30 days");
     if (!Number.isInteger(uses) || uses < 1 || uses > 50) throw new GatekeeperError("An invite link can be used 1 to 50 times");
     this.requireReady();
-    if (!this.publicUrl) throw new GatekeeperError("Invite links need Karuna's public address. Set KARUNA_CHAT_URL to your tunnel's https address and restart the Gatekeeper.", 409);
+    if (!this.publicUrl) throw new GatekeeperError("Invite links need Karuna's public address: turn invite links on first.", 409);
     const now = this.now();
     const active = (this.org.invites ?? []).filter((i) => this.inviteOpen(i));
     if (active.length >= 20) throw new GatekeeperError("You have 20 open invite links. Revoke one first.", 409);

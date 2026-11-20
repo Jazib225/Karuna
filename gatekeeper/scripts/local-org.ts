@@ -81,7 +81,7 @@ const gk = new Gatekeeper({
   store, wallet, client, secrets, timelockSeconds: 0,
   writerFor: () => new ViemChainWriter(orgWallet, client),
   escrow: new ViemEscrow(createWalletClient({ chain, account: relayer, transport: http(RPC) }), client, usdc),
-  undo: runnerUndo(ROOT),
+  undo: runnerUndo({ repoRoot: ROOT }),
   requireSandbox: true,
   preflightWindowMs: 5 * 60_000, // team settings: change them by proposal in the console
   preflight: true,

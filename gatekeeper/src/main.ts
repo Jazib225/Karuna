@@ -10,6 +10,8 @@ import { CircleCliWallet } from "./wallet.ts";
 import { Gatekeeper } from "./gatekeeper.ts";
 import { agentApi, consoleApi } from "./server.ts";
 import { Voice, voiceConfigFromEnv } from "./voice.ts";
+import { VoiceStore } from "./voice-setup.ts";
+import { Tunnel, findCloudflared } from "./tunnel.ts";
 import { publicApi } from "./chat.ts";
 import { Accounts } from "./accounts.ts";
 import { CircleChainWriter, RelayedChainWriter, ViemChainWriter, publicClient, scrub } from "./chain.ts";
@@ -24,7 +26,10 @@ import { hostname } from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 
 const here = dirname(fileURLToPath(import.meta.url));
-loadEnv({ path: resolve(here, "../../.env"), quiet: true });
+// The packaged desktop app (desktop/core) sets KARUNA_ENV_FILE, KARUNA_CORE and KARUNA_AGENT_DIR:
+// there is no repo, so runs and undo go through its own bundled runner and hosted agent.
+loadEnv({ path: process.env.KARUNA_ENV_FILE ?? resolve(here, "../../.env"), quiet: true });
+const packagedCore = process.env.KARUNA_CORE;
 
 const dataDir = resolve(process.env.KARUNA_DATA_DIR ?? resolve(here, "../data"));
 const agentPort = Number(process.env.KARUNA_AGENT_PORT ?? 8787);
@@ -78,11 +83,14 @@ const gk = new Gatekeeper({
   launcher: ({ agentId, token, runId, onOutput, onExit }) => {
     const root = resolve(here, "../..");
     const win = process.platform === "win32";
-    const args = ["tsx", resolve(root, "runner/src/cli.ts"), "run", "--agent", agentId, "--gatekeeper", `http://127.0.0.1:${agentPort}`, resolve(root, "agents"), "--", "npx", "tsx", "hosted/run.ts"];
-    const p = spawn(win ? "npx.cmd" : "npx", args, {
-      env: { ...process.env, KARUNA_AGENT_TOKEN: token, KARUNA_RUN_ID: runId },
-      shell: win, windowsHide: true, stdio: ["ignore", "ignore", "pipe"],
-    });
+    const env = { ...process.env, KARUNA_AGENT_TOKEN: token, KARUNA_RUN_ID: runId };
+    const p = packagedCore
+      ? spawn(process.execPath, [packagedCore, "run", "--agent", agentId, "--gatekeeper", `http://127.0.0.1:${agentPort}`, process.env.KARUNA_AGENT_DIR!, "--", "node", "run.mjs"], {
+          env, shell: false, windowsHide: true, stdio: ["ignore", "ignore", "pipe"],
+        })
+      : spawn(win ? "npx.cmd" : "npx", ["tsx", resolve(root, "runner/src/cli.ts"), "run", "--agent", agentId, "--gatekeeper", `http://127.0.0.1:${agentPort}`, resolve(root, "agents"), "--", "npx", "tsx", "hosted/run.ts"], {
+          env, shell: win, windowsHide: true, stdio: ["ignore", "ignore", "pipe"],
+        });
     // The box's own output reaches the run through `karuna run`; here, only Karuna's own lines.
     let buf = "";
     p.stderr!.on("data", (b: Buffer) => {
@@ -98,7 +106,7 @@ const gk = new Gatekeeper({
     return () => p.kill();
   },
   // Undo a run's file changes from its snapshot on this machine (runs started here, by `karuna run`).
-  undo: runnerUndo(resolve(here, "../..")),
+  undo: runnerUndo(packagedCore ? { core: packagedCore } : { repoRoot: resolve(here, "../..") }),
 });
 gk.holdMs = 120_000; // the Approval hold until the team votes one
 const ca = new SandboxCA(dataDir);
@@ -107,8 +115,16 @@ const consoleToken = store.loadOrCreateConsoleToken();
 
 const agentServer = agentApi(gk, { proxy: egress, caPem: ca.certPem, secrets });
 agentServer.listen(agentPort, agentHost, () => console.log(`gatekeeper · agent API    http://${agentHost}:${agentPort}`));
+// Voice: an ElevenLabs key in .env, else the one a member added in the console (voice.json).
 const voice = new Voice(voiceConfigFromEnv());
-consoleApi(gk, wallet, consoleToken, secrets, ca.certPem, new Accounts(store), voice).listen(consolePort, "127.0.0.1", () =>
+const voiceStore = new VoiceStore(dataDir);
+const savedVoice = voice.fromEnv ? null : voiceStore.load();
+if (savedVoice) voice.configure(savedVoice);
+// Invite links' public address: a quick tunnel the console turns on (or KARUNA_CHAT_URL, kept as is).
+const tunnel = new Tunnel(findCloudflared(), Number(process.env.KARUNA_PUBLIC_PORT ?? 8792), (url) => gk.setPublicUrl(url), process.env.KARUNA_CHAT_URL || null);
+process.on("exit", () => tunnel.stop());
+for (const sig of ["SIGINT", "SIGTERM", "SIGBREAK"] as const) process.on(sig, () => process.exit(0));
+consoleApi(gk, wallet, consoleToken, secrets, ca.certPem, new Accounts(store), voice, voiceStore, tunnel).listen(consolePort, "127.0.0.1", () =>
   console.log(`gatekeeper · console API  http://127.0.0.1:${consolePort}  (data: ${dataDir})`),
 );
 {

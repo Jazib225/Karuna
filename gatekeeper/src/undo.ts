@@ -5,11 +5,12 @@ import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import type { GatekeeperDeps } from "./gatekeeper.ts";
 
-export function runnerUndo(repoRoot: string): NonNullable<GatekeeperDeps["undo"]> {
+/** `repoRoot`: run the runner's source with tsx. `core`: the packaged app's bundle, which is the runner too. */
+export function runnerUndo(from: { repoRoot: string } | { core: string }): NonNullable<GatekeeperDeps["undo"]> {
   return ({ runId, path }) => new Promise((done) => {
     // Node runs tsx directly: no shell, so a file path the box reported can never become a command.
-    const tsx = createRequire(import.meta.url).resolve("tsx/cli");
-    const args = [tsx, resolve(repoRoot, "runner/src/cli.ts"), "undo", "--run", runId, ...(path ? ["--path", path] : [])];
+    const cli = "core" in from ? [from.core] : [createRequire(import.meta.url).resolve("tsx/cli"), resolve(from.repoRoot, "runner/src/cli.ts")];
+    const args = [...cli, "undo", "--run", runId, ...(path ? ["--path", path] : [])];
     const p = spawn(process.execPath, args, { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     let err = "";

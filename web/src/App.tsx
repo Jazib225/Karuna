@@ -2586,6 +2586,14 @@ function InviteLinks({ ctx }: { ctx: Ctx }) {
     setCopied(link);
     setTimeout(() => setCopied((c) => (c === link ? null : c)), 2000);
   };
+  // Karuna's public address: a tunnel the Gatekeeper opens on request (KARUNA_CHAT_URL when set).
+  type TunnelStatus = { available: boolean; external: boolean; running: boolean; starting: boolean; url: string | null; error: string | null };
+  const [tunnel, setTunnel] = useState<TunnelStatus | null>(null);
+  useEffect(() => {
+    if (!PREVIEW) api<TunnelStatus>("/tunnel").then(setTunnel).catch(() => setTunnel(null));
+  }, [s.publicUrl]);
+  const turnOn = () => run(async () => setTunnel(await api<TunnelStatus>("/tunnel/start", {})), "Invite links are on");
+  const turnOff = () => run(async () => setTunnel(await api<TunnelStatus>("/tunnel/stop", {})), "Invite links are off");
   const create = () => run(async () => { const r = await api<{ link: string }>("/invites", limits); copy(r.link); }, "Invite link created and copied");
   const revoke = async (code: string) => {
     if (await askConfirm("Revoke this invite link? Anyone who hasn't used it yet won't be able to. Requests already sent stay under Access requests.", { action: "Revoke", danger: true }))
@@ -2606,8 +2614,21 @@ function InviteLinks({ ctx }: { ctx: Ctx }) {
         )}
       </div>
       <div className="pad stack-sm">
+        {s.publicUrl && tunnel && !tunnel.external && (
+          <div className="row-form">
+            <span className="small grow muted">Public address <span className="mono">{s.publicUrl}</span>. It changes each time invite links are turned on, and links work while Karuna is open.</span>
+            <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={turnOff}>Turn off</button>
+          </div>
+        )}
         {!s.publicUrl ? (
-          <p className="muted small">Invite links need Karuna's public address (the tunnel chat apps use). Set <span className="mono">KARUNA_CHAT_URL</span> in <span className="mono">.env</span> and restart the Gatekeeper.</p>
+          tunnel?.available === false ? (
+            <p className="muted small">Invite links need a public address for this Karuna, which it opens with Cloudflare's <span className="mono">cloudflared</span>. Install it from <a className="link-u" href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/" target="_blank" rel="noreferrer">cloudflare.com</a>, then open this page again.</p>
+          ) : (
+            <div className="row-form">
+              <span className="small grow muted">{tunnel?.error ?? "Turn invite links on to give this Karuna a public address. Only invite requests and chat apps can reach it; the console stays on this computer."}</span>
+              <button type="button" className="btn btn-dark btn-sm" disabled={busy || !tunnel} onClick={turnOn}>{busy ? "Opening…" : "Turn on invite links"}</button>
+            </div>
+          )
         ) : invites.length === 0 ? (
           <p className="muted small">Send someone a link: they open Karuna on their computer, choose <b>Ask to Join</b> and paste it. Their request shows up here, and members vote to add them. Pick how long the link lasts and how many people can use it.</p>
         ) : (
@@ -2627,7 +2648,8 @@ function InviteLinks({ ctx }: { ctx: Ctx }) {
 
 function daysLeft(iso: string) {
   const h = Math.max(0, (Date.parse(iso) - Date.now()) / 3600_000);
-  return h >= 24 ? `${Math.floor(h / 24)}d left` : `${Math.max(1, Math.floor(h))}h left`;
+  // Rounded up: a 7-day link just made reads "7d left", not "6d".
+  return h > 24 ? `${Math.ceil(h / 24)}d left` : `${Math.max(1, Math.ceil(h))}h left`;
 }
 
 // ============================================================== live alerts
@@ -3267,14 +3289,57 @@ function WakePhrase({ top }: { top?: boolean }) {
   );
 }
 
+type VoiceCfg = { configured: boolean; conversation: boolean; alerts: boolean; fromEnv?: boolean; voiceId?: string | null; voiceName?: string | null };
+
+/** Voice's ElevenLabs key, kept by the Gatekeeper on this computer. Pasted once: Karuna checks it, picks
+ *  a voice and sets its voice agent up on that account. The key never comes back to the page. */
+function VoiceKey({ ctx, cfg, onChange }: { ctx: Ctx; cfg: VoiceCfg; onChange: (c: VoiceCfg) => void }) {
+  const { run, busy } = ctx;
+  const [value, setValue] = useState("");
+  const [voices, setVoices] = useState<{ id: string; name: string }[] | null>(null);
+  useEffect(() => {
+    if (cfg.configured && !cfg.fromEnv) api<{ id: string; name: string }[]>("/voice/voices").then(setVoices).catch(() => setVoices(null));
+  }, [cfg.configured, cfg.fromEnv]);
+  const done = (c: VoiceCfg) => {
+    onChange(c);
+    window.dispatchEvent(new Event("karuna:voice-config"));
+  };
+  if (cfg.fromEnv) return <p className="small muted">Uses the ElevenLabs key in this Gatekeeper's .env{cfg.voiceId ? "" : ". Add ELEVENLABS_VOICE_ID there for spoken alerts"}.</p>;
+  if (!cfg.configured) {
+    return (
+      <div className="key-ask">
+        <span className="small">
+          Talk to Karuna and hear alerts with your <a className="link-u" href="https://elevenlabs.io/app/settings/api-keys" target="_blank" rel="noreferrer">ElevenLabs API key</a>.
+          It stays with Karuna on this computer, and Karuna sets up its voice agent on your account.
+        </span>
+        <form className="row-form" onSubmit={(e) => { e.preventDefault(); void run(async () => { done(await api<VoiceCfg>("/voice/key", { apiKey: value.trim() })); setValue(""); }, "Voice is set up"); }}>
+          <input type="password" autoComplete="off" className="mono grow" aria-label="ElevenLabs API key" value={value} onChange={(e) => setValue(e.target.value)} placeholder="sk_…" />
+          <button type="submit" className="btn btn-dark btn-sm" disabled={busy || !value.trim()}>{busy ? "Setting up…" : "Save"}</button>
+        </form>
+      </div>
+    );
+  }
+  return (
+    <div className="row-form">
+      <span className="small grow">Connected to ElevenLabs</span>
+      {voices && voices.length > 0 && (
+        <Picker label="Voice" value={cfg.voiceId ?? ""} disabled={busy}
+          onChange={(id) => void run(async () => done(await api<VoiceCfg>("/voice/voice", { voiceId: id })), "Voice changed")}
+          options={[...(cfg.voiceId ? [] : [{ value: "", label: "Choose a voice" }]), ...voices.map((v) => ({ value: v.id, label: v.name }))]} />
+      )}
+      <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void run(async () => done(await api<VoiceCfg>("/voice/forget", {})), "ElevenLabs key removed")}>Remove key</button>
+    </div>
+  );
+}
+
 function Appearance({ ctx }: { ctx: Ctx }) {
   const theme = useThemePref();
   const [island, setIsland] = useState(getIslandEnabled);
   const [voice, setVoice] = useState(getVoiceEnabled);
   const [readAloud, setRead] = useState(getReadAloud);
-  const [voiceCfg, setVoiceCfg] = useState<{ configured: boolean; conversation: boolean; alerts: boolean } | null>(null);
+  const [voiceCfg, setVoiceCfg] = useState<VoiceCfg | null>(null);
   useEffect(() => {
-    api<{ configured: boolean; conversation: boolean; alerts: boolean }>("/voice/config").then(setVoiceCfg).catch(() => setVoiceCfg(null));
+    api<VoiceCfg>("/voice/config").then(setVoiceCfg).catch(() => setVoiceCfg(null));
   }, []);
   const options: { v: ThemePref; label: string; note: string }[] = [
     { v: "system", label: "System", note: "Follows your computer" },
@@ -3303,7 +3368,7 @@ function Appearance({ ctx }: { ctx: Ctx }) {
               <b>Show the island</b>
               <input type="checkbox" role="switch" checked={island} onChange={(e) => { setIsland(e.target.checked); setIslandEnabled(e.target.checked); }} />
             </label>
-            <label className={`switch-row${!island || !voiceCfg?.conversation ? " off" : ""}`} title={voiceCfg && !voiceCfg.conversation ? "Voice isn't set up on the Gatekeeper (see README → Karuna Voice)" : undefined}>
+            <label className={`switch-row${!island || !voiceCfg?.conversation ? " off" : ""}`} title={voiceCfg && !voiceCfg.conversation ? "Add your ElevenLabs API key under Voice below" : undefined}>
               <b>Voice</b>
               <input type="checkbox" role="switch" disabled={!island || !voiceCfg?.conversation} checked={voice && !!voiceCfg?.conversation} onChange={(e) => { setVoice(e.target.checked); setVoiceEnabled(e.target.checked); }} />
             </label>
@@ -3317,11 +3382,12 @@ function Appearance({ ctx }: { ctx: Ctx }) {
           </div>
         </div>
       )}
-      {!IN_APP && !!voiceCfg?.conversation && (
+      {voiceCfg && !PREVIEW && (
         <div className="card">
-          <div className="hd"><h2>Voice</h2></div>
+          <div className="hd"><h2>Voice</h2><span className="sub">{voiceCfg.conversation ? (voiceCfg.voiceName ?? "on") : "off"}</span></div>
           <div className="pad settings-list">
-            <WakePhrase top />
+            <VoiceKey ctx={ctx} cfg={voiceCfg} onChange={setVoiceCfg} />
+            {!IN_APP && voiceCfg.conversation && <WakePhrase top />}
           </div>
         </div>
       )}
@@ -3340,6 +3406,17 @@ const CHAT_OFF = [
 ] as const;
 
 /** Connect Claude chat: Karuna's address, then the built-in tools to turn off (the New agent card's "Claude chat" mode). */
+/** No public address yet: open one (the same tunnel invite links use). Chat apps reach Karuna through it. */
+function OpenPublicAddress({ ctx }: { ctx: Ctx }) {
+  const { run, busy } = ctx;
+  return (
+    <div className="row-form">
+      <span className="small grow muted">Chat apps reach this Karuna through a public address. Only the chat connector and invite requests are reachable there.</span>
+      <button type="button" className="btn btn-dark btn-sm" disabled={busy} onClick={() => run(() => api("/tunnel/start", {}), "Public address opened")}>{busy ? "Opening…" : "Open a public address"}</button>
+    </div>
+  );
+}
+
 function ChatSetup({ ctx }: { ctx: Ctx }) {
   const { s } = ctx;
   const url = s.chatUrl ?? null;
@@ -3377,7 +3454,7 @@ function ChatSetup({ ctx }: { ctx: Ctx }) {
                 <button type="button" className="btn btn-ghost btn-sm" onClick={() => { navigator.clipboard?.writeText(url); setCopied(true); }}><Icon name={copied ? "check" : "copy"} size={13} /> {copied ? "Copied" : "Copy"}</button>
               </div>
             ) : (
-              <div className="small muted">No public address yet. Point a tunnel at port 8792, set <span className="mono">KARUNA_CHAT_URL</span> to its address, and restart Karuna.</div>
+              <OpenPublicAddress ctx={ctx} />
             )}
           </div>
         </div>
@@ -3442,7 +3519,7 @@ function GrokSetup({ ctx }: { ctx: Ctx }) {
                 <button type="button" className="btn btn-ghost btn-sm" onClick={() => copy("url", url)}><Icon name={copied === "url" ? "check" : "copy"} size={13} /> {copied === "url" ? "Copied" : "Copy"}</button>
               </div>
             ) : (
-              <div className="small muted">No public address yet. Point a tunnel at port 8792, set <span className="mono">KARUNA_CHAT_URL</span> to its address, and restart Karuna.</div>
+              <OpenPublicAddress ctx={ctx} />
             )}
           </div>
         </div>
@@ -4146,13 +4223,14 @@ function LevelsCard({ ctx, onClose }: { ctx: Ctx; onClose: () => void }) {
 }
 
 /** Votes page: move an older org to the Dharma code this Karuna ships (a core change). */
-const DHARMA_LATEST = 6;
+const DHARMA_LATEST = 7;
 /** What each Dharma version adds, for the upgrade card. */
 const DHARMA_ADDS: Record<number, string> = {
   3: "trust levels, and each agent's record published onchain",
   4: "team roles: what each member may do",
   5: "safer votes: a vote can no longer undo a later automatic block, removing a member needs everyone else, and votes left open when the team changes start over",
   6: "room for new features: the rulebook's code now spans two contracts, with no change to how it works",
+  7: "a host: whoever set the org up can remove a teammate without a vote, after the core wait in public, and any member's freeze stops it",
 };
 function UpgradeCard({ ctx }: { ctx: Ctx }) {
   const { s, busy, run, me } = ctx;

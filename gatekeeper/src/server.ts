@@ -17,6 +17,8 @@ import type { EgressProxy } from "./proxy.ts";
 import type { SecretStore } from "./secrets.ts";
 import type { Accounts } from "./accounts.ts";
 import { Voice, VoiceError, heldSentence, reasonSentence, voteSentence } from "./voice.ts";
+import { listVoices, setupVoiceAgent, type VoiceStore } from "./voice-setup.ts";
+import type { Tunnel } from "./tunnel.ts";
 
 /** What the agent API needs to hand out sandbox runs. Absent = sandboxes not available. */
 export interface SandboxDeps {
@@ -207,6 +209,8 @@ export function consoleApi(
   gk: Gatekeeper, wallet: WalletBackend, consoleToken: string, secrets?: SecretStore, caPem?: string,
   accounts: Accounts | null = null,
   voice: Voice | null = null,
+  voiceStore: VoiceStore | null = null,
+  tunnel: Tunnel | null = null,
 ): Server {
   const voiceNames = () => ({
     agent: (id: string) => gk.org.labels.agents[id] ?? id.replace(/[-_]+/g, " "),
@@ -219,6 +223,34 @@ export function consoleApi(
     if (!voice) throw new GatekeeperError("Voice isn't set up on this Gatekeeper.", 503);
     if (!me) throw new GatekeeperError("Sign in to the console to use voice.", 401);
     if (method === "POST" && path === "/voice/session") return (send(res, 200, await voice.conversationToken()), true);
+    // Setting voice up from the console: the member's ElevenLabs key, checked, then Karuna's agent
+    // created on that account. The key stays here (encrypted in voice.json); only the status goes back.
+    if (path === "/voice/key" || path === "/voice/voice" || path === "/voice/voices" || path === "/voice/forget") {
+      if (voice.fromEnv) throw new GatekeeperError("Voice uses the ElevenLabs key in this Gatekeeper's .env. Change it there.", 409);
+      if (!voiceStore) throw new GatekeeperError("Voice can't be set up on this Gatekeeper.", 503);
+      if (method === "GET" && path === "/voice/voices") {
+        if (!voice.config.apiKey) throw new GatekeeperError("Add an ElevenLabs API key first.", 409);
+        return (send(res, 200, await listVoices(voice.config.apiKey, voice.fetchFn)), true);
+      }
+      if (method !== "POST") return false;
+      if (path === "/voice/forget") {
+        voiceStore.clear();
+        voice.configure({ apiKey: null, agentId: null, voiceId: null });
+        return (send(res, 200, voice.status()), true);
+      }
+      const apiKey = path === "/voice/key" ? String(body.apiKey ?? "").trim() : voice.config.apiKey;
+      if (!apiKey) throw new GatekeeperError(path === "/voice/key" ? "Paste an ElevenLabs API key." : "Add an ElevenLabs API key first.", 400);
+      if (apiKey.length > 200 || /\s/.test(apiKey)) throw new GatekeeperError("That doesn't look like an ElevenLabs API key.", 400);
+      const voices = await listVoices(apiKey, voice.fetchFn); // also checks the key
+      const want = path === "/voice/voice" ? String(body.voiceId ?? "") : voice.config.voiceId;
+      const pick = voices.find((v) => v.id === want) ?? (path === "/voice/voice" ? null : voices[0] ?? null);
+      if (path === "/voice/voice" && !pick) throw new GatekeeperError("That voice isn't on this ElevenLabs account.", 400);
+      const agentId = await setupVoiceAgent(apiKey, { agentId: voice.config.agentId, voiceId: pick?.id ?? null }, voice.fetchFn);
+      const saved = { apiKey, agentId, voiceId: pick?.id ?? null, voiceName: pick?.name ?? null };
+      voiceStore.save(saved);
+      voice.configure(saved);
+      return (send(res, 200, voice.status()), true);
+    }
     if (method === "POST" && path === "/voice/speak") {
       // Only Karuna's own sentence for one held request or one open vote: never free text.
       const keys = Object.keys(body).filter((k) => body[k] !== undefined);
@@ -423,6 +455,19 @@ export function consoleApi(
       if (method === "POST" && (m = path.match(/^\/sandbox\/([\w-]+)\/stop$/))) return send(res, 200, (gk.stopSession(m[1]), { ok: true }));
       if (method === "POST" && path === "/pause") return send(res, 200, { paused: gk.pause(String(body.by ?? "console")) });
       if (method === "POST" && path === "/resume") return send(res, 200, { paused: gk.resume(String(body.by ?? "console")) });
+      // Karuna's public address (a tunnel to the public port), for invite links and chat apps.
+      if (method === "GET" && path === "/tunnel") return send(res, 200, tunnel ? tunnel.status() : { available: false, external: false, running: !!gk.publicUrl, starting: false, url: gk.publicUrl, error: null });
+      if (method === "POST" && (path === "/tunnel/start" || path === "/tunnel/stop")) {
+        if (!tunnel) return send(res, 501, { error: "This Gatekeeper can't open a public address." });
+        if (!me) throw new GatekeeperError("Sign in to the console first.", 401);
+        if (path === "/tunnel/stop") return send(res, 200, (tunnel.stop(), tunnel.status()));
+        try {
+          await tunnel.start();
+        } catch (e) {
+          return send(res, 502, { error: e instanceof Error ? e.message : String(e) });
+        }
+        return send(res, 200, tunnel.status());
+      }
       // Invite links: make and revoke yours; use someone else's (this Gatekeeper reaches their Karuna).
       if (method === "POST" && path === "/invites") return send(res, 200, gk.createInvite({ days: body.days, uses: body.uses }));
       if (method === "DELETE" && (m = path.match(/^\/invites\/(inv_[\w-]+)$/))) return send(res, 200, (gk.revokeInvite(m[1]), { ok: true }));

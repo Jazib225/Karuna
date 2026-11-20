@@ -72,7 +72,11 @@ function titleOf(a: HeldRequest, s: Snapshot): string {
 export function TopVoice({ s, me }: { s: Snapshot; me: Signer }) {
   const [cfg, setCfg] = useState<{ conversation: boolean } | null>(null);
   useEffect(() => {
-    api<{ conversation: boolean }>("/voice/config").then(setCfg).catch(() => setCfg(null));
+    const load = () => void api<{ conversation: boolean }>("/voice/config").then(setCfg).catch(() => setCfg(null));
+    load();
+    // Set up or removed in Preferences → Voice: pick it up without a reload.
+    window.addEventListener("karuna:voice-config", load);
+    return () => window.removeEventListener("karuna:voice-config", load);
   }, []);
   const [tick, setTick] = useState(0);
   const sRef = useRef(s);

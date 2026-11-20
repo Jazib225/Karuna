@@ -168,22 +168,37 @@ async function elevenReason(r: Response): Promise<string> {
 }
 
 export class Voice {
-  constructor(readonly config: VoiceConfig, private readonly fetchFn: Fetch = fetch) {}
+  /** The voice's name, when it was picked in the console. */
+  voiceName: string | null = null;
+  /** True when the key comes from the Gatekeeper's .env (then the console can't replace it). */
+  fromEnv: boolean;
+  constructor(public config: VoiceConfig, readonly fetchFn: Fetch = fetch) {
+    this.fromEnv = !!config.apiKey;
+  }
+
+  /** Switch to a key, agent and voice set up from the console (or clear them). Takes effect at once. */
+  configure(c: { apiKey: string | null; agentId: string | null; voiceId: string | null; voiceName?: string | null }) {
+    this.config = { ...this.config, apiKey: c.apiKey, agentId: c.agentId, voiceId: c.voiceId };
+    this.voiceName = c.voiceName ?? null;
+  }
 
   /** What the console needs to show the Voice switch. */
   status() {
-    return { configured: !!this.config.apiKey, conversation: !!(this.config.apiKey && this.config.agentId), alerts: !!(this.config.apiKey && this.config.voiceId) };
+    return {
+      configured: !!this.config.apiKey, conversation: !!(this.config.apiKey && this.config.agentId), alerts: !!(this.config.apiKey && this.config.voiceId),
+      fromEnv: this.fromEnv, voiceId: this.config.voiceId, voiceName: this.voiceName,
+    };
   }
 
   private key(): string {
-    if (!this.config.apiKey) throw new VoiceError("Voice isn't set up: add ELEVENLABS_API_KEY to the Gatekeeper's .env.", 503);
+    if (!this.config.apiKey) throw new VoiceError("Voice isn't set up: add an ElevenLabs API key in Preferences → Voice.", 503);
     return this.config.apiKey;
   }
 
   /** A one-time WebRTC conversation token for the island (the key never leaves the Gatekeeper). */
   async conversationToken(): Promise<{ token: string }> {
     const key = this.key();
-    if (!this.config.agentId) throw new VoiceError("Voice isn't set up: run `pnpm --dir gatekeeper voice:agent` and add ELEVENLABS_AGENT_ID to .env.", 503);
+    if (!this.config.agentId) throw new VoiceError("Voice isn't set up: add an ElevenLabs API key in Preferences → Voice.", 503);
     const r = await this.fetchFn(`${ELEVEN_API}/v1/convai/conversation/token?agent_id=${encodeURIComponent(this.config.agentId)}`, { headers: { "xi-api-key": key } });
     if (!r.ok) throw new VoiceError(`ElevenLabs refused the conversation (${r.status})${await elevenReason(r)}`, 502);
     const j = (await r.json()) as { token?: unknown };
@@ -194,7 +209,7 @@ export class Voice {
   /** Text to speech (streaming endpoint, low-latency model), as one mp3. Only Karuna's sentences. */
   async speak(text: string): Promise<Buffer> {
     const key = this.key();
-    if (!this.config.voiceId) throw new VoiceError("Voice alerts aren't set up: add ELEVENLABS_VOICE_ID to the Gatekeeper's .env.", 503);
+    if (!this.config.voiceId) throw new VoiceError("Voice alerts need a voice: pick one in Preferences → Voice.", 503);
     const r = await this.fetchFn(`${ELEVEN_API}/v1/text-to-speech/${encodeURIComponent(this.config.voiceId)}/stream?output_format=mp3_44100_64`, {
       method: "POST",
       headers: { "xi-api-key": key, "content-type": "application/json", accept: "audio/mpeg" },

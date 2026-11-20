@@ -47,7 +47,7 @@ const fakeWallet = {
 const gk = new Gatekeeper({
   store, wallet: fakeWallet, client: {} as never, writerFor: () => ({}) as never, secrets, requireSandbox: true,
   swarmAgents: 2, swarmWindowMs: 60_000,
-  undo: runnerUndo(resolve(import.meta.dirname, "../..")),
+  undo: runnerUndo({ repoRoot: resolve(import.meta.dirname, "../..") }),
 });
 const rule = (id: string, outcome: "allow" | "deny" | "approval", scope: string, target: string, agent?: string) =>
   ({ id, outcome, core: false, builtin: false, active: true, scope, target, maxUsd: 0, agent });

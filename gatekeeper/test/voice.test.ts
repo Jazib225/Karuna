@@ -5,6 +5,10 @@ import type { AddressInfo } from "node:net";
 import { consoleApi } from "../src/server.ts";
 import { Voice, heldSentence, reasonSentence, spokenUsd, voteSentence, type VoiceConfig } from "../src/voice.ts";
 import { VOICE_TOOLS } from "../src/voice-tools.ts";
+import { VoiceStore } from "../src/voice-setup.ts";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Gatekeeper, Proposal } from "../src/gatekeeper.ts";
 import type { WalletBackend } from "../src/wallet.ts";
 
@@ -90,7 +94,7 @@ function fakeEleven() {
   return { calls, fn };
 }
 
-async function server(opts: { member?: string | null; voice?: Voice | null } = {}) {
+async function server(opts: { member?: string | null; voice?: Voice | null; store?: VoiceStore } = {}) {
   const p = held();
   const gk = {
     org: { labels: { agents: { research: "Research agent" }, payees: { [ACME]: "Acme Data" }, members: {} } },
@@ -100,7 +104,7 @@ async function server(opts: { member?: string | null; voice?: Voice | null } = {
     recentProposals: () => [p, held({ id: "p-done", status: "executed" })],
     approvalsNeeded: () => 1,
   } as unknown as Gatekeeper;
-  const srv = consoleApi(gk, {} as WalletBackend, "ctok", undefined, undefined, null, opts.voice === undefined ? null : opts.voice);
+  const srv = consoleApi(gk, {} as WalletBackend, "ctok", undefined, undefined, null, opts.voice === undefined ? null : opts.voice, opts.store ?? null);
   await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
   const call = (path: string, body?: unknown, session = "sess") =>
@@ -115,10 +119,10 @@ async function server(opts: { member?: string | null; voice?: Voice | null } = {
 describe("voice routes", () => {
   it("reports whether voice is set up", async () => {
     const s = await server({ voice: new Voice(cfg, fakeEleven().fn) });
-    expect(await (await s.call("/voice/config")).json()).toEqual({ configured: true, conversation: true, alerts: true });
+    expect(await (await s.call("/voice/config")).json()).toMatchObject({ configured: true, conversation: true, alerts: true, fromEnv: true });
     s.close();
     const off = await server({ voice: new Voice({ ...cfg, apiKey: null }, fakeEleven().fn) });
-    expect(await (await off.call("/voice/config")).json()).toEqual({ configured: false, conversation: false, alerts: false });
+    expect(await (await off.call("/voice/config")).json()).toMatchObject({ configured: false, conversation: false, alerts: false, fromEnv: false });
     off.close();
   });
 
@@ -180,7 +184,56 @@ describe("voice routes", () => {
     const noAgent = await server({ voice: new Voice({ ...cfg, agentId: null }, fakeEleven().fn) });
     const r = await noAgent.call("/voice/session", {});
     expect(r.status).toBe(503);
-    expect((await r.json()).error).toMatch(/voice:agent/);
+    expect((await r.json()).error).toMatch(/Preferences → Voice/);
     noAgent.close();
+  });
+
+  it("sets voice up from a key pasted in the console, keeping the key encrypted on this computer", async () => {
+    const calls: { method: string; url: string; body: unknown }[] = [];
+    const fn = (async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      const method = init?.method ?? "GET";
+      calls.push({ method, url: u, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      if ((init?.headers as Record<string, string>)["xi-api-key"] !== "sk_live_member") return new Response("{}", { status: 401 });
+      if (u.endsWith("/v1/voices")) return Response.json({ voices: [{ voice_id: "lib_1", name: "Library", category: "professional" }, { voice_id: "pre_1", name: "Rachel", category: "premade" }] });
+      if (u.endsWith("/v1/convai/tools") && method === "GET") return Response.json({ tools: [] });
+      if (u.endsWith("/v1/convai/tools")) return Response.json({ id: `tool_${calls.length}` });
+      if (u.endsWith("/v1/convai/agents/create")) return Response.json({ agent_id: "agent_new" });
+      if (u.includes("/v1/convai/agents/agent_new")) return Response.json({});
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+    const dir = mkdtempSync(join(tmpdir(), "karuna-voice-"));
+    const store = new VoiceStore(dir);
+    const voice = new Voice({ apiKey: null, agentId: null, voiceId: null, ttsModel: "eleven_flash_v2_5" }, fn);
+    const s = await server({ voice, store });
+
+    expect((await s.call("/voice/key", { apiKey: "wrong" })).status).toBe(400);
+    const r = await s.call("/voice/key", { apiKey: "sk_live_member" });
+    expect(await r.json()).toMatchObject({ configured: true, conversation: true, alerts: true, voiceId: "pre_1", voiceName: "Rachel" });
+    // Karuna's agent, its tools, and the premade voice (free accounts can use those through the API).
+    const created = calls.find((c) => c.url.endsWith("/agents/create"))!;
+    expect((created.body as { conversation_config: { tts: { voice_id: string } } }).conversation_config.tts.voice_id).toBe("pre_1");
+    expect(calls.filter((c) => c.url.endsWith("/v1/convai/tools") && c.method === "POST")).toHaveLength(VOICE_TOOLS.length);
+    // Stored encrypted, and readable again after a restart.
+    expect(readFileSync(join(dir, "voice.json"), "utf8")).not.toContain("sk_live_member");
+    expect(new VoiceStore(dir).load()).toEqual({ apiKey: "sk_live_member", agentId: "agent_new", voiceId: "pre_1", voiceName: "Rachel" });
+    // The key never comes back to the console.
+    expect(JSON.stringify(await (await s.call("/voice/config")).json())).not.toContain("sk_live");
+
+    expect(await (await s.call("/voice/voices")).json()).toEqual([{ id: "pre_1", name: "Rachel" }, { id: "lib_1", name: "Library" }]);
+    expect(await (await s.call("/voice/voice", { voiceId: "lib_1" })).json()).toMatchObject({ voiceId: "lib_1", voiceName: "Library" });
+    expect(calls.at(-1)).toMatchObject({ method: "PATCH", url: "https://api.elevenlabs.io/v1/convai/agents/agent_new" });
+    expect((await s.call("/voice/voice", { voiceId: "nope" })).status).toBe(400);
+
+    expect((await s.call("/voice/key", { apiKey: "sk_live_member" }, "nope")).status).toBe(401);
+    expect(await (await s.call("/voice/forget", {})).json()).toMatchObject({ configured: false });
+    expect(new VoiceStore(dir).load()).toBeNull();
+    s.close();
+  });
+
+  it("leaves a key from .env alone", async () => {
+    const s = await server({ voice: new Voice(cfg, fakeEleven().fn), store: new VoiceStore(mkdtempSync(join(tmpdir(), "karuna-voice-"))) });
+    expect((await s.call("/voice/key", { apiKey: "sk_other" })).status).toBe(409);
+    s.close();
   });
 });
