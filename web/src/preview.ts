@@ -155,8 +155,8 @@ export const previewSnapshot: Snapshot = {
     windowSeconds: 30,
   },
   settings: {
-    values: { drillsPerDay: 2, drillWindowMinutes: 30, holdSeconds: 120, swarmAgents: 3, swarmWindowSeconds: 30, requireGvisor: 0 },
-    defaults: { drillsPerDay: 2, drillWindowMinutes: 30, holdSeconds: 120, swarmAgents: 2, swarmWindowSeconds: 60, requireGvisor: 0 },
+    values: { drillsPerDay: 2, drillWindowMinutes: 30, holdSeconds: 120, swarmAgents: 3, swarmWindowSeconds: 30, requireGvisor: 0, learnFromChoices: 1 },
+    defaults: { drillsPerDay: 2, drillWindowMinutes: 30, holdSeconds: 120, swarmAgents: 2, swarmWindowSeconds: 60, requireGvisor: 0, learnFromChoices: 1 },
     gvisorAvailable: true,
   },
   roles: {

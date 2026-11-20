@@ -400,6 +400,9 @@ export const SETTINGS = {
   swarmAgents: { label: "Swarm Stopper", min: 0, max: 20, text: (v: number) => (v === 0 ? "off" : `${v} agents`) },
   swarmWindowSeconds: { label: "Swarm Stopper window", min: 10, max: 3600, text: (v: number) => waitText(v) },
   requireGvisor: { label: "Require gVisor", min: 0, max: 1, text: (v: number) => (v ? "on" : "off") },
+  // Learns From Your Choices: a member's Deny becomes a block for that agent and payee, and repeated
+  // Approves are suggested as rules. Off: every decision stays a member's, and Karuna adapts nothing.
+  learnFromChoices: { label: "Learns From Your Choices", min: 0, max: 1, text: (v: number) => (v ? "on" : "off") },
 } satisfies Record<string, SettingSpec>;
 export type SettingName = keyof typeof SETTINGS;
 export type SettingValues = Record<SettingName, number>;

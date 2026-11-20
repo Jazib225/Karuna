@@ -709,6 +709,7 @@ export class Gatekeeper extends EventEmitter {
       swarmAgents: this.deps.swarmAgents ?? 2,
       swarmWindowSeconds: Math.round((this.deps.swarmWindowMs ?? 60_000) / 1000),
       requireGvisor: this.deps.requireIsolation === "gvisor" ? 1 : 0,
+      learnFromChoices: 1,
     };
   }
 
@@ -3349,6 +3350,8 @@ export class Gatekeeper extends EventEmitter {
   private learn(p: Proposal, outcome: Precedent["outcome"], by: string) {
     const to = p.request.tool === "payment" ? p.request.to?.toLowerCase() : undefined;
     if (!to) return;
+    // The team turned learning off (Preferences): the decision stands, Karuna adapts nothing from it.
+    if (!this.settings().learnFromChoices) return;
     const amountUsd = p.payload?.amountUsd ?? p.request.amountUsd ?? 0;
     const prec: Precedent = {
       id: randomUUID(), at: this.now().toISOString(), proposalId: p.id, agentId: p.agentId, counterparty: to,
@@ -3957,7 +3960,7 @@ export class Gatekeeper extends EventEmitter {
           ...x, bandLabel: bandLabel(x.band),
           agentName: L.agent(x.agentId) ?? x.agentId, counterpartyName: this.org.labels.payees[x.counterparty] ?? null, byName: L.member(x.by) ?? x.by,
         })),
-        suggestions: pol ? suggestions(this.state.precedents, pol.rules, pol.thresholdUsd).map((x) => ({
+        suggestions: pol && this.settings().learnFromChoices ? suggestions(this.state.precedents, pol.rules, pol.thresholdUsd).map((x) => ({
           ...x, bandLabel: bandLabel(x.band), agentName: L.agent(x.agentId) ?? x.agentId, counterpartyName: this.org.labels.payees[x.counterparty] ?? null,
         })) : [],
         blocks: (pol?.rules ?? []).filter((r) => r.active && r.id.startsWith("lc-")).map((r) => ({ id: r.id, agent: r.agent ?? null, agentName: r.agent ? (L.agent(r.agent) ?? r.agent) : null, target: r.target, targetName: this.org.labels.payees[r.target] ?? null })),

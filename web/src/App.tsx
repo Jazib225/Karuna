@@ -27,7 +27,7 @@ const PAGE_OF: Record<View, Page> = {
   approvals: "activity", votes: "activity", dharma: "activity", payees: "proposals",
   keys: "agents", connectors: "agents", shield: "safety", swarm: "safety", inbox: "safety", policy: "rules",
 };
-const TITLES: Record<Page, string> = { overview: "Home", activity: "Activity", agents: "Agents", safety: "Safety", proposals: "Proposals", team: "Team", rules: "Rules", appearance: "Appearance" };
+const TITLES: Record<Page, string> = { overview: "Home", activity: "Activity", agents: "Agents", safety: "Safety", proposals: "Proposals", team: "Team", rules: "Rules", appearance: "Preferences" };
 const ICON: Record<Page, IconName> = { overview: "home", activity: "activity", agents: "agents", safety: "shield", proposals: "votes", team: "team", rules: "rules", appearance: "sun" };
 const NAV: { label: string | null; hint?: string; pages: Page[] }[] = [
   { label: null, pages: ["overview", "activity", "proposals", "agents", "safety", "team", "rules", "appearance"] },
@@ -1083,8 +1083,8 @@ function Console({ s, log, wallet, refreshWallet, run, busy, me, offline, refres
     { id: "new-rule", label: "Add a rule", hint: "Proposals", icon: "plus", keywords: "policy block allow approval english", run: () => setView("proposals") },
     { id: "new-agent", label: "Add an agent", hint: "Agents", icon: "plus", keywords: "token", run: () => setView("agents") },
     { id: "waits", label: "Change the waits", hint: "Proposals", icon: "clock", keywords: "timelock core", run: () => setView("proposals") },
-    ...(["system", "light", "dark"] as const).map((t) => ({ id: `theme-${t}`, label: `Theme: ${t === "system" ? "System" : t === "light" ? "Light" : "Dark"}`, hint: "Appearance", icon: "sun" as IconName, keywords: "dark light mode appearance", run: () => setThemePref(t) })),
-    ...(IN_APP ? [{ id: "island", label: getIslandEnabled() ? "Turn the island off" : "Turn the island on", hint: "Appearance", icon: "sun" as IconName, keywords: "notch lotus", run: () => setIslandEnabled(!getIslandEnabled()) }] : []),
+    ...(["system", "light", "dark"] as const).map((t) => ({ id: `theme-${t}`, label: `Theme: ${t === "system" ? "System" : t === "light" ? "Light" : "Dark"}`, hint: "Preferences", icon: "sun" as IconName, keywords: "dark light mode appearance preferences", run: () => setThemePref(t) })),
+    ...(IN_APP ? [{ id: "island", label: getIslandEnabled() ? "Turn the island off" : "Turn the island on", hint: "Preferences", icon: "sun" as IconName, keywords: "notch lotus", run: () => setIslandEnabled(!getIslandEnabled()) }] : []),
     { id: "sidebar", label: sideHidden ? "Pin the sidebar" : "Hide the sidebar", hint: "View", icon: sideHidden ? "pin" : "panel", keywords: "menu nav", run: toggleSide },
     ...(frozen
       ? [{ id: "unfreeze", label: "Unfreeze agents (goes to a vote)", hint: "Safety", icon: "stop" as IconName, run: () => (openUnfreeze ? setView("votes") : void ctx.change({ op: "Unfreeze" })) }]
@@ -1226,7 +1226,7 @@ function Console({ s, log, wallet, refreshWallet, run, busy, me, offline, refres
           {view === "proposals" && <div className="stack"><Policy ctx={ctx} part="propose" /><Waits ctx={ctx} /><Learned ctx={ctx} /></div>}
           {view === "rules" && <div className="stack"><Policy ctx={ctx} part="list" /><Payees ctx={ctx} /><TrustedSites ctx={ctx} /></div>}
           {view === "team" && <Team ctx={ctx} />}
-          {view === "appearance" && <Appearance />}
+          {view === "appearance" && <Appearance ctx={ctx} />}
         </div>
       </main>
     </div>
@@ -1296,6 +1296,7 @@ function AddFunds({ wallet, run, onClose, onDone }: { wallet: WalletInfo; run: R
 
 /** The proposal form's field label for each setting's value. */
 const SETTING_FIELD: Record<Exclude<SettingName, "requireGvisor">, string> = {
+  learnFromChoices: "1 = on, 0 = off",
   drillsPerDay: "Per agent per day (0 = off)",
   drillWindowMinutes: "Minutes",
   holdSeconds: "Seconds",
@@ -3216,7 +3217,31 @@ function WakePhrase({ top }: { top?: boolean }) {
   );
 }
 
-function Appearance() {
+/**
+ * Learns From Your Choices, on or off for the whole team. A setting on Dharma like the others, so
+ * flipping it is a proposal the team votes on (no one turns a safety net off alone).
+ */
+function LearningCard({ ctx }: { ctx: Ctx }) {
+  const { s, busy } = ctx;
+  const on = s.settings.values.learnFromChoices === 1;
+  const pending = s.policy?.proposals.find((g) => (g.status === "open" || g.status === "queued") && g.change?.op === "AddRule" && g.change.scope === "setting:learnFromChoices");
+  const to = pending && pending.change?.op === "AddRule" ? pending.change.target === "1" : null;
+  return (
+    <div className="card">
+      <div className="hd"><h2>Learning</h2></div>
+      <div className="pad settings-list">
+        <label className={`switch-row${pending ? " off" : ""}`}>
+          <b>Learn from your decisions</b>
+          <input type="checkbox" role="switch" checked={to ?? on} disabled={busy || !!pending || !ctx.can("propose")}
+            onChange={(e) => void ctx.change(settingChange("learnFromChoices", e.target.checked ? 1 : 0))} />
+        </label>
+        {pending && <p className="muted small">Your team is voting to turn this {to ? "on" : "off"}.</p>}
+      </div>
+    </div>
+  );
+}
+
+function Appearance({ ctx }: { ctx: Ctx }) {
   const theme = useThemePref();
   const [island, setIsland] = useState(getIslandEnabled);
   const [voice, setVoice] = useState(getVoiceEnabled);
@@ -3274,6 +3299,7 @@ function Appearance() {
           </div>
         </div>
       )}
+      <LearningCard ctx={ctx} />
     </div>
   );
 }
